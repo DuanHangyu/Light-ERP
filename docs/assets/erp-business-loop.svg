@@ -1,0 +1,85 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="620" viewBox="0 0 1400 620">
+  <defs>
+    <linearGradient id="bg2" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#f8fafc"/>
+      <stop offset="1" stop-color="#eff6ff"/>
+    </linearGradient>
+    <filter id="s" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="8" stdDeviation="10" flood-color="#0f172a" flood-opacity=".12"/>
+    </filter>
+    <style>
+      .title{font:700 32px -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;fill:#0f172a}
+      .desc{font:400 16px -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;fill:#64748b}
+      .step{font:700 17px -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;fill:#0f172a}
+      .meta{font:400 13px -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;fill:#64748b}
+      .num{font:800 20px -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;fill:white}
+      .card{fill:white;stroke:#dbeafe;filter:url(#s)}
+      .arrow{stroke:#2563eb;stroke-width:3;fill:none;marker-end:url(#arrow)}
+    </style>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#2563eb"/>
+    </marker>
+  </defs>
+  <rect width="1400" height="620" rx="30" fill="url(#bg2)"/>
+  <text x="60" y="72" class="title">订单到交付的端到端业务闭环</text>
+  <text x="60" y="106" class="desc">每一步形成单据、状态、责任人、时间和审计记录，驱动库存、成本、收率、应收应付自动更新</text>
+  <path class="arrow" d="M210 210 H330"/>
+  <path class="arrow" d="M460 210 H580"/>
+  <path class="arrow" d="M710 210 H830"/>
+  <path class="arrow" d="M960 210 H1080"/>
+  <path class="arrow" d="M1210 210 C1300 250 1300 370 1210 410"/>
+  <path class="arrow" d="M1080 410 H960"/>
+  <path class="arrow" d="M830 410 H710"/>
+  <path class="arrow" d="M580 410 H460"/>
+  <path class="arrow" d="M330 410 H210"/>
+  <g transform="translate(60 150)">
+    <rect class="card" width="150" height="120" rx="18"/>
+    <circle cx="34" cy="34" r="18" fill="#2563eb"/><text x="34" y="41" text-anchor="middle" class="num">1</text>
+    <text x="24" y="74" class="step">报价确认</text><text x="24" y="99" class="meta">销售订单入口</text>
+  </g>
+  <g transform="translate(310 150)">
+    <rect class="card" width="150" height="120" rx="18"/>
+    <circle cx="34" cy="34" r="18" fill="#0f766e"/><text x="34" y="41" text-anchor="middle" class="num">2</text>
+    <text x="24" y="74" class="step">生产指令</text><text x="24" y="99" class="meta">商务内勤下发</text>
+  </g>
+  <g transform="translate(560 150)">
+    <rect class="card" width="150" height="120" rx="18"/>
+    <circle cx="34" cy="34" r="18" fill="#7c3aed"/><text x="34" y="41" text-anchor="middle" class="num">3</text>
+    <text x="24" y="74" class="step">排产 BOM</text><text x="24" y="99" class="meta">自动生成领料</text>
+  </g>
+  <g transform="translate(810 150)">
+    <rect class="card" width="150" height="120" rx="18"/>
+    <circle cx="34" cy="34" r="18" fill="#ea580c"/><text x="34" y="41" text-anchor="middle" class="num">4</text>
+    <text x="24" y="74" class="step">仓库发料</text><text x="24" y="99" class="meta">FIFO / 替代料</text>
+  </g>
+  <g transform="translate(1060 150)">
+    <rect class="card" width="150" height="120" rx="18"/>
+    <circle cx="34" cy="34" r="18" fill="#be123c"/><text x="34" y="41" text-anchor="middle" class="num">5</text>
+    <text x="24" y="74" class="step">品控判定</text><text x="24" y="99" class="meta">入库质量闸门</text>
+  </g>
+  <g transform="translate(1060 350)">
+    <rect class="card" width="150" height="120" rx="18"/>
+    <circle cx="34" cy="34" r="18" fill="#0891b2"/><text x="34" y="41" text-anchor="middle" class="num">6</text>
+    <text x="24" y="74" class="step">成品入库</text><text x="24" y="99" class="meta">收率自动计算</text>
+  </g>
+  <g transform="translate(810 350)">
+    <rect class="card" width="150" height="120" rx="18"/>
+    <circle cx="34" cy="34" r="18" fill="#2563eb"/><text x="34" y="41" text-anchor="middle" class="num">7</text>
+    <text x="24" y="74" class="step">发货单据</text><text x="24" y="99" class="meta">送货单/对账单</text>
+  </g>
+  <g transform="translate(560 350)">
+    <rect class="card" width="150" height="120" rx="18"/>
+    <circle cx="34" cy="34" r="18" fill="#16a34a"/><text x="34" y="41" text-anchor="middle" class="num">8</text>
+    <text x="24" y="74" class="step">应收回款</text><text x="24" y="99" class="meta">账龄与余额</text>
+  </g>
+  <g transform="translate(310 350)">
+    <rect class="card" width="150" height="120" rx="18"/>
+    <circle cx="34" cy="34" r="18" fill="#4f46e5"/><text x="34" y="41" text-anchor="middle" class="num">9</text>
+    <text x="24" y="74" class="step">经营看板</text><text x="24" y="99" class="meta">实时汇总呈现</text>
+  </g>
+  <g transform="translate(60 350)">
+    <rect class="card" width="150" height="120" rx="18"/>
+    <circle cx="34" cy="34" r="18" fill="#0f172a"/><text x="34" y="41" text-anchor="middle" class="num">10</text>
+    <text x="24" y="74" class="step">审计归档</text><text x="24" y="99" class="meta">本地数据资产</text>
+  </g>
+</svg>

@@ -1,0 +1,44 @@
+# Dependencies
+node_modules/
+
+# Next.js build output
+.next/
+out/
+
+# Local runtime data and private deployment state
+data/
+.env.local
+.env*.local
+
+# Test and coverage output
+coverage/
+.playwright-mcp/
+playwright-report/
+test-results/
+
+# Logs and caches
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.turbo/
+.cache/
+
+# TypeScript incremental cache
+*.tsbuildinfo
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Generated browser validation artifacts at project root
+/*.png
+/*.jpg
+/*.jpeg
+/*.md
+
+# Generated proposal exports; keep editable source docs and docs/assets tracked
+docs/exports/

@@ -1,0 +1,67 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="820" viewBox="0 0 1400 820">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#f8fbff"/>
+      <stop offset="1" stop-color="#eef5ff"/>
+    </linearGradient>
+    <linearGradient id="core" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1d4ed8"/>
+      <stop offset="1" stop-color="#0f766e"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="10" stdDeviation="12" flood-color="#0f172a" flood-opacity=".14"/>
+    </filter>
+    <style>
+      .title{font:700 34px -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;fill:#0f172a}
+      .subtitle{font:400 17px -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;fill:#64748b}
+      .core{font:700 30px -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;fill:white}
+      .core2{font:500 16px -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;fill:#dbeafe}
+      .node-title{font:700 21px -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;fill:#0f172a}
+      .node-text{font:400 15px -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;fill:#475569}
+      .line{stroke:#93c5fd;stroke-width:3;fill:none}
+      .card{fill:white;stroke:#dbeafe;stroke-width:1.5;filter:url(#shadow)}
+      .badge{fill:#eff6ff;stroke:#bfdbfe}
+    </style>
+  </defs>
+  <rect width="1400" height="820" rx="32" fill="url(#bg)"/>
+  <text x="70" y="72" class="title">轻量级定制生产流转 ERP 总体能力图</text>
+  <text x="70" y="106" class="subtitle">围绕销售订单主线，将业务、生产、仓储、品控、采购、财务和管理看板统一为本地私有化经营系统</text>
+  <rect x="520" y="302" width="360" height="190" rx="28" fill="url(#core)" filter="url(#shadow)"/>
+  <text x="700" y="375" text-anchor="middle" class="core">销售订单主线</text>
+  <text x="700" y="413" text-anchor="middle" class="core2">报价 · 生产 · 仓储 · 质检 · 发货 · 财务</text>
+  <text x="700" y="446" text-anchor="middle" class="core2">实时库存 / 成本 / 收率 / 应收应付</text>
+  <path class="line" d="M520 365 C420 345,350 275,300 210"/>
+  <path class="line" d="M520 410 C405 420,335 445,278 520"/>
+  <path class="line" d="M700 302 C680 245,650 200,600 160"/>
+  <path class="line" d="M880 365 C990 330,1060 265,1110 205"/>
+  <path class="line" d="M880 410 C1010 430,1090 470,1165 540"/>
+  <path class="line" d="M700 492 C720 570,760 625,820 675"/>
+  <rect class="card" x="110" y="150" width="330" height="150" rx="22"/>
+  <text x="140" y="198" class="node-title">销售与商务</text>
+  <text x="140" y="232" class="node-text">报价版本、客户订单、生产指令</text>
+  <text x="140" y="260" class="node-text">发货单、送货单、销售对账单</text>
+  <rect class="badge" x="325" y="180" width="78" height="32" rx="16"/>
+  <text x="364" y="202" text-anchor="middle" class="node-text">入口</text>
+  <rect class="card" x="105" y="482" width="345" height="150" rx="22"/>
+  <text x="135" y="530" class="node-title">生产与 BOM</text>
+  <text x="135" y="564" class="node-text">人工排产留痕、多级 BOM 展开</text>
+  <text x="135" y="592" class="node-text">自动领料、完工请验</text>
+  <rect class="card" x="520" y="95" width="360" height="145" rx="22"/>
+  <text x="550" y="143" class="node-title">采购与仓储</text>
+  <text x="550" y="177" class="node-text">供应商、采购入库、批次库存</text>
+  <text x="550" y="205" class="node-text">FIFO、替代料、移动加权平均</text>
+  <rect class="card" x="960" y="145" width="335" height="155" rx="22"/>
+  <text x="990" y="193" class="node-title">质检与收率</text>
+  <text x="990" y="227" class="node-text">请验、检验结果、入库闸门</text>
+  <text x="990" y="255" class="node-text">成品/过渡料、批次收率追踪</text>
+  <rect class="card" x="980" y="505" width="340" height="150" rx="22"/>
+  <text x="1010" y="553" class="node-title">财务与报表</text>
+  <text x="1010" y="587" class="node-text">应收应付、回款付款、账龄</text>
+  <text x="1010" y="615" class="node-text">日报/周报/月报、财务数据导出</text>
+  <rect class="card" x="610" y="640" width="390" height="130" rx="22"/>
+  <text x="640" y="688" class="node-title">OA 审批与配方算价</text>
+  <text x="640" y="722" class="node-text">轻量审批、授权配方试算、历史留痕</text>
+  <rect class="card" x="70" y="675" width="360" height="85" rx="20"/>
+  <text x="100" y="710" class="node-title">本地私有化</text>
+  <text x="100" y="740" class="node-text">数据盘、冷备份、硬盘物理归档</text>
+</svg>

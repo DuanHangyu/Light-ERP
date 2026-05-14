@@ -1,0 +1,45 @@
+{
+  "name": "local-erp-flow-mvp",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "typecheck": "tsc --noEmit",
+    "lint": "tsc --noEmit",
+    "restore": "tsx scripts/restore.ts"
+  },
+  "dependencies": {
+    "@tailwindcss/postcss": "4.2.4",
+    "adm-zip": "0.5.16",
+    "better-sqlite3": "12.9.0",
+    "clsx": "2.1.1",
+    "fast-xml-parser": "5.7.2",
+    "lucide-react": "0.555.0",
+    "next": "16.2.6",
+    "postcss": "8.5.10",
+    "react": "19.2.5",
+    "react-dom": "19.2.5",
+    "recharts": "3.5.1",
+    "zod": "4.2.1"
+  },
+  "overrides": {
+    "postcss": "8.5.10"
+  },
+  "devDependencies": {
+    "@types/adm-zip": "0.5.8",
+    "@types/better-sqlite3": "7.6.13",
+    "@types/node": "24.10.2",
+    "@types/react": "19.2.7",
+    "@types/react-dom": "19.2.3",
+    "@vitest/coverage-v8": "4.1.5",
+    "tailwindcss": "4.2.4",
+    "tsx": "4.21.0",
+    "typescript": "5.9.3",
+    "vitest": "4.1.5"
+  }
+}
