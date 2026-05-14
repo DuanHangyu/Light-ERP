@@ -10575,11 +10575,11 @@ function Metric({
   };
 
   return (
-    <div className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+    <div className="min-h-[104px] rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <p className="truncate text-xs font-medium text-slate-500">{label}</p>
-          <p className="mt-2 truncate text-xl font-semibold text-slate-950">{value}</p>
+          <p className="break-words text-xs font-medium leading-5 text-slate-500">{label}</p>
+          <p className="mt-2 break-words text-xl font-semibold leading-7 text-slate-950">{value}</p>
         </div>
         <div className={`grid h-9 w-9 shrink-0 place-items-center rounded-md ${toneMap[tone]}`}>
           <Icon className="h-4 w-4" />
@@ -10620,7 +10620,7 @@ function ModuleHeader({
 
 function SummaryStrip({ snapshot }: { snapshot: Snapshot }) {
   return (
-    <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-5 2xl:grid-cols-12">
+    <section className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-6">
       <Metric label="订单额" value={formatCurrency(snapshot.summary.orderAmount)} icon={FileSpreadsheet} tone="blue" />
       <Metric label="采购额" value={formatCurrency(snapshot.summary.purchaseAmount)} icon={Boxes} tone="violet" />
       <Metric label="库存总值" value={formatCurrency(snapshot.summary.inventoryValue)} icon={Warehouse} tone="emerald" />
