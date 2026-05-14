@@ -505,8 +505,13 @@ const statusClass: Record<string, string> = {
   submitted: "bg-blue-50 text-blue-700 ring-blue-200",
   reinspection_requested: "bg-blue-50 text-blue-700 ring-blue-200",
   reinspection_failed: "bg-rose-50 text-rose-700 ring-rose-200",
+  instructed: "bg-amber-50 text-amber-700 ring-amber-200",
+  material_requested: "bg-amber-50 text-amber-700 ring-amber-200",
   producing: "bg-blue-50 text-blue-700 ring-blue-200",
   inspection_requested: "bg-amber-50 text-amber-700 ring-amber-200",
+  qa_approved: "bg-emerald-50 text-emerald-700 ring-emerald-200",
+  qa_failed: "bg-rose-50 text-rose-700 ring-rose-200",
+  in_stock: "bg-emerald-50 text-emerald-700 ring-emerald-200",
   inspected: "bg-emerald-50 text-emerald-700 ring-emerald-200",
   inbounded: "bg-emerald-50 text-emerald-700 ring-emerald-200",
   qualified: "bg-emerald-50 text-emerald-700 ring-emerald-200",
@@ -2268,8 +2273,9 @@ function OverviewModule({
   return (
     <>
       <SummaryStrip snapshot={snapshot} />
-      <section className="mt-5 grid gap-5 2xl:grid-cols-[360px_1fr_360px]">
-        <div className="space-y-5">
+      <ProductionProgressPanel productions={snapshot.board.productions} />
+      <section className="mt-5 grid gap-5 2xl:grid-cols-[minmax(320px,360px)_minmax(0,1fr)_minmax(320px,360px)]">
+        <div className="min-w-0 space-y-5">
           <Panel title="待办工作台" icon={ClipboardList} action={`${snapshot.tasks.length} 项`}>
             <div className="space-y-3">
               {snapshot.tasks.length === 0 ? (
@@ -2289,7 +2295,7 @@ function OverviewModule({
           ) : null}
         </div>
 
-        <div className="space-y-5">
+        <div className="min-w-0 space-y-5">
           <Panel title="订单主线" icon={ArrowRight} action="销售 / 生产 / 仓储 / 财务">
             <div className="grid gap-3 md:grid-cols-3">
               {lifecycleRows.map((group) => (
@@ -2315,7 +2321,7 @@ function OverviewModule({
           <InventoryTable actorId={actorId} materials={snapshot.board.materials} />
         </div>
 
-        <div className="space-y-5">
+        <div className="min-w-0 space-y-5">
           <InventoryValueChart snapshot={snapshot} />
           <YieldChart snapshot={snapshot} />
           <BatchPanel finishedBatches={snapshot.board.finishedBatches} inspections={snapshot.board.inspections} />
@@ -10637,6 +10643,161 @@ function SummaryStrip({ snapshot }: { snapshot: Snapshot }) {
   );
 }
 
+const productionProgressMap: Record<string, number> = {
+  instructed: 18,
+  material_requested: 34,
+  producing: 56,
+  inspection_requested: 72,
+  qa_failed: 68,
+  qa_approved: 84,
+  in_stock: 94,
+  partial_shipped: 98,
+  shipped: 100,
+};
+
+function productionProgressPercent(status: unknown) {
+  return productionProgressMap[String(status ?? "")] ?? 0;
+}
+
+function productionNextStep(row: Row) {
+  const status = String(row.status ?? "");
+  const nextStep: Record<string, string> = {
+    instructed: "生产主管排产并生成领料单",
+    material_requested: "仓库按领料单 FIFO 发料",
+    producing: "生产填报日报并完工请验",
+    inspection_requested: "品控判定合格/让步/不合格",
+    qa_failed: "技术处置后发起复检",
+    qa_approved: "仓库办理成品/过渡料入库",
+    in_stock: "商务内勤安排销售发货",
+    partial_shipped: "继续补发或关闭发货差异",
+    shipped: "订单已完成交付",
+  };
+  return nextStep[status] ?? "等待下一步流转";
+}
+
+function sortedProductionRows(productions: Row[]) {
+  const stageWeight: Record<string, number> = {
+    instructed: 1,
+    material_requested: 2,
+    producing: 3,
+    inspection_requested: 4,
+    qa_failed: 5,
+    qa_approved: 6,
+    in_stock: 7,
+    partial_shipped: 8,
+    shipped: 9,
+  };
+
+  return [...productions].sort((a, b) => {
+    const aStatus = String(a.status ?? "");
+    const bStatus = String(b.status ?? "");
+    const aOpen = aStatus === "shipped" ? 1 : 0;
+    const bOpen = bStatus === "shipped" ? 1 : 0;
+    if (aOpen !== bOpen) return aOpen - bOpen;
+
+    const aPlan = String(a.planned_date ?? a.due_date ?? a.created_at ?? "9999-12-31");
+    const bPlan = String(b.planned_date ?? b.due_date ?? b.created_at ?? "9999-12-31");
+    if (aPlan !== bPlan) return aPlan.localeCompare(bPlan);
+
+    return (stageWeight[aStatus] ?? 99) - (stageWeight[bStatus] ?? 99);
+  });
+}
+
+function ProductionProgressPanel({ productions }: { productions: Row[] }) {
+  const rows = sortedProductionRows(productions).slice(0, 6);
+  const activeRows = productions.filter((row) => !["shipped", "voided", "cancelled"].includes(String(row.status ?? "")));
+  const scheduledCount = productions.filter((row) => row.planned_date).length;
+  const unscheduledCount = productions.filter((row) => String(row.status ?? "") === "instructed" || !row.planned_date).length;
+  const producingCount = productions.filter((row) => String(row.status ?? "") === "producing").length;
+  const qaPendingCount = productions.filter((row) => ["inspection_requested", "qa_approved"].includes(String(row.status ?? ""))).length;
+  const averageProgress = activeRows.length
+    ? Math.round(activeRows.reduce((sum, row) => sum + productionProgressPercent(row.status), 0) / activeRows.length)
+    : productions.length
+      ? 100
+      : 0;
+
+  return (
+    <section className="mt-5">
+      <Panel title="生产排单与进度" icon={Factory} action={`在制 ${activeRows.length} 单 / 已排产 ${scheduledCount} 单`}>
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          <MiniMetric label="在制生产单" value={`${activeRows.length} 单`} />
+          <MiniMetric label="已排产" value={`${scheduledCount} 单`} />
+          <MiniMetric label="生产中" value={`${producingCount} 单`} />
+          <MiniMetric label="待质检/入库" value={`${qaPendingCount} 单`} />
+        </div>
+
+        <div className="mt-4 rounded-lg border border-slate-200 bg-slate-50/70 px-4 py-3">
+          <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+            <div>
+              <p className="text-xs font-medium text-slate-500">整体生产完成度</p>
+              <p className="mt-1 text-xl font-semibold text-slate-950">{averageProgress}%</p>
+            </div>
+            <div className="min-w-0 flex-1 md:max-w-[720px]">
+              <div className="h-2.5 overflow-hidden rounded-full bg-slate-200">
+                <div className="h-full rounded-full bg-blue-600 transition-all" style={{ width: `${averageProgress}%` }} />
+              </div>
+              <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500">
+                <span>待排产 {unscheduledCount} 单</span>
+                <span>生产中 {producingCount} 单</span>
+                <span>待品控/入库 {qaPendingCount} 单</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {rows.length === 0 ? (
+          <div className="mt-4">
+            <EmptyText text="暂无生产排单，销售订单转生产指令后将在这里显示计划日期、机台、负责人和进度。" />
+          </div>
+        ) : (
+          <div className="mt-4 grid gap-3 xl:grid-cols-2">
+            {rows.map((row) => {
+              const progress = productionProgressPercent(row.status);
+              return (
+                <article key={String(row.id)} className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="truncate text-sm font-semibold text-slate-950">{String(row.prod_no ?? "-")}</p>
+                      <p className="mt-1 truncate text-xs text-slate-500">
+                        {String(row.order_no ?? "-")} / {String(row.customer_name ?? "-")}
+                      </p>
+                    </div>
+                    <StatusBadge value={String(row.status_label ?? row.status ?? "empty")} />
+                  </div>
+
+                  <div className="mt-3">
+                    <div className="flex items-center justify-between gap-3 text-xs text-slate-500">
+                      <span className="truncate">{String(row.product_name ?? "-")}</span>
+                      <span className="shrink-0 font-semibold text-slate-700">{progress}%</span>
+                    </div>
+                    <div className="mt-2 h-2 overflow-hidden rounded-full bg-slate-100">
+                      <div
+                        className={`h-full rounded-full ${String(row.status) === "qa_failed" ? "bg-rose-500" : "bg-blue-600"}`}
+                        style={{ width: `${progress}%` }}
+                      />
+                    </div>
+                  </div>
+
+                  <div className="mt-4 grid gap-2 text-xs text-slate-600 sm:grid-cols-2">
+                    <KeyValue label="计划日期" value={shortDate(row.planned_date)} />
+                    <KeyValue label="交付期限" value={shortDate(row.due_date)} />
+                    <KeyValue label="机台/班次" value={`${String(row.machine ?? "-")}${row.shift ? ` / ${String(row.shift)}` : ""}`} />
+                    <KeyValue label="负责人" value={String(row.owner ?? "-")} />
+                  </div>
+
+                  <div className="mt-3 rounded-md bg-slate-50 px-3 py-2 text-xs leading-5 text-slate-600">
+                    下一步：{productionNextStep(row)}
+                  </div>
+                </article>
+              );
+            })}
+          </div>
+        )}
+      </Panel>
+    </section>
+  );
+}
+
 function MiniMetric({ label, value }: { label: string; value: string }) {
   return (
     <div className="rounded-lg border border-slate-200 bg-white px-4 py-3 shadow-sm">
@@ -10825,11 +10986,16 @@ function StatusBadge({ value, tone }: { value: string; tone?: "success" | "warni
       received: "已入库",
       shipped: "已发货",
       partial_shipped: "部分发货",
+      instructed: "待排产",
+      material_requested: "待发料",
       scheduled: "已排产",
       requisitioned: "已生成领料",
       issued: "已发料",
       producing: "生产中",
       inspection_requested: "已请验",
+      qa_approved: "待入库",
+      qa_failed: "检验未通过",
+      in_stock: "待发货",
       inspected: "已检验",
       inbounded: "已入库",
       qualified: "合格",
