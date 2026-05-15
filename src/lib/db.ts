@@ -592,6 +592,26 @@ function applySchema(database: Database.Database) {
       reviewed_at TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS production_material_adjustment_review_exceptions (
+      id TEXT PRIMARY KEY,
+      exception_no TEXT NOT NULL,
+      review_id TEXT NOT NULL REFERENCES production_material_adjustment_order_reviews(id),
+      order_id TEXT NOT NULL REFERENCES production_material_adjustment_orders(id),
+      reason_type TEXT NOT NULL,
+      exception_description TEXT NOT NULL DEFAULT '',
+      owner_role TEXT NOT NULL,
+      status TEXT NOT NULL,
+      due_date TEXT NOT NULL DEFAULT '',
+      cost_adjustment_amount REAL NOT NULL DEFAULT 0,
+      resolution_type TEXT NOT NULL DEFAULT '',
+      resolution_note TEXT NOT NULL DEFAULT '',
+      final_cost_adjustment_amount REAL NOT NULL DEFAULT 0,
+      created_by TEXT NOT NULL REFERENCES users(id),
+      created_at TEXT NOT NULL,
+      resolved_by TEXT REFERENCES users(id),
+      resolved_at TEXT
+    );
+
     CREATE TABLE IF NOT EXISTS quality_inspection_window_confirmations (
       id TEXT PRIMARY KEY,
       window_no TEXT NOT NULL,
@@ -3134,6 +3154,39 @@ function applyMigrations(database: Database.Database) {
         `);
       },
     },
+    {
+      id: "051_material_adjustment_review_exceptions",
+      description: "补退料复核异常处理闭环",
+      up: () => {
+        database.exec(`
+          CREATE TABLE IF NOT EXISTS production_material_adjustment_review_exceptions (
+            id TEXT PRIMARY KEY,
+            exception_no TEXT NOT NULL,
+            review_id TEXT NOT NULL REFERENCES production_material_adjustment_order_reviews(id),
+            order_id TEXT NOT NULL REFERENCES production_material_adjustment_orders(id),
+            reason_type TEXT NOT NULL,
+            exception_description TEXT NOT NULL DEFAULT '',
+            owner_role TEXT NOT NULL,
+            status TEXT NOT NULL,
+            due_date TEXT NOT NULL DEFAULT '',
+            cost_adjustment_amount REAL NOT NULL DEFAULT 0,
+            resolution_type TEXT NOT NULL DEFAULT '',
+            resolution_note TEXT NOT NULL DEFAULT '',
+            final_cost_adjustment_amount REAL NOT NULL DEFAULT 0,
+            created_by TEXT NOT NULL REFERENCES users(id),
+            created_at TEXT NOT NULL,
+            resolved_by TEXT REFERENCES users(id),
+            resolved_at TEXT
+          );
+          CREATE UNIQUE INDEX IF NOT EXISTS ux_production_material_adjustment_review_exceptions_no
+            ON production_material_adjustment_review_exceptions(exception_no);
+          CREATE UNIQUE INDEX IF NOT EXISTS ux_production_material_adjustment_review_exceptions_review
+            ON production_material_adjustment_review_exceptions(review_id);
+          CREATE INDEX IF NOT EXISTS idx_production_material_adjustment_review_exceptions_status_owner
+            ON production_material_adjustment_review_exceptions(status, owner_role);
+        `);
+      },
+    },
   ];
 
   const applied = database
@@ -3192,6 +3245,7 @@ function backfillDocumentSequences(database: Database.Database) {
     { table: "production_material_adjustment_suggestions", column: "suggestion_no", prefix: "BT" },
     { table: "production_material_adjustment_orders", column: "order_no", prefix: "BTD" },
     { table: "production_material_adjustment_order_reviews", column: "review_no", prefix: "BTFH" },
+    { table: "production_material_adjustment_review_exceptions", column: "exception_no", prefix: "BTYC" },
     { table: "quality_inspection_window_confirmations", column: "window_no", prefix: "ZJ" },
     { table: "customer_delivery_confirmations", column: "confirmation_no", prefix: "JQ" },
     { table: "approval_requests", column: "request_no", prefix: "SP" },
@@ -3452,6 +3506,7 @@ export function resetDemoDatabase() {
     DELETE FROM technical_dispositions;
     DELETE FROM production_daily_reports;
     DELETE FROM inspections;
+    DELETE FROM production_material_adjustment_review_exceptions;
     DELETE FROM production_material_adjustment_order_reviews;
     DELETE FROM production_material_adjustment_order_lines;
     DELETE FROM production_material_adjustment_orders;

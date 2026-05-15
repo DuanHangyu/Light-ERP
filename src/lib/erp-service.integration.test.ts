@@ -6537,7 +6537,7 @@ describe("ERP service production plan lock approval and change notifications", (
       reason_type: "cost_mismatch",
       reason_type_label: "成本差异",
       owner_role: "production",
-      owner_role_label: "生产",
+      owner_role_label: "生产主管",
       cost_adjustment_amount: 12.5,
       created_by_name: "仓库管理员-吴勇",
     });

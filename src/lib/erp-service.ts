@@ -115,6 +115,7 @@ const roleActionMap: Record<string, Role[]> = {
   confirmMaterialAdjustmentSuggestion: ["production", "admin"],
   executeMaterialAdjustmentOrder: ["warehouse", "admin"],
   reviewMaterialAdjustmentOrder: ["warehouse", "admin"],
+  resolveMaterialAdjustmentReviewException: ["production", "warehouse", "finance", "technical", "manager", "admin"],
   requestInspection: ["production"],
   approveMaterialRequisition: ["warehouse", "admin"],
   rejectMaterialRequisition: ["warehouse", "admin"],
@@ -202,6 +203,7 @@ const actionLabels: Record<string, string> = {
   confirmMaterialAdjustmentSuggestion: "确认补退料建议",
   executeMaterialAdjustmentOrder: "执行补退料单",
   reviewMaterialAdjustmentOrder: "复核补退料成本",
+  resolveMaterialAdjustmentReviewException: "关闭补退料复核异常",
   requestInspection: "生产请验",
   approveMaterialRequisition: "领料审批",
   rejectMaterialRequisition: "驳回领料",
@@ -742,6 +744,39 @@ function materialAdjustmentReviewResultLabel(result: string) {
       approved: "复核通过",
       exception: "复核异常",
     }[result] ?? result
+  );
+}
+
+function materialAdjustmentExceptionStatusLabel(status: string) {
+  return (
+    {
+      open: "待处理",
+      closed: "已关闭",
+    }[status] ?? status
+  );
+}
+
+function materialAdjustmentExceptionReasonLabel(reason: string) {
+  return (
+    {
+      cost_mismatch: "成本差异",
+      batch_mismatch: "批次差异",
+      qty_mismatch: "数量差异",
+      document_mismatch: "单据差异",
+      other: "其他异常",
+    }[reason] ?? reason
+  );
+}
+
+function materialAdjustmentExceptionResolutionLabel(type: string) {
+  return (
+    {
+      cost_adjustment: "成本调整",
+      no_adjustment: "无需调整",
+      document_correction: "单据修正",
+      process_correction: "流程整改",
+      other: "其他处理",
+    }[type] ?? type
   );
 }
 
@@ -2233,6 +2268,35 @@ export function getSnapshot(actorId = "U-SALES") {
     };
   });
 
+  const productionMaterialAdjustmentReviewExceptions = database.prepare(`
+    SELECT exception.*, review.review_no, review.review_result, pmao.order_no, pmao.adjustment_type,
+           po.prod_no, r.req_no, o.order_no AS customer_order_no,
+           c.name AS customer_name, p.name AS product_name,
+           creator.name AS created_by_name, resolver.name AS resolved_by_name
+    FROM production_material_adjustment_review_exceptions exception
+    JOIN production_material_adjustment_order_reviews review ON review.id = exception.review_id
+    JOIN production_material_adjustment_orders pmao ON pmao.id = exception.order_id
+    JOIN production_orders po ON po.id = pmao.production_order_id
+    JOIN orders o ON o.id = po.order_id
+    JOIN customers c ON c.id = o.customer_id
+    JOIN products p ON p.id = o.product_id
+    LEFT JOIN requisitions r ON r.id = pmao.requisition_id
+    JOIN users creator ON creator.id = exception.created_by
+    LEFT JOIN users resolver ON resolver.id = exception.resolved_by
+    ORDER BY CASE exception.status WHEN 'open' THEN 0 ELSE 1 END, exception.created_at DESC
+  `).all().map((row) => {
+    const item = row as Record<string, unknown>;
+    return {
+      ...item,
+      adjustment_type_label: materialAdjustmentTypeLabel(String(item.adjustment_type)),
+      status_label: materialAdjustmentExceptionStatusLabel(String(item.status)),
+      reason_type_label: materialAdjustmentExceptionReasonLabel(String(item.reason_type)),
+      owner_role_label: roleLabel(String(item.owner_role)),
+      resolution_type_label: item.resolution_type ? materialAdjustmentExceptionResolutionLabel(String(item.resolution_type)) : "",
+      review_result_label: materialAdjustmentReviewResultLabel(String(item.review_result)),
+    };
+  });
+
   const qualityInspectionWindowConfirmations = database.prepare(`
     SELECT qiwc.*, ppci.impact_no, po.prod_no, i.inspection_no,
            o.order_no, c.name AS customer_name, p.name AS product_name,
@@ -3540,6 +3604,7 @@ export function getSnapshot(actorId = "U-SALES") {
     productionPlanChangeImpacts,
     productionMaterialAdjustmentSuggestions,
     productionMaterialAdjustmentOrders,
+    productionMaterialAdjustmentReviewExceptions,
     purchaseArrivalDiscrepancies,
     mrpRequirementRuns,
     payables,
@@ -3639,6 +3704,7 @@ export function getSnapshot(actorId = "U-SALES") {
       productionMaterialAdjustmentSuggestions,
       productionMaterialAdjustmentOrders,
       productionMaterialAdjustmentOrderReviews,
+      productionMaterialAdjustmentReviewExceptions,
       qualityInspectionWindowConfirmations,
       customerDeliveryConfirmations,
       requisitions: requisitions.map((item) => ({
@@ -4140,6 +4206,7 @@ function actionModuleLabel(action: string) {
       "confirmMaterialAdjustmentSuggestion",
       "executeMaterialAdjustmentOrder",
       "reviewMaterialAdjustmentOrder",
+      "resolveMaterialAdjustmentReviewException",
       "approveMaterialRequisition",
       "issueMaterials",
       "requestInspection",
@@ -4212,6 +4279,7 @@ function actionRiskLevel(action: string) {
       "issueMaterials",
       "executeMaterialAdjustmentOrder",
       "reviewMaterialAdjustmentOrder",
+      "resolveMaterialAdjustmentReviewException",
       "receiveFinishedGoods",
       "createShipment",
       "recordPayablePayment",
@@ -4248,6 +4316,7 @@ function actionRiskLevel(action: string) {
       "confirmMaterialAdjustmentSuggestion",
       "executeMaterialAdjustmentOrder",
       "reviewMaterialAdjustmentOrder",
+      "resolveMaterialAdjustmentReviewException",
       "approveApproval",
       "rejectApproval",
       "upsertApprovalRule",
@@ -4927,6 +4996,7 @@ function buildTasks(
     productionPlanChangeImpacts: Array<Record<string, unknown>>;
     productionMaterialAdjustmentSuggestions: Array<Record<string, unknown>>;
     productionMaterialAdjustmentOrders: Array<Record<string, unknown>>;
+    productionMaterialAdjustmentReviewExceptions?: Array<Record<string, unknown>>;
     purchaseArrivalDiscrepancies: Array<Record<string, unknown>>;
     mrpRequirementRuns?: Array<Record<string, unknown>>;
     payables: Array<Record<string, unknown>>;
@@ -5152,6 +5222,28 @@ function buildTasks(
         review_note: "仓库复核补退料执行明细、库存流水与成本影响一致。",
       },
     }));
+  const materialAdjustmentReviewExceptionTasks = (data.productionMaterialAdjustmentReviewExceptions ?? [])
+    .filter(
+      (item) =>
+        String(item.status) === "open" &&
+        (String(item.owner_role) === user.role || user.role === "admin" || user.role === "manager"),
+    )
+    .slice(0, 6)
+    .map((item) => ({
+      id: `task-material-adjustment-review-exception-${item.id}`,
+      title: `处理补退料复核异常 ${item.exception_no}`,
+      detail: `${item.order_no} / ${item.reason_type_label} / ${item.product_name}`,
+      entityType: "material_adjustment_review_exception",
+      entityId: String(item.id),
+      action: "resolveMaterialAdjustmentReviewException",
+      tone: "rose" as const,
+      primaryLabel: "关闭异常",
+      payload: {
+        resolution_type: "cost_adjustment",
+        final_cost_adjustment_amount: String(item.cost_adjustment_amount ?? 0),
+        resolution_note: "责任岗位已核对执行批次、成本影响和业务单据，关闭复核异常。",
+      },
+    }));
   const commonTasks = [
     ...remediationTasks,
     ...supplierGovernanceTasks,
@@ -5160,6 +5252,7 @@ function buildTasks(
     ...materialAdjustmentSuggestionTasks,
     ...materialAdjustmentOrderTasks,
     ...materialAdjustmentReviewTasks,
+    ...materialAdjustmentReviewExceptionTasks,
   ];
 
   if (user.role === "sales") {
@@ -5694,6 +5787,9 @@ export function performAction(input: ActionInput) {
         break;
       case "reviewMaterialAdjustmentOrder":
         reviewMaterialAdjustmentOrder(database, input.actorId, mustEntity(input.entityId), input.payload);
+        break;
+      case "resolveMaterialAdjustmentReviewException":
+        resolveMaterialAdjustmentReviewException(database, input.actorId, mustEntity(input.entityId), input.payload);
         break;
       case "approveMaterialRequisition":
         approveMaterialRequisition(database, input.actorId, mustEntity(input.entityId), input.payload);
@@ -7807,6 +7903,70 @@ function materialAdjustmentReviewResultValue(value: string) {
   throw new Error("补退料复核结果不正确。");
 }
 
+function materialAdjustmentExceptionReasonValue(value: string) {
+  if (["cost_mismatch", "batch_mismatch", "qty_mismatch", "document_mismatch", "other"].includes(value)) return value;
+  throw new Error("补退料复核异常原因不正确。");
+}
+
+function materialAdjustmentExceptionResolutionValue(value: string) {
+  if (["cost_adjustment", "no_adjustment", "document_correction", "process_correction", "other"].includes(value)) {
+    return value;
+  }
+  throw new Error("补退料复核异常处理方式不正确。");
+}
+
+function materialAdjustmentExceptionOwnerRoleValue(value: string): Role {
+  if (["production", "warehouse", "finance", "technical", "manager"].includes(value)) return value as Role;
+  throw new Error("补退料复核异常责任岗位不正确。");
+}
+
+function defaultDueDate(days: number) {
+  return new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+}
+
+function createMaterialAdjustmentReviewException(
+  database: Database.Database,
+  actorId: string,
+  orderId: string,
+  reviewId: string,
+  rawPayload: Record<string, unknown>,
+) {
+  const reasonType = materialAdjustmentExceptionReasonValue(
+    payloadText(rawPayload, "exception_reason_type", "异常原因", false) || "other",
+  );
+  const ownerRole = materialAdjustmentExceptionOwnerRoleValue(
+    payloadText(rawPayload, "owner_role", "责任岗位", false) || "production",
+  );
+  const description =
+    payloadText(rawPayload, "exception_description", "异常说明", false) ||
+    payloadText(rawPayload, "review_note", "复核说明", false) ||
+    materialAdjustmentExceptionReasonLabel(reasonType);
+  const dueDate = payloadText(rawPayload, "due_date", "处理到期日", false) || defaultDueDate(3);
+  const costAdjustmentAmount = roundMoney(payloadNumber(rawPayload, "cost_adjustment_amount", "成本调整金额"));
+  const exceptionId = uid("PMAE");
+  const exceptionNo = serial(database, "production_material_adjustment_review_exceptions", "BTYC");
+  database.prepare(`
+    INSERT INTO production_material_adjustment_review_exceptions (
+      id, exception_no, review_id, order_id, reason_type, exception_description,
+      owner_role, status, due_date, cost_adjustment_amount, created_by, created_at
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?)
+  `).run(
+    exceptionId,
+    exceptionNo,
+    reviewId,
+    orderId,
+    reasonType,
+    description,
+    ownerRole,
+    dueDate,
+    costAdjustmentAmount,
+    actorId,
+    now(),
+  );
+  audit(database, actorId, "createMaterialAdjustmentReviewException", "production_material_adjustment_review_exception", exceptionId, `生成补退料复核异常 ${exceptionNo}：${materialAdjustmentExceptionReasonLabel(reasonType)}`);
+}
+
 function reviewMaterialAdjustmentOrder(
   database: Database.Database,
   actorId: string,
@@ -7847,7 +8007,60 @@ function reviewMaterialAdjustmentOrder(
     actorId,
     reviewedAt,
   );
+  if (reviewResult === "exception") {
+    createMaterialAdjustmentReviewException(database, actorId, order.id, reviewId, payload);
+  }
   audit(database, actorId, "reviewMaterialAdjustmentOrder", "production_material_adjustment_order_review", reviewId, `复核补退料单 ${order.order_no}：${materialAdjustmentReviewResultLabel(reviewResult)}`);
+}
+
+function resolveMaterialAdjustmentReviewException(
+  database: Database.Database,
+  actorId: string,
+  exceptionId: string,
+  rawPayload?: Record<string, unknown>,
+) {
+  const exception = database.prepare(`
+    SELECT exception.*, pmao.order_no
+    FROM production_material_adjustment_review_exceptions exception
+    JOIN production_material_adjustment_orders pmao ON pmao.id = exception.order_id
+    WHERE exception.id = ?
+  `).get(exceptionId) as
+    | {
+        id: string;
+        exception_no: string;
+        order_no: string;
+        owner_role: Role;
+        status: string;
+        cost_adjustment_amount: number;
+      }
+    | undefined;
+  if (!exception) throw new Error("补退料复核异常不存在。");
+  if (exception.status === "closed") throw new Error("补退料复核异常已关闭。");
+  const actor = getUser(database, actorId);
+  if (actor.role !== exception.owner_role && actor.role !== "admin" && actor.role !== "manager") {
+    throw new Error(`${actor.role_label} 不是该补退料复核异常的责任岗位。`);
+  }
+  const payload = rawPayload && typeof rawPayload === "object" ? rawPayload : {};
+  const resolutionType = materialAdjustmentExceptionResolutionValue(
+    payloadText(payload, "resolution_type", "处理方式", false) || "no_adjustment",
+  );
+  const resolutionNote = payloadText(payload, "resolution_note", "处理说明");
+  const finalCostAdjustmentAmount =
+    payload.final_cost_adjustment_amount == null || payload.final_cost_adjustment_amount === ""
+      ? roundMoney(Number(exception.cost_adjustment_amount ?? 0))
+      : roundMoney(payloadNumber(payload, "final_cost_adjustment_amount", "最终成本调整金额"));
+  const resolvedAt = now();
+  database.prepare(`
+    UPDATE production_material_adjustment_review_exceptions
+    SET status = 'closed',
+        resolution_type = ?,
+        resolution_note = ?,
+        final_cost_adjustment_amount = ?,
+        resolved_by = ?,
+        resolved_at = ?
+    WHERE id = ?
+  `).run(resolutionType, resolutionNote, finalCostAdjustmentAmount, actorId, resolvedAt, exception.id);
+  audit(database, actorId, "resolveMaterialAdjustmentReviewException", "production_material_adjustment_review_exception", exception.id, `关闭补退料复核异常 ${exception.exception_no}：${materialAdjustmentExceptionResolutionLabel(resolutionType)}`);
 }
 
 function approveMaterialRequisition(

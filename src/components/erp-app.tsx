@@ -187,6 +187,7 @@ type Snapshot = {
     productionMaterialAdjustmentSuggestions: Row[];
     productionMaterialAdjustmentOrders: Row[];
     productionMaterialAdjustmentOrderReviews: Row[];
+    productionMaterialAdjustmentReviewExceptions: Row[];
     qualityInspectionWindowConfirmations: Row[];
     customerDeliveryConfirmations: Row[];
     requisitions: Row[];
@@ -338,6 +339,7 @@ const taskIcon: Record<string, typeof ClipboardList> = {
   updateProductionSchedule: Factory,
   executeMaterialAdjustmentOrder: Warehouse,
   reviewMaterialAdjustmentOrder: CheckCircle2,
+  resolveMaterialAdjustmentReviewException: ShieldCheck,
   requestInspection: FlaskConical,
   createProductionDailyReport: ClipboardList,
   issueMaterials: Boxes,
@@ -4430,6 +4432,7 @@ function ProductionModule({
   const canSchedule = ["production", "admin"].includes(currentUser?.role ?? "");
   const canReport = ["production", "admin"].includes(currentUser?.role ?? "");
   const productionDailyReports = snapshot.board.productionDailyReports ?? [];
+  const materialAdjustmentReviewExceptions = snapshot.board.productionMaterialAdjustmentReviewExceptions ?? [];
   const submittedOrders = snapshot.board.orders.filter((item) => item.status === "submitted");
   const instructedProductions = snapshot.board.productions.filter((item) => item.status === "instructed");
   const activeProductions = snapshot.board.productions.filter((item) => !["shipped", "voided", "cancelled"].includes(String(item.status)));
@@ -4650,6 +4653,32 @@ function ProductionModule({
       },
     });
   };
+  const reviewMaterialAdjustmentException = async (order: Row) => {
+    await runAction({
+      action: "reviewMaterialAdjustmentOrder",
+      entityId: String(order.id),
+      payload: {
+        review_result: "exception",
+        review_note: `${currentUser?.role_label ?? "仓库"}复核发现补退料成本或批次存在异常，转生产责任岗位处理。`,
+        exception_reason_type: "cost_mismatch",
+        exception_description: "补退料执行明细、库存流水或生产成本归集存在差异，需要责任岗位核对后关闭。",
+        owner_role: "production",
+        due_date: new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10),
+        cost_adjustment_amount: String(order.cost_impact_amount ?? 0),
+      },
+    });
+  };
+  const resolveMaterialAdjustmentReviewException = async (exception: Row) => {
+    await runAction({
+      action: "resolveMaterialAdjustmentReviewException",
+      entityId: String(exception.id),
+      payload: {
+        resolution_type: "cost_adjustment",
+        final_cost_adjustment_amount: String(exception.cost_adjustment_amount ?? 0),
+        resolution_note: `${currentUser?.role_label ?? "责任岗位"}已核对补退料执行明细、库存流水和工单成本，关闭复核异常。`,
+      },
+    });
+  };
 
   return (
     <div className="space-y-5">
@@ -4666,6 +4695,10 @@ function ProductionModule({
         <MiniMetric
           label="补退料待复核"
           value={`${snapshot.board.productionMaterialAdjustmentOrders.filter((item) => item.review_status === "pending_review").length} 单`}
+        />
+        <MiniMetric
+          label="复核异常"
+          value={`${materialAdjustmentReviewExceptions.filter((item) => item.status === "open").length} 单`}
         />
         <MiniMetric label="已发货" value={`${snapshot.board.productions.filter((item) => item.status === "shipped").length} 单`} />
       </div>
@@ -4979,6 +5012,13 @@ function ProductionModule({
                       onClick={() => void reviewMaterialAdjustmentOrder(row)}
                     />
                   ) : null}
+                  {String(row.review_status) === "pending_review" && canIssue ? (
+                    <InlineActionButton
+                      label="异常"
+                      busy={busy === `reviewMaterialAdjustmentOrder-${String(row.id)}-primary`}
+                      onClick={() => void reviewMaterialAdjustmentException(row)}
+                    />
+                  ) : null}
                   <InlineActionButton label="预览" onClick={() => setProductionPreview(buildMaterialAdjustmentOrderPrintPreview(row))} />
                   <InlineActionButton label="导出" onClick={() => downloadExport(snapshot.currentUser.id, "material-adjustment-order", row.id)} />
                   <InlineActionButton label="成本报表" onClick={() => downloadExport(snapshot.currentUser.id, "material-adjustment-cost-impact", row.id)} />
@@ -5037,6 +5077,43 @@ function ProductionModule({
           { key: "reviewed_at", label: "复核时间", render: shortDate },
         ]}
         action={{ label: "成本影响报表", onClick: () => downloadExport(snapshot.currentUser.id, "material-adjustment-cost-impact") }}
+      />
+      <DataTable
+        title="补退料复核异常处理"
+        icon={AlertTriangle}
+        rows={materialAdjustmentReviewExceptions}
+        empty="暂无补退料复核异常"
+        columns={[
+          { key: "exception_no", label: "异常单号" },
+          { key: "review_no", label: "复核单" },
+          { key: "order_no", label: "补退料单" },
+          { key: "prod_no", label: "生产单" },
+          { key: "reason_type_label", label: "异常原因", render: (value) => <StatusBadge value={String(value)} tone="warning" /> },
+          { key: "owner_role_label", label: "责任岗位" },
+          { key: "cost_adjustment_amount", label: "建议调整", render: formatCurrency },
+          { key: "final_cost_adjustment_amount", label: "最终调整", render: formatCurrency },
+          { key: "status_label", label: "状态", render: (value) => <StatusBadge value={String(value)} /> },
+          { key: "due_date", label: "到期日", render: shortDate },
+          { key: "resolved_by_name", label: "关闭人", render: (value) => String(value ?? "-") },
+          {
+            key: "exception_ops",
+            label: "处理",
+            render: (_value, row) => {
+              const canResolve =
+                String(row.status) === "open" &&
+                (currentUser?.role === row.owner_role || currentUser?.role === "admin" || currentUser?.role === "manager");
+              return canResolve ? (
+                <InlineActionButton
+                  label="关闭异常"
+                  busy={busy === `resolveMaterialAdjustmentReviewException-${String(row.id)}-primary`}
+                  onClick={() => void resolveMaterialAdjustmentReviewException(row)}
+                />
+              ) : (
+                <span className="text-xs text-slate-400">-</span>
+              );
+            },
+          },
+        ]}
       />
       <div className="grid gap-5 xl:grid-cols-3">
         <DataTable
