@@ -179,6 +179,7 @@ type Snapshot = {
     productionPlanVersions: Row[];
     productionPlanLines: Row[];
     productionPlanNotifications: Row[];
+    productionPlanChangeImpacts: Row[];
     requisitions: Row[];
     materialIssues: Row[];
     inspections: Row[];
@@ -4574,6 +4575,13 @@ function ProductionModule({
       payload: { acknowledge_note: `${currentUser?.role_label ?? "当前岗位"}已确认生产计划变更。` },
     });
   };
+  const resolvePlanChangeImpact = async (impact: Row) => {
+    await runAction({
+      action: "resolveProductionPlanChangeImpact",
+      entityId: String(impact.id),
+      payload: { resolution_note: `${currentUser?.role_label ?? "当前岗位"}已处理生产计划变更影响并同步责任事项。` },
+    });
+  };
 
   return (
     <div className="space-y-5">
@@ -4586,6 +4594,7 @@ function ProductionModule({
         <MiniMetric label="待发料" value={`${snapshot.board.requisitions.filter((item) => item.status === "approved" || item.status === "pending").length} 单`} />
         <MiniMetric label="生产中" value={`${snapshot.board.productions.filter((item) => item.status === "producing").length} 单`} />
         <MiniMetric label="生产日报" value={`${productionDailyReports.length} 张`} />
+        <MiniMetric label="变更影响" value={`${snapshot.board.productionPlanChangeImpacts.filter((item) => item.status === "pending").length} 项`} />
         <MiniMetric label="已发货" value={`${snapshot.board.productions.filter((item) => item.status === "shipped").length} 单`} />
       </div>
       <Panel title="生产计划中心" icon={Factory} action="排产 / 负荷 / 交期预警">
@@ -4790,6 +4799,45 @@ function ProductionModule({
           ]}
         />
       </div>
+      <DataTable
+        title="生产计划变更影响清单"
+        icon={AlertTriangle}
+        rows={snapshot.board.productionPlanChangeImpacts}
+        empty="暂无生产计划变更影响"
+        columns={[
+          { key: "impact_no", label: "影响单号" },
+          { key: "impact_type_label", label: "影响类型" },
+          { key: "affected_role_label", label: "责任岗位" },
+          { key: "severity_label", label: "等级", render: (value, row) => <StatusBadge value={String(value)} tone={["high", "critical"].includes(String(row.severity)) ? "warning" : undefined} /> },
+          { key: "prod_no", label: "生产单" },
+          { key: "source_document_no", label: "关联单据" },
+          { key: "old_value", label: "变更前" },
+          { key: "new_value", label: "变更后" },
+          { key: "summary", label: "影响说明" },
+          { key: "suggested_action", label: "建议动作" },
+          { key: "status_label", label: "状态", render: (value) => <StatusBadge value={String(value)} /> },
+          { key: "resolved_by_name", label: "处理人" },
+          { key: "resolved_at", label: "处理时间", render: shortDate },
+          {
+            key: "resolve",
+            label: "处理",
+            render: (_value, row) => {
+              const canResolve =
+                String(row.status) === "pending" &&
+                (currentUser?.role === row.affected_role || currentUser?.role === "admin" || currentUser?.role === "manager");
+              return canResolve ? (
+                <InlineActionButton
+                  label="处理"
+                  busy={busy === `resolveProductionPlanChangeImpact-${String(row.id)}-primary`}
+                  onClick={() => void resolvePlanChangeImpact(row)}
+                />
+              ) : (
+                <span className="text-xs text-slate-400">-</span>
+              );
+            },
+          },
+        ]}
+      />
       <div className="grid gap-5 xl:grid-cols-[1fr_380px]">
         <DataTable
           title="生产计划台账"

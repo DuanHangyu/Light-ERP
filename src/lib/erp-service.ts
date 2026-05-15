@@ -110,6 +110,7 @@ const roleActionMap: Record<string, Role[]> = {
   updateProductionSchedule: ["production", "admin"],
   lockProductionPlan: ["production", "admin"],
   ackProductionPlanNotification: ["assistant", "warehouse", "quality", "production", "manager", "admin"],
+  resolveProductionPlanChangeImpact: ["assistant", "warehouse", "purchasing", "quality", "production", "manager", "admin"],
   requestInspection: ["production"],
   approveMaterialRequisition: ["warehouse", "admin"],
   rejectMaterialRequisition: ["warehouse", "admin"],
@@ -193,6 +194,7 @@ const actionLabels: Record<string, string> = {
   updateProductionSchedule: "调整生产排产",
   lockProductionPlan: "生产计划锁版",
   ackProductionPlanNotification: "确认计划变更通知",
+  resolveProductionPlanChangeImpact: "处理计划变更影响",
   requestInspection: "生产请验",
   approveMaterialRequisition: "领料审批",
   rejectMaterialRequisition: "驳回领料",
@@ -652,6 +654,38 @@ function productionPlanNotificationStatusLabel(status: string) {
       acknowledged: "已确认",
       voided: "已关闭",
     }[status] ?? status
+  );
+}
+
+function productionPlanChangeImpactTypeLabel(type: string) {
+  return (
+    {
+      material_requisition: "仓库领料影响",
+      purchase_arrival: "采购到货影响",
+      quality_window: "质检窗口影响",
+      delivery_commitment: "交付承诺影响",
+    }[type] ?? type
+  );
+}
+
+function productionPlanChangeImpactStatusLabel(status: string) {
+  return (
+    {
+      pending: "待处理",
+      resolved: "已处理",
+      voided: "已关闭",
+    }[status] ?? status
+  );
+}
+
+function productionPlanChangeImpactSeverityLabel(severity: string) {
+  return (
+    {
+      low: "低",
+      medium: "中",
+      high: "高",
+      critical: "紧急",
+    }[severity] ?? severity
   );
 }
 
@@ -1978,6 +2012,33 @@ export function getSnapshot(actorId = "U-SALES") {
     };
   });
 
+  const productionPlanChangeImpacts = database.prepare(`
+    SELECT ppci.*, ppv.plan_no, ppv.version_no,
+           po.prod_no, o.order_no, o.due_date, c.name AS customer_name, p.name AS product_name,
+           psc.old_planned_date, psc.new_planned_date, psc.old_machine, psc.new_machine,
+           psc.change_reason, psc.changed_at, changer.name AS changed_by_name,
+           resolver.name AS resolved_by_name
+    FROM production_plan_change_impacts ppci
+    JOIN production_plan_versions ppv ON ppv.id = ppci.plan_id
+    JOIN production_orders po ON po.id = ppci.production_order_id
+    JOIN orders o ON o.id = po.order_id
+    JOIN customers c ON c.id = o.customer_id
+    JOIN products p ON p.id = o.product_id
+    JOIN production_schedule_changes psc ON psc.id = ppci.schedule_change_id
+    LEFT JOIN users changer ON changer.id = psc.changed_by
+    LEFT JOIN users resolver ON resolver.id = ppci.resolved_by
+    ORDER BY ppci.created_at DESC, ppci.impact_no DESC
+  `).all().map((row) => {
+    const item = row as Record<string, unknown>;
+    return {
+      ...item,
+      impact_type_label: productionPlanChangeImpactTypeLabel(String(item.impact_type)),
+      affected_role_label: roleLabel(String(item.affected_role)),
+      status_label: productionPlanChangeImpactStatusLabel(String(item.status)),
+      severity_label: productionPlanChangeImpactSeverityLabel(String(item.severity)),
+    };
+  });
+
   const requisitions = database.prepare(`
     SELECT r.*, po.prod_no, po.priority, o.order_no, o.qty AS order_qty,
       c.name AS customer_name, p.name AS product_name, p.unit,
@@ -3222,6 +3283,7 @@ export function getSnapshot(actorId = "U-SALES") {
     materialIqcInspections,
     purchaseOrders,
     productionPlanNotifications,
+    productionPlanChangeImpacts,
     purchaseArrivalDiscrepancies,
     mrpRequirementRuns,
     payables,
@@ -3317,6 +3379,7 @@ export function getSnapshot(actorId = "U-SALES") {
       productionPlanVersions,
       productionPlanLines,
       productionPlanNotifications,
+      productionPlanChangeImpacts,
       requisitions: requisitions.map((item) => ({
         ...item,
         lines: JSON.parse(String(item.lines)) as unknown[],
@@ -3811,6 +3874,7 @@ function actionModuleLabel(action: string) {
       "updateProductionSchedule",
       "lockProductionPlan",
       "ackProductionPlanNotification",
+      "resolveProductionPlanChangeImpact",
       "approveMaterialRequisition",
       "issueMaterials",
       "requestInspection",
@@ -3913,6 +3977,7 @@ function actionRiskLevel(action: string) {
       "rejectStocktake",
       "rejectMaterialRequisition",
       "ackProductionPlanNotification",
+      "resolveProductionPlanChangeImpact",
       "approveApproval",
       "rejectApproval",
       "upsertApprovalRule",
@@ -4589,6 +4654,7 @@ function buildTasks(
     materialIqcInspections: Array<Record<string, unknown>>;
     purchaseOrders: Array<Record<string, unknown>>;
     productionPlanNotifications: Array<Record<string, unknown>>;
+    productionPlanChangeImpacts: Array<Record<string, unknown>>;
     purchaseArrivalDiscrepancies: Array<Record<string, unknown>>;
     mrpRequirementRuns?: Array<Record<string, unknown>>;
     payables: Array<Record<string, unknown>>;
@@ -4740,7 +4806,32 @@ function buildTasks(
         acknowledge_note: "已同步生产计划变更。",
       },
     }));
-  const commonTasks = [...remediationTasks, ...supplierGovernanceTasks, ...productionPlanNotificationTasks];
+  const productionPlanChangeImpactTasks = data.productionPlanChangeImpacts
+    .filter((item) => {
+      if (String(item.status) !== "pending") return false;
+      if (String(item.affected_role) === user.role || user.role === "admin") return true;
+      return user.role === "manager" && ["high", "critical"].includes(String(item.severity));
+    })
+    .slice(0, 8)
+    .map((item) => ({
+      id: `task-production-plan-impact-${item.id}`,
+      title: String(item.impact_type_label ?? "生产计划变更影响"),
+      detail: `${item.prod_no} / ${item.product_name} / ${item.summary}`,
+      entityType: "production_plan_change_impact",
+      entityId: String(item.id),
+      action: "resolveProductionPlanChangeImpact",
+      tone: ["high", "critical"].includes(String(item.severity)) ? ("rose" as const) : ("amber" as const),
+      primaryLabel: "处理影响",
+      payload: {
+        resolution_note: "已确认影响并同步调整责任事项。",
+      },
+    }));
+  const commonTasks = [
+    ...remediationTasks,
+    ...supplierGovernanceTasks,
+    ...productionPlanNotificationTasks,
+    ...productionPlanChangeImpactTasks,
+  ];
 
   if (user.role === "sales") {
     return [
@@ -5262,6 +5353,9 @@ export function performAction(input: ActionInput) {
         break;
       case "ackProductionPlanNotification":
         acknowledgeProductionPlanNotification(database, input.actorId, mustEntity(input.entityId), input.payload);
+        break;
+      case "resolveProductionPlanChangeImpact":
+        resolveProductionPlanChangeImpact(database, input.actorId, mustEntity(input.entityId), input.payload);
         break;
       case "approveMaterialRequisition":
         approveMaterialRequisition(database, input.actorId, mustEntity(input.entityId), input.payload);
@@ -6237,6 +6331,7 @@ function updateProductionSchedule(
   `).run(plannedDate, machine, owner, shift, scheduleNote, schedule.id);
 
   createProductionPlanChangeNotifications(database, actorId, changeId);
+  createProductionPlanChangeImpacts(database, actorId, changeId);
   audit(database, actorId, "updateProductionSchedule", "production_order", productionId, `调整生产排产 ${schedule.prod_no}：${changeReason}`);
 }
 
@@ -6428,6 +6523,186 @@ function createProductionPlanChangeNotifications(database: Database.Database, ac
   });
 }
 
+function createProductionPlanChangeImpacts(database: Database.Database, actorId: string, scheduleChangeId: string) {
+  const change = database.prepare(`
+    SELECT psc.*, po.prod_no, po.status AS production_status,
+           o.id AS order_id, o.order_no, o.due_date, o.qty AS order_qty,
+           c.name AS customer_name, p.name AS product_name, p.unit
+    FROM production_schedule_changes psc
+    JOIN production_orders po ON po.id = psc.production_order_id
+    JOIN orders o ON o.id = po.order_id
+    JOIN customers c ON c.id = o.customer_id
+    JOIN products p ON p.id = o.product_id
+    WHERE psc.id = ?
+  `).get(scheduleChangeId) as Record<string, unknown> | undefined;
+  if (!change) return;
+
+  const plan = database.prepare(`
+    SELECT ppv.*
+    FROM production_plan_versions ppv
+    JOIN production_plan_lines ppl ON ppl.plan_id = ppv.id
+    WHERE ppv.status = 'published'
+      AND ppl.production_order_id = ?
+    ORDER BY ppv.published_at DESC, ppv.locked_at DESC
+    LIMIT 1
+  `).get(change.production_order_id) as Record<string, unknown> | undefined;
+  if (!plan) return;
+
+  const oldValue = `${change.old_planned_date || "未排产"} / ${change.old_machine || "未指定机台"}`;
+  const newValue = `${change.new_planned_date || "未排产"} / ${change.new_machine || "未指定机台"}`;
+  const createdAt = now();
+  const changedDays = Math.abs(dateDiffDays(change.old_planned_date, change.new_planned_date));
+  const deliveryDelayDays = dateDiffDays(change.due_date, change.new_planned_date);
+  const insertImpact = database.prepare(`
+    INSERT INTO production_plan_change_impacts (
+      id, impact_no, plan_id, schedule_change_id, production_order_id,
+      impact_type, affected_role, severity, summary, suggested_action,
+      source_document_type, source_document_id, source_document_no,
+      old_value, new_value, status, created_at,
+      resolved_by, resolved_at, resolution_note
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, NULL, NULL, '')
+  `);
+  const exists = database.prepare(`
+    SELECT id
+    FROM production_plan_change_impacts
+    WHERE schedule_change_id = ?
+      AND impact_type = ?
+      AND affected_role = ?
+      AND COALESCE(source_document_id, '') = COALESCE(?, '')
+    LIMIT 1
+  `);
+  const addImpact = (input: {
+    impactType: string;
+    affectedRole: Role;
+    severity: "low" | "medium" | "high" | "critical";
+    summary: string;
+    suggestedAction: string;
+    sourceDocumentType?: string;
+    sourceDocumentId?: string | null;
+    sourceDocumentNo?: string;
+  }) => {
+    if (exists.get(scheduleChangeId, input.impactType, input.affectedRole, input.sourceDocumentId ?? "")) return;
+    insertImpact.run(
+      uid("PPI"),
+      serial(database, "production_plan_change_impacts", "YX"),
+      plan.id,
+      scheduleChangeId,
+      change.production_order_id,
+      input.impactType,
+      input.affectedRole,
+      input.severity,
+      input.summary,
+      input.suggestedAction,
+      input.sourceDocumentType ?? "",
+      input.sourceDocumentId ?? null,
+      input.sourceDocumentNo ?? "",
+      oldValue,
+      newValue,
+      createdAt,
+    );
+  };
+
+  const requisitions = database.prepare(`
+    SELECT *
+    FROM requisitions
+    WHERE production_order_id = ?
+    ORDER BY created_at DESC
+  `).all(change.production_order_id) as Array<Record<string, unknown>>;
+  const latestRequisition = requisitions[0];
+  if (latestRequisition) {
+    const requisitionStatus = String(latestRequisition.status ?? "");
+    const issued = requisitionStatus === "issued";
+    addImpact({
+      impactType: "material_requisition",
+      affectedRole: "warehouse",
+      severity: issued ? "high" : "medium",
+      summary: `生产计划由 ${oldValue} 调整为 ${newValue}，领料单 ${latestRequisition.req_no} 需同步备料和发料窗口。`,
+      suggestedAction: issued
+        ? "复核已发料批次、现场库存和退补料需求，必要时发起补料或退料处理。"
+        : "按新计划日期调整备料窗口，复核 FIFO 批次和替代料安排。",
+      sourceDocumentType: "requisition",
+      sourceDocumentId: String(latestRequisition.id),
+      sourceDocumentNo: String(latestRequisition.req_no),
+    });
+  }
+
+  const requisitionIds = requisitions.map((item) => String(item.id));
+  const materialIds =
+    requisitionIds.length > 0
+      ? (
+          database
+            .prepare(`SELECT DISTINCT material_id FROM requisition_lines WHERE requisition_id IN (${requisitionIds.map(() => "?").join(",")})`)
+            .all(...requisitionIds) as Array<{ material_id: string }>
+        ).map((item) => item.material_id)
+      : [];
+  if (materialIds.length > 0) {
+    const purchaseRows = database.prepare(`
+      SELECT po.id, po.purchase_no, po.status, po.due_date, s.name AS supplier_name,
+             GROUP_CONCAT(DISTINCT m.name) AS material_names
+      FROM purchase_orders po
+      JOIN suppliers s ON s.id = po.supplier_id
+      JOIN purchase_order_lines pol ON pol.purchase_order_id = po.id
+      JOIN materials m ON m.id = pol.material_id
+      WHERE po.status IN ('pending_approval', 'pending_receipt', 'iqc_pending')
+        AND pol.material_id IN (${materialIds.map(() => "?").join(",")})
+      GROUP BY po.id
+      ORDER BY po.due_date ASC, po.created_at ASC
+    `).all(...materialIds) as Array<Record<string, unknown>>;
+    purchaseRows.forEach((purchase) => {
+      const purchaseLateDays = dateDiffDays(change.new_planned_date, purchase.due_date);
+      addImpact({
+        impactType: "purchase_arrival",
+        affectedRole: "purchasing",
+        severity: purchaseLateDays > 0 ? "high" : changedDays >= 3 ? "medium" : "low",
+        summary:
+          purchaseLateDays > 0
+            ? `采购单 ${purchase.purchase_no} 预计到货 ${purchase.due_date}，晚于新计划 ${change.new_planned_date} ${purchaseLateDays} 天，需协调供应商。`
+            : `采购单 ${purchase.purchase_no} 与生产计划同步变更，需复核到货和仓库签收节奏。`,
+        suggestedAction: "确认供应商到货日期、合同交付承诺和仓库签收计划，必要时调整采购到货通知。",
+        sourceDocumentType: "purchase_order",
+        sourceDocumentId: String(purchase.id),
+        sourceDocumentNo: String(purchase.purchase_no),
+      });
+    });
+  }
+
+  const inspection = database.prepare(`
+    SELECT *
+    FROM inspections
+    WHERE production_order_id = ?
+      AND status = 'pending'
+    ORDER BY created_at DESC
+    LIMIT 1
+  `).get(change.production_order_id) as Record<string, unknown> | undefined;
+  addImpact({
+    impactType: "quality_window",
+    affectedRole: "quality",
+    severity: String(change.production_status) === "inspection_requested" ? "high" : "medium",
+    summary: `生产计划调整为 ${newValue}，质检请验和检验资源窗口需同步更新。`,
+    suggestedAction: "同步调整 OQC 请验排队、检验人员和检验设备安排，确保合格后及时入库。",
+    sourceDocumentType: inspection ? "inspection" : "production_order",
+    sourceDocumentId: inspection ? String(inspection.id) : String(change.production_order_id),
+    sourceDocumentNo: inspection ? String(inspection.inspection_no) : String(change.prod_no),
+  });
+
+  addImpact({
+    impactType: "delivery_commitment",
+    affectedRole: "assistant",
+    severity: deliveryDelayDays > 0 ? (deliveryDelayDays >= 7 ? "critical" : "high") : changedDays >= 3 ? "medium" : "low",
+    summary:
+      deliveryDelayDays > 0
+        ? `新计划 ${change.new_planned_date} 晚于订单交期 ${change.due_date} ${deliveryDelayDays} 天，交付承诺存在风险。`
+        : `生产计划由 ${oldValue} 调整为 ${newValue}，商务需确认发货排期和客户沟通口径。`,
+    suggestedAction: "复核客户交付期限、成品入库后发货窗口和送货单安排，必要时同步客户并更新订单备注。",
+    sourceDocumentType: "order",
+    sourceDocumentId: String(change.order_id),
+    sourceDocumentNo: String(change.order_no),
+  });
+
+  audit(database, actorId, "createProductionPlanChangeImpacts", "production_schedule_change", scheduleChangeId, `生成生产计划变更影响清单 ${change.prod_no}`);
+}
+
 function acknowledgeProductionPlanNotification(
   database: Database.Database,
   actorId: string,
@@ -6452,6 +6727,32 @@ function acknowledgeProductionPlanNotification(
     WHERE id = ?
   `).run(actorId, acknowledgedAt, note, notification.id);
   audit(database, actorId, "ackProductionPlanNotification", "production_plan_notification", notification.id, `确认生产计划变更通知 ${notification.notification_no}`);
+}
+
+function resolveProductionPlanChangeImpact(
+  database: Database.Database,
+  actorId: string,
+  impactId: string,
+  rawPayload?: Record<string, unknown>,
+) {
+  const impact = database.prepare("SELECT * FROM production_plan_change_impacts WHERE id = ?").get(impactId) as
+    | { id: string; impact_no: string; affected_role: Role; status: string }
+    | undefined;
+  if (!impact) throw new Error("生产计划变更影响记录不存在。");
+  if (impact.status !== "pending") throw new Error("生产计划变更影响记录已处理。");
+  const actor = getUser(database, actorId);
+  if (actor.role !== impact.affected_role && actor.role !== "admin" && actor.role !== "manager") {
+    throw new Error(`${actor.role_label} 不是该影响事项的责任角色。`);
+  }
+  const payload = rawPayload && typeof rawPayload === "object" ? rawPayload : {};
+  const note = payloadText(payload, "resolution_note", "处理说明", false) || "已确认影响并同步调整责任事项。";
+  const resolvedAt = now();
+  database.prepare(`
+    UPDATE production_plan_change_impacts
+    SET status = 'resolved', resolved_by = ?, resolved_at = ?, resolution_note = ?
+    WHERE id = ?
+  `).run(actorId, resolvedAt, note, impact.id);
+  audit(database, actorId, "resolveProductionPlanChangeImpact", "production_plan_change_impact", impact.id, `处理生产计划变更影响 ${impact.impact_no}`);
 }
 
 function approveMaterialRequisition(

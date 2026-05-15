@@ -504,6 +504,29 @@ function applySchema(database: Database.Database) {
       acknowledge_note TEXT NOT NULL DEFAULT ''
     );
 
+    CREATE TABLE IF NOT EXISTS production_plan_change_impacts (
+      id TEXT PRIMARY KEY,
+      impact_no TEXT NOT NULL,
+      plan_id TEXT NOT NULL REFERENCES production_plan_versions(id),
+      schedule_change_id TEXT NOT NULL REFERENCES production_schedule_changes(id),
+      production_order_id TEXT NOT NULL REFERENCES production_orders(id),
+      impact_type TEXT NOT NULL,
+      affected_role TEXT NOT NULL,
+      severity TEXT NOT NULL DEFAULT 'medium',
+      summary TEXT NOT NULL,
+      suggested_action TEXT NOT NULL DEFAULT '',
+      source_document_type TEXT NOT NULL DEFAULT '',
+      source_document_id TEXT,
+      source_document_no TEXT NOT NULL DEFAULT '',
+      old_value TEXT NOT NULL DEFAULT '',
+      new_value TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'pending',
+      created_at TEXT NOT NULL,
+      resolved_by TEXT REFERENCES users(id),
+      resolved_at TEXT,
+      resolution_note TEXT NOT NULL DEFAULT ''
+    );
+
     CREATE TABLE IF NOT EXISTS requisitions (
       id TEXT PRIMARY KEY,
       req_no TEXT NOT NULL,
@@ -2734,6 +2757,44 @@ function applyMigrations(database: Database.Database) {
         `);
       },
     },
+    {
+      id: "046_production_plan_change_impacts",
+      description: "生产计划变更影响联动清单与责任待办",
+      up: () => {
+        database.exec(`
+          CREATE TABLE IF NOT EXISTS production_plan_change_impacts (
+            id TEXT PRIMARY KEY,
+            impact_no TEXT NOT NULL,
+            plan_id TEXT NOT NULL REFERENCES production_plan_versions(id),
+            schedule_change_id TEXT NOT NULL REFERENCES production_schedule_changes(id),
+            production_order_id TEXT NOT NULL REFERENCES production_orders(id),
+            impact_type TEXT NOT NULL,
+            affected_role TEXT NOT NULL,
+            severity TEXT NOT NULL DEFAULT 'medium',
+            summary TEXT NOT NULL,
+            suggested_action TEXT NOT NULL DEFAULT '',
+            source_document_type TEXT NOT NULL DEFAULT '',
+            source_document_id TEXT,
+            source_document_no TEXT NOT NULL DEFAULT '',
+            old_value TEXT NOT NULL DEFAULT '',
+            new_value TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'pending',
+            created_at TEXT NOT NULL,
+            resolved_by TEXT REFERENCES users(id),
+            resolved_at TEXT,
+            resolution_note TEXT NOT NULL DEFAULT ''
+          );
+          CREATE UNIQUE INDEX IF NOT EXISTS ux_production_plan_change_impacts_no
+            ON production_plan_change_impacts(impact_no);
+          CREATE INDEX IF NOT EXISTS idx_production_plan_change_impacts_change
+            ON production_plan_change_impacts(schedule_change_id, impact_type, status);
+          CREATE INDEX IF NOT EXISTS idx_production_plan_change_impacts_role_status
+            ON production_plan_change_impacts(affected_role, status, created_at);
+          CREATE INDEX IF NOT EXISTS idx_production_plan_change_impacts_plan
+            ON production_plan_change_impacts(plan_id, production_order_id);
+        `);
+      },
+    },
   ];
 
   const applied = database
@@ -2785,6 +2846,9 @@ function backfillDocumentSequences(database: Database.Database) {
     { table: "purchase_requisitions", column: "requisition_no", prefix: "QS" },
     { table: "mrp_requirement_runs", column: "run_no", prefix: "MRP" },
     { table: "material_iqc_inspections", column: "iqc_no", prefix: "IQC" },
+    { table: "production_plan_versions", column: "plan_no", prefix: "SCJH" },
+    { table: "production_plan_notifications", column: "notification_no", prefix: "TZ" },
+    { table: "production_plan_change_impacts", column: "impact_no", prefix: "YX" },
     { table: "approval_requests", column: "request_no", prefix: "SP" },
     { table: "payables", column: "payable_no", prefix: "YF" },
     { table: "formula_price_calculations", column: "formula_no", prefix: "PF" },

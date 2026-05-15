@@ -5689,13 +5689,13 @@ describe("ERP service production plan lock approval and change notifications", (
         expect.objectContaining({
           impact_type: "quality_window",
           affected_role: "quality",
-          suggested_action: expect.stringContaining("质检"),
+          suggested_action: expect.stringContaining("检验"),
         }),
         expect.objectContaining({
           impact_type: "delivery_commitment",
           affected_role: "assistant",
           severity: "high",
-          summary: expect.stringContaining("交付"),
+          summary: expect.stringContaining("交期"),
         }),
       ]),
     );
