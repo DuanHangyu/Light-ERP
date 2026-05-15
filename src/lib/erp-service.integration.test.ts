@@ -5981,6 +5981,132 @@ describe("ERP service production plan lock approval and change notifications", (
       ]),
     );
   });
+
+  it("confirms material adjustment suggestions into formal orders and exports arrival notice change logs", async () => {
+    const service = await loadService();
+    const scenario = createPlanChangeImpactScenario(service);
+
+    const purchaseImpact = scenario.impacts.find(
+      (item) => item.impact_type === "purchase_arrival" && item.source_document_id === scenario.purchaseOrder.id,
+    ) as Record<string, unknown>;
+    service.performAction({
+      actorId: "U-PUR",
+      action: "resolveProductionPlanChangeImpact",
+      entityId: String(purchaseImpact.id),
+      payload: {
+        new_arrival_date: "2026-07-01",
+        resolution_note: "采购已与供应商确认提前到货，并形成到货通知变更留痕。",
+      },
+    });
+
+    const arrivalSnapshot = service.getSnapshot("U-PUR") as unknown as {
+      board: {
+        productionPlanChangeImpacts: Array<Record<string, unknown>>;
+        purchaseArrivalNotices: Array<Record<string, unknown>>;
+        purchaseArrivalNoticeChangeLogs: Array<Record<string, unknown>>;
+      };
+    };
+    const resolvedPurchaseImpact = arrivalSnapshot.board.productionPlanChangeImpacts.find((item) => item.id === purchaseImpact.id) as Record<string, unknown>;
+    const linkedArrival = arrivalSnapshot.board.purchaseArrivalNotices.find(
+      (item) => item.id === resolvedPurchaseImpact.linked_document_id,
+    ) as Record<string, unknown>;
+    expect(arrivalSnapshot.board.purchaseArrivalNoticeChangeLogs).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          arrival_notice_id: linkedArrival.id,
+          impact_id: purchaseImpact.id,
+          change_type: "plan_impact_reschedule",
+          old_arrived_at: "2026-07-05",
+          new_arrived_at: "2026-07-01",
+          changed_by_name: "采购员-孙倩",
+        }),
+      ]),
+    );
+
+    const changeLogExport = await service.buildExport({
+      actorId: "U-PUR",
+      type: "purchase-arrival-change-log",
+      format: "xlsx",
+      entityId: String(linkedArrival.id),
+    });
+    const changeLogXml = xlsxXml(changeLogExport.buffer);
+    expect(changeLogExport.fileName).toContain("purchase-arrival-change-log");
+    expect(changeLogXml).toContain('name="purchase_arrival_change_log"');
+    expect(changeLogXml).toContain("到货通知单变更留痕");
+    expect(changeLogXml).toContain(String(linkedArrival.arrival_no));
+    expect(changeLogXml).toContain(String(purchaseImpact.impact_no));
+
+    const warehouseImpact = scenario.impacts.find((item) => item.impact_type === "material_requisition") as Record<string, unknown>;
+    service.performAction({
+      actorId: "U-WH",
+      action: "resolveProductionPlanChangeImpact",
+      entityId: String(warehouseImpact.id),
+      payload: {
+        adjustment_type: "supplement",
+        suggested_qty: "2.5",
+        resolution_note: "仓库生成补料建议单，待生产确认转正式补料单。",
+      },
+    });
+    const suggestionSnapshot = service.getSnapshot("U-PROD") as unknown as {
+      board: {
+        productionMaterialAdjustmentSuggestions: Array<Record<string, unknown>>;
+        productionMaterialAdjustmentOrders: Array<Record<string, unknown>>;
+      };
+      tasks: Array<Record<string, unknown>>;
+    };
+    const suggestion = suggestionSnapshot.board.productionMaterialAdjustmentSuggestions.find(
+      (item) => item.impact_id === warehouseImpact.id,
+    ) as Record<string, unknown>;
+    expect(suggestionSnapshot.tasks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: `task-material-adjustment-suggestion-${suggestion.id}`,
+          action: "confirmMaterialAdjustmentSuggestion",
+          primaryLabel: "确认转正式单",
+        }),
+      ]),
+    );
+
+    service.performAction({
+      actorId: "U-PROD",
+      action: "confirmMaterialAdjustmentSuggestion",
+      entityId: String(suggestion.id),
+      payload: { confirmation_note: "生产确认需要补料，转正式补料单执行。" },
+    });
+
+    const confirmedSnapshot = service.getSnapshot("U-PROD") as unknown as {
+      board: {
+        productionMaterialAdjustmentSuggestions: Array<Record<string, unknown>>;
+        productionMaterialAdjustmentOrders: Array<Record<string, unknown>>;
+      };
+      tasks: Array<Record<string, unknown>>;
+    };
+    const confirmedSuggestion = confirmedSnapshot.board.productionMaterialAdjustmentSuggestions.find(
+      (item) => item.id === suggestion.id,
+    ) as Record<string, unknown>;
+    expect(confirmedSuggestion).toMatchObject({
+      status: "confirmed",
+      status_label: "已确认",
+      confirmed_by_name: "生产主管-马工",
+      confirmation_note: "生产确认需要补料，转正式补料单执行。",
+    });
+    expect(confirmedSnapshot.board.productionMaterialAdjustmentOrders).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          suggestion_id: suggestion.id,
+          production_order_id: scenario.production.id,
+          requisition_id: scenario.requisition.id,
+          adjustment_type: "supplement",
+          order_no: expect.stringMatching(/^BTD-/),
+          status_label: "待执行",
+          qty: 2.5,
+        }),
+      ]),
+    );
+    expect(
+      confirmedSnapshot.tasks.some((task) => task.id === `task-material-adjustment-suggestion-${suggestion.id}`),
+    ).toBe(false);
+  });
 });
 
 describe("ERP service formal report center", () => {
