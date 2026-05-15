@@ -5583,6 +5583,156 @@ describe("ERP service production plan lock approval and change notifications", (
       acknowledged.tasks.some((task) => task.id === `task-production-plan-notification-${warehouseNotification?.id}`),
     ).toBe(false);
   });
+
+  it("links published plan changes to material purchase quality and delivery impact todos", async () => {
+    const service = await loadService();
+    const { production, requisition } = createProducingOrder(service, "10");
+
+    service.performAction({
+      actorId: "U-PUR",
+      action: "createPurchaseOrder",
+      payload: {
+        supplier_id: "SUP-001",
+        due_date: "2026-07-05",
+        lines: [{ material_id: "M-STEEL", qty: "30", unit_cost: "12.5" }],
+      },
+    });
+    const purchaseApproval = service
+      .getSnapshot("U-MGR")
+      .board.approvalRequests.find((item) => item.entity_type === "purchase_order" && item.status === "pending");
+    service.performAction({
+      actorId: "U-MGR",
+      action: "approveApproval",
+      entityId: String(purchaseApproval?.id),
+      payload: { approval_note: "生产计划相关备料采购，同意执行。" },
+    });
+    const purchaseOrder = service
+      .getSnapshot("U-PUR")
+      .board.purchaseOrders.find((item) => item.status === "pending_receipt" && item.due_date === "2026-07-05") as
+      | Record<string, unknown>
+      | undefined;
+
+    service.performAction({
+      actorId: "U-PROD",
+      action: "updateProductionSchedule",
+      entityId: String(production.id),
+      payload: {
+        planned_date: "2026-06-24",
+        machine: "CNC-02",
+        owner: "马工",
+        shift: "白班",
+        schedule_note: "锁版前基准排程。",
+        change_reason: "建立生产计划基准。",
+      },
+    });
+    service.performAction({
+      actorId: "U-PROD",
+      action: "lockProductionPlan",
+      payload: {
+        date_from: "2026-06-20",
+        date_to: "2026-06-30",
+        note: "第 26 周计划锁版，作为采购、质检和交付协同基准。",
+      },
+    });
+    const plan = service.getSnapshot("U-PROD").board.productionPlanVersions[0] as Record<string, unknown>;
+    const planApproval = service
+      .getSnapshot("U-MGR")
+      .board.approvalRequests.find((item) => item.entity_type === "production_plan" && item.entity_id === plan.id);
+    service.performAction({
+      actorId: "U-MGR",
+      action: "approveApproval",
+      entityId: String(planApproval?.id),
+      payload: { approval_note: "同意发布，后续变更必须联动责任部门确认。" },
+    });
+
+    service.performAction({
+      actorId: "U-PROD",
+      action: "updateProductionSchedule",
+      entityId: String(production.id),
+      payload: {
+        planned_date: "2026-07-02",
+        machine: "CNC-05",
+        owner: "赵工",
+        shift: "夜班",
+        schedule_note: "客户交期变化后重新排程。",
+        change_reason: "客户要求延后生产并重新协调采购到货、质检和发货。",
+      },
+    });
+
+    const managerSnapshot = service.getSnapshot("U-MGR") as unknown as {
+      board: {
+        productionPlanChangeImpacts: Array<Record<string, unknown>>;
+      };
+    };
+    const impacts = managerSnapshot.board.productionPlanChangeImpacts;
+    expect(impacts.map((item) => item.impact_type)).toEqual(
+      expect.arrayContaining(["material_requisition", "purchase_arrival", "quality_window", "delivery_commitment"]),
+    );
+    expect(impacts).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          plan_id: plan.id,
+          production_order_id: production.id,
+          impact_type: "material_requisition",
+          affected_role: "warehouse",
+          source_document_no: requisition.req_no,
+          status: "pending",
+          status_label: "待处理",
+        }),
+        expect.objectContaining({
+          impact_type: "purchase_arrival",
+          affected_role: "purchasing",
+          source_document_no: purchaseOrder?.purchase_no,
+          severity: "high",
+          summary: expect.stringContaining("2026-07-05"),
+        }),
+        expect.objectContaining({
+          impact_type: "quality_window",
+          affected_role: "quality",
+          suggested_action: expect.stringContaining("质检"),
+        }),
+        expect.objectContaining({
+          impact_type: "delivery_commitment",
+          affected_role: "assistant",
+          severity: "high",
+          summary: expect.stringContaining("交付"),
+        }),
+      ]),
+    );
+
+    const purchasingSnapshot = service.getSnapshot("U-PUR");
+    const purchaseImpact = purchasingSnapshot.board.productionPlanChangeImpacts.find(
+      (item) => item.impact_type === "purchase_arrival",
+    ) as Record<string, unknown>;
+    expect(purchasingSnapshot.tasks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: `task-production-plan-impact-${purchaseImpact.id}`,
+          title: expect.stringContaining("采购到货影响"),
+          action: "resolveProductionPlanChangeImpact",
+          primaryLabel: "处理影响",
+        }),
+      ]),
+    );
+
+    service.performAction({
+      actorId: "U-PUR",
+      action: "resolveProductionPlanChangeImpact",
+      entityId: String(purchaseImpact.id),
+      payload: { resolution_note: "已联系供应商调整到货节奏，并同步仓库备料窗口。" },
+    });
+
+    const resolved = service.getSnapshot("U-PUR").board.productionPlanChangeImpacts.find(
+      (item) => item.id === purchaseImpact.id,
+    ) as Record<string, unknown>;
+    expect(resolved).toMatchObject({
+      status: "resolved",
+      status_label: "已处理",
+      resolved_by_name: "采购员-孙倩",
+      resolution_note: "已联系供应商调整到货节奏，并同步仓库备料窗口。",
+    });
+    expect(service.getSnapshot("U-PUR").tasks.some((task) => task.id === `task-production-plan-impact-${purchaseImpact.id}`)).toBe(false);
+  });
 });
 
 describe("ERP service formal report center", () => {
