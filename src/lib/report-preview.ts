@@ -9,6 +9,7 @@ export type ReportPreviewType =
   | "purchase-statement"
   | "supplier-performance"
   | "supplier-discrepancy"
+  | "material-adjustment-cost-impact"
   | "quality-exception";
 
 export type ReportPreview = {
@@ -67,6 +68,10 @@ type ReportPreviewInput = {
     supplierDiscrepancyResolutionRate?: number;
     supplierAverageScore?: number;
     supplierRiskCount?: number;
+    materialAdjustmentCount?: number;
+    materialAdjustmentPendingReviewCount?: number;
+    materialAdjustmentCostImpactAmount?: number;
+    materialAdjustmentInventoryDelta?: number;
   };
   rows: {
     receivables?: Row[];
@@ -78,6 +83,7 @@ type ReportPreviewInput = {
     supplierPerformance?: Row[];
     supplierDiscrepancies?: Row[];
     supplierDiscrepancyDetails?: Row[];
+    materialAdjustments?: Row[];
   };
 };
 
@@ -121,6 +127,7 @@ function reportTitle(type: ReportPreviewType) {
       "purchase-statement": "采购对账单",
       "supplier-performance": "供应商绩效评分报表",
       "supplier-discrepancy": "供应商差异统计报表",
+      "material-adjustment-cost-impact": "补退料成本影响报表",
       "quality-exception": "质量异常分析报表",
     }[type] ?? type
   );
@@ -194,6 +201,25 @@ function supplierPerformanceKpis(input: ReportPreviewInput) {
     { label: "供应商数量", value: text(rows.length, "0") },
     { label: "平均评分", value: Number(averageScore).toFixed(2) },
     { label: "高风险供应商", value: text(riskCount, "0") },
+  ];
+}
+
+function materialAdjustmentKpis(input: ReportPreviewInput) {
+  const rows = input.rows.materialAdjustments ?? [];
+  const pendingReview =
+    input.summary.materialAdjustmentPendingReviewCount ??
+    rows.filter((row) => String(row.review_status ?? "") === "pending_review").length;
+  const costImpact =
+    input.summary.materialAdjustmentCostImpactAmount ??
+    rows.reduce((sum, row) => sum + Number(row.cost_impact_amount ?? 0), 0);
+  const inventoryDelta =
+    input.summary.materialAdjustmentInventoryDelta ??
+    rows.reduce((sum, row) => sum + Number(row.inventory_value_delta ?? 0), 0);
+  return [
+    { label: "补退料单数", value: text(input.summary.materialAdjustmentCount ?? rows.length, "0") },
+    { label: "待复核单数", value: text(pendingReview, "0") },
+    { label: "成本影响", value: moneyText(costImpact) },
+    { label: "库存价值变动", value: moneyText(inventoryDelta) },
   ];
 }
 
@@ -313,6 +339,27 @@ function supplierPerformanceRows(rows: Row[]) {
     overduePayableCount: text(row.overdue_payable_count ?? 0, "0"),
     totalAdjustmentAmount: moneyText(row.total_adjustment_amount),
     recommendation: text(row.recommendation, ""),
+  }));
+}
+
+function materialAdjustmentRows(rows: Row[]) {
+  return rows.map((row) => ({
+    orderNo: text(row.order_no),
+    reviewNo: text(row.review_no, ""),
+    suggestionNo: text(row.suggestion_no),
+    prodNo: text(row.prod_no),
+    requisitionNo: text(row.req_no, ""),
+    customerOrderNo: text(row.customer_order_no),
+    customerName: text(row.customer_name),
+    productName: text(row.product_name),
+    adjustmentType: text(row.adjustment_type_label ?? row.adjustment_type),
+    qty: qtyText(row.qty),
+    costImpactAmount: moneyText(row.cost_impact_amount),
+    inventoryValueDelta: moneyText(row.inventory_value_delta),
+    reviewStatus: text(row.review_status_label ?? row.review_status),
+    reviewResult: text(row.review_result_label ?? row.review_result, ""),
+    reviewedBy: text(row.reviewed_by_name, ""),
+    executedAt: dateText(row.executed_at),
   }));
 }
 
@@ -451,6 +498,25 @@ function supplierPerformanceColumns() {
   ];
 }
 
+function materialAdjustmentColumns() {
+  return [
+    { key: "orderNo", label: "补退料单" },
+    { key: "reviewNo", label: "复核单" },
+    { key: "prodNo", label: "生产单" },
+    { key: "requisitionNo", label: "领料单" },
+    { key: "customerOrderNo", label: "销售订单" },
+    { key: "customerName", label: "客户" },
+    { key: "productName", label: "产品" },
+    { key: "adjustmentType", label: "类型" },
+    { key: "qty", label: "数量" },
+    { key: "costImpactAmount", label: "成本影响" },
+    { key: "inventoryValueDelta", label: "库存价值变动" },
+    { key: "reviewStatus", label: "复核状态" },
+    { key: "reviewResult", label: "复核结果" },
+    { key: "executedAt", label: "执行日期" },
+  ];
+}
+
 function previewNotes(type: ReportPreviewType) {
   const base = [
     "本报表由系统根据当前本地数据库自动生成，适用于内部经营复盘、对账确认和纸质归档。",
@@ -489,6 +555,13 @@ function previewNotes(type: ReportPreviewType) {
       "未关闭异常应纳入质量会议跟进，已关闭异常保留技术意见、复检记录和责任闭环。",
     ];
   }
+  if (type === "material-adjustment-cost-impact") {
+    return [
+      ...base,
+      "补退料成本影响报表以正式补料、退料执行明细为依据，展示生产成本增加或冲减、库存价值变动和仓库复核状态。",
+      "待复核单据应由仓库核对执行批次、库存反向流水、移动均价和生产工单成本归集后再归档。",
+    ];
+  }
   return [...base, "经营类报表用于管理层查看订单、采购、库存、应收应付、回款和质量收率的综合情况。"];
 }
 
@@ -504,6 +577,7 @@ export function buildReportPreview(input: ReportPreviewInput): ReportPreview {
   const supplierPerformance = supplierPerformanceRows(input.rows.supplierPerformance ?? []);
   const supplierDiscrepancies = supplierDiscrepancySummaryRows(input.rows.supplierDiscrepancies ?? []);
   const supplierDiscrepancyDetails = supplierDiscrepancyDetailRows(input.rows.supplierDiscrepancyDetails ?? []);
+  const materialAdjustments = materialAdjustmentRows(input.rows.materialAdjustments ?? []);
   const sections: ReportPreview["sections"] = [];
 
   if (input.type === "sales-statement") {
@@ -521,6 +595,8 @@ export function buildReportPreview(input: ReportPreviewInput): ReportPreview {
     sections.push({ title: "到货差异明细", columns: supplierDiscrepancyDetailColumns(), rows: supplierDiscrepancyDetails });
   } else if (input.type === "supplier-performance") {
     sections.push({ title: "供应商绩效评分", columns: supplierPerformanceColumns(), rows: supplierPerformance });
+  } else if (input.type === "material-adjustment-cost-impact") {
+    sections.push({ title: "补退料成本影响明细", columns: materialAdjustmentColumns(), rows: materialAdjustments });
   } else {
     sections.push({ title: "应收账款摘要", columns: salesColumns(), rows: receivables.slice(0, 8) });
     sections.push({ title: "应付账款摘要", columns: purchaseColumns(), rows: payables.slice(0, 8) });
@@ -543,7 +619,9 @@ export function buildReportPreview(input: ReportPreviewInput): ReportPreview {
         ? supplierDiscrepancyKpis(input)
         : input.type === "supplier-performance"
           ? supplierPerformanceKpis(input)
-          : commonKpis(input),
+          : input.type === "material-adjustment-cost-impact"
+            ? materialAdjustmentKpis(input)
+            : commonKpis(input),
     sections,
     notes: previewNotes(input.type),
     signatures: [

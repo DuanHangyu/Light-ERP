@@ -73,6 +73,7 @@ type FormalReportExportType =
   | "purchase-statement"
   | "supplier-performance"
   | "supplier-discrepancy"
+  | "material-adjustment-cost-impact"
   | "quality-exception";
 
 export type ReportFilters = {
@@ -113,6 +114,7 @@ const roleActionMap: Record<string, Role[]> = {
   resolveProductionPlanChangeImpact: ["assistant", "warehouse", "purchasing", "quality", "production", "manager", "admin"],
   confirmMaterialAdjustmentSuggestion: ["production", "admin"],
   executeMaterialAdjustmentOrder: ["warehouse", "admin"],
+  reviewMaterialAdjustmentOrder: ["warehouse", "admin"],
   requestInspection: ["production"],
   approveMaterialRequisition: ["warehouse", "admin"],
   rejectMaterialRequisition: ["warehouse", "admin"],
@@ -199,6 +201,7 @@ const actionLabels: Record<string, string> = {
   resolveProductionPlanChangeImpact: "处理计划变更影响",
   confirmMaterialAdjustmentSuggestion: "确认补退料建议",
   executeMaterialAdjustmentOrder: "执行补退料单",
+  reviewMaterialAdjustmentOrder: "复核补退料成本",
   requestInspection: "生产请验",
   approveMaterialRequisition: "领料审批",
   rejectMaterialRequisition: "驳回领料",
@@ -720,6 +723,25 @@ function materialAdjustmentOrderStatusLabel(status: string) {
       executed: "已执行",
       voided: "已关闭",
     }[status] ?? status
+  );
+}
+
+function materialAdjustmentReviewStatusLabel(status: string) {
+  return (
+    {
+      not_started: "未执行",
+      pending_review: "待复核",
+      reviewed: "已复核",
+    }[status] ?? status
+  );
+}
+
+function materialAdjustmentReviewResultLabel(result: string) {
+  return (
+    {
+      approved: "复核通过",
+      exception: "复核异常",
+    }[result] ?? result
   );
 }
 
@@ -2118,8 +2140,21 @@ export function getSnapshot(actorId = "U-SALES") {
 
   const productionMaterialAdjustmentOrders = database.prepare(`
     SELECT pmao.*, pmas.suggestion_no, ppci.impact_no, po.prod_no, r.req_no,
+           o.id AS customer_order_id,
            o.order_no AS customer_order_no, c.name AS customer_name, p.name AS product_name,
            creator.name AS created_by_name, executor.name AS executed_by_name,
+           COALESCE(cost.cost_impact_amount, 0) AS cost_impact_amount,
+           COALESCE(cost.inventory_value_delta, 0) AS inventory_value_delta,
+           COALESCE(review.review_no, '') AS review_no,
+           COALESCE(review.review_result, '') AS review_result,
+           COALESCE(review.review_note, '') AS review_note,
+           review.reviewed_at,
+           reviewer.name AS reviewed_by_name,
+           CASE
+             WHEN review.id IS NOT NULL THEN 'reviewed'
+             WHEN pmao.status = 'executed' THEN 'pending_review'
+             ELSE 'not_started'
+           END AS review_status,
            COALESCE((
              SELECT json_group_array(
                json_object(
@@ -2153,6 +2188,15 @@ export function getSnapshot(actorId = "U-SALES") {
     LEFT JOIN requisitions r ON r.id = pmao.requisition_id
     JOIN users creator ON creator.id = pmao.created_by
     LEFT JOIN users executor ON executor.id = pmao.executed_by
+    LEFT JOIN (
+      SELECT order_id,
+             ROUND(SUM(CASE direction WHEN 'out' THEN line_amount WHEN 'in' THEN -line_amount ELSE 0 END), 2) AS cost_impact_amount,
+             ROUND(SUM(CASE direction WHEN 'out' THEN -line_amount WHEN 'in' THEN line_amount ELSE 0 END), 2) AS inventory_value_delta
+      FROM production_material_adjustment_order_lines
+      GROUP BY order_id
+    ) cost ON cost.order_id = pmao.id
+    LEFT JOIN production_material_adjustment_order_reviews review ON review.order_id = pmao.id
+    LEFT JOIN users reviewer ON reviewer.id = review.reviewed_by
     ORDER BY pmao.created_at DESC
   `).all().map((row) => {
     const item = row as Record<string, unknown>;
@@ -2160,7 +2204,32 @@ export function getSnapshot(actorId = "U-SALES") {
       ...item,
       adjustment_type_label: materialAdjustmentTypeLabel(String(item.adjustment_type)),
       status_label: materialAdjustmentOrderStatusLabel(String(item.status)),
+      review_status_label: materialAdjustmentReviewStatusLabel(String(item.review_status)),
+      review_result_label: item.review_result ? materialAdjustmentReviewResultLabel(String(item.review_result)) : "",
       lines: JSON.parse(String(item.lines)) as unknown[],
+    };
+  });
+
+  const productionMaterialAdjustmentOrderReviews = database.prepare(`
+    SELECT review.*, pmao.order_no, pmao.adjustment_type, pmao.status AS order_status,
+           po.prod_no, r.req_no, o.order_no AS customer_order_no,
+           c.name AS customer_name, p.name AS product_name,
+           reviewer.name AS reviewed_by_name
+    FROM production_material_adjustment_order_reviews review
+    JOIN production_material_adjustment_orders pmao ON pmao.id = review.order_id
+    JOIN production_orders po ON po.id = pmao.production_order_id
+    JOIN orders o ON o.id = po.order_id
+    JOIN customers c ON c.id = o.customer_id
+    JOIN products p ON p.id = o.product_id
+    LEFT JOIN requisitions r ON r.id = pmao.requisition_id
+    JOIN users reviewer ON reviewer.id = review.reviewed_by
+    ORDER BY review.reviewed_at DESC
+  `).all().map((row) => {
+    const item = row as Record<string, unknown>;
+    return {
+      ...item,
+      adjustment_type_label: materialAdjustmentTypeLabel(String(item.adjustment_type)),
+      review_result_label: materialAdjustmentReviewResultLabel(String(item.review_result)),
     };
   });
 
@@ -3569,6 +3638,7 @@ export function getSnapshot(actorId = "U-SALES") {
       productionPlanChangeImpacts,
       productionMaterialAdjustmentSuggestions,
       productionMaterialAdjustmentOrders,
+      productionMaterialAdjustmentOrderReviews,
       qualityInspectionWindowConfirmations,
       customerDeliveryConfirmations,
       requisitions: requisitions.map((item) => ({
@@ -4069,6 +4139,7 @@ function actionModuleLabel(action: string) {
       "resolveProductionPlanChangeImpact",
       "confirmMaterialAdjustmentSuggestion",
       "executeMaterialAdjustmentOrder",
+      "reviewMaterialAdjustmentOrder",
       "approveMaterialRequisition",
       "issueMaterials",
       "requestInspection",
@@ -4140,6 +4211,7 @@ function actionRiskLevel(action: string) {
       "createTechnicalDisposition",
       "issueMaterials",
       "executeMaterialAdjustmentOrder",
+      "reviewMaterialAdjustmentOrder",
       "receiveFinishedGoods",
       "createShipment",
       "recordPayablePayment",
@@ -4175,6 +4247,7 @@ function actionRiskLevel(action: string) {
       "resolveProductionPlanChangeImpact",
       "confirmMaterialAdjustmentSuggestion",
       "executeMaterialAdjustmentOrder",
+      "reviewMaterialAdjustmentOrder",
       "approveApproval",
       "rejectApproval",
       "upsertApprovalRule",
@@ -5057,6 +5130,28 @@ function buildTasks(
         execution_note: "仓库按正式补退料单完成库存执行。",
       },
     }));
+  const materialAdjustmentReviewTasks = data.productionMaterialAdjustmentOrders
+    .filter(
+      (item) =>
+        String(item.status) === "executed" &&
+        String(item.review_status) === "pending_review" &&
+        ["warehouse", "admin"].includes(user.role),
+    )
+    .slice(0, 6)
+    .map((item) => ({
+      id: `task-material-adjustment-review-${item.id}`,
+      title: `复核补退料成本 ${item.order_no}`,
+      detail: `${item.prod_no} / 成本影响 ¥${Number(item.cost_impact_amount ?? 0).toLocaleString("zh-CN")}`,
+      entityType: "material_adjustment_order",
+      entityId: String(item.id),
+      action: "reviewMaterialAdjustmentOrder",
+      tone: "blue" as const,
+      primaryLabel: "复核成本影响",
+      payload: {
+        review_result: "approved",
+        review_note: "仓库复核补退料执行明细、库存流水与成本影响一致。",
+      },
+    }));
   const commonTasks = [
     ...remediationTasks,
     ...supplierGovernanceTasks,
@@ -5064,6 +5159,7 @@ function buildTasks(
     ...productionPlanChangeImpactTasks,
     ...materialAdjustmentSuggestionTasks,
     ...materialAdjustmentOrderTasks,
+    ...materialAdjustmentReviewTasks,
   ];
 
   if (user.role === "sales") {
@@ -5595,6 +5691,9 @@ export function performAction(input: ActionInput) {
         break;
       case "executeMaterialAdjustmentOrder":
         executeMaterialAdjustmentOrder(database, input.actorId, mustEntity(input.entityId), input.payload);
+        break;
+      case "reviewMaterialAdjustmentOrder":
+        reviewMaterialAdjustmentOrder(database, input.actorId, mustEntity(input.entityId), input.payload);
         break;
       case "approveMaterialRequisition":
         approveMaterialRequisition(database, input.actorId, mustEntity(input.entityId), input.payload);
@@ -7690,6 +7789,65 @@ function executeMaterialAdjustmentOrder(
     WHERE id = ?
   `).run(actorId, executedAt, executionNote, order.id);
   audit(database, actorId, "executeMaterialAdjustmentOrder", "production_material_adjustment_order", order.id, `执行补退料单 ${order.order_no}`);
+}
+
+function materialAdjustmentCostSummary(database: Database.Database, orderId: string) {
+  const summary = database.prepare(`
+    SELECT COUNT(*) AS line_count,
+           ROUND(COALESCE(SUM(CASE direction WHEN 'out' THEN line_amount WHEN 'in' THEN -line_amount ELSE 0 END), 0), 2) AS cost_impact_amount,
+           ROUND(COALESCE(SUM(CASE direction WHEN 'out' THEN -line_amount WHEN 'in' THEN line_amount ELSE 0 END), 0), 2) AS inventory_value_delta
+    FROM production_material_adjustment_order_lines
+    WHERE order_id = ?
+  `).get(orderId) as { line_count: number; cost_impact_amount: number; inventory_value_delta: number };
+  return summary;
+}
+
+function materialAdjustmentReviewResultValue(value: string) {
+  if (["approved", "exception"].includes(value)) return value;
+  throw new Error("补退料复核结果不正确。");
+}
+
+function reviewMaterialAdjustmentOrder(
+  database: Database.Database,
+  actorId: string,
+  orderId: string,
+  rawPayload?: Record<string, unknown>,
+) {
+  const order = database.prepare("SELECT * FROM production_material_adjustment_orders WHERE id = ?").get(orderId) as
+    | { id: string; order_no: string; status: string }
+    | undefined;
+  if (!order) throw new Error("补退料单不存在。");
+  if (order.status !== "executed") throw new Error("只有已执行的补退料单可以复核。");
+  const existing = database.prepare("SELECT review_no FROM production_material_adjustment_order_reviews WHERE order_id = ?").get(order.id) as
+    | { review_no: string }
+    | undefined;
+  if (existing) throw new Error(`补退料单已复核：${existing.review_no}。`);
+  const summary = materialAdjustmentCostSummary(database, order.id);
+  if (Number(summary.line_count ?? 0) <= 0) throw new Error("补退料单缺少执行明细，不能复核成本影响。");
+  const payload = rawPayload && typeof rawPayload === "object" ? rawPayload : {};
+  const reviewResult = materialAdjustmentReviewResultValue(payloadText(payload, "review_result", "复核结果", false) || "approved");
+  const reviewNote = payloadText(payload, "review_note", "复核说明", false) || materialAdjustmentReviewResultLabel(reviewResult);
+  const reviewedAt = now();
+  const reviewId = uid("PMAOR");
+  const reviewNo = serial(database, "production_material_adjustment_order_reviews", "BTFH");
+  database.prepare(`
+    INSERT INTO production_material_adjustment_order_reviews (
+      id, review_no, order_id, review_result, review_note,
+      cost_impact_amount, inventory_value_delta, reviewed_by, reviewed_at
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    reviewId,
+    reviewNo,
+    order.id,
+    reviewResult,
+    reviewNote,
+    roundMoney(Number(summary.cost_impact_amount ?? 0)),
+    roundMoney(Number(summary.inventory_value_delta ?? 0)),
+    actorId,
+    reviewedAt,
+  );
+  audit(database, actorId, "reviewMaterialAdjustmentOrder", "production_material_adjustment_order_review", reviewId, `复核补退料单 ${order.order_no}：${materialAdjustmentReviewResultLabel(reviewResult)}`);
 }
 
 function approveMaterialRequisition(
@@ -12917,6 +13075,7 @@ export async function buildExport(input: {
     | "inventory-overstock"
     | "supplier-discrepancy"
     | "supplier-performance"
+    | "material-adjustment-cost-impact"
     | "quality-exception"
     | "business-weekly"
     | "business-monthly"
@@ -13125,6 +13284,10 @@ export async function buildExport(input: {
 
   if (input.type === "supplier-performance") {
     sheets.push({ name: "supplier_performance", rows: supplierPerformanceRows(database, filters) });
+  }
+
+  if (input.type === "material-adjustment-cost-impact") {
+    sheets.push({ name: "material_adjustment_cost_impact", rows: materialAdjustmentCostImpactRows(database, input.entityId, filters) });
   }
 
   if (input.type.startsWith("master-template-")) {
@@ -13783,6 +13946,7 @@ function isFormalReportExportType(type: string): type is FormalReportExportType 
     "purchase-statement",
     "supplier-performance",
     "supplier-discrepancy",
+    "material-adjustment-cost-impact",
     "quality-exception",
   ].includes(type);
 }
@@ -13798,6 +13962,7 @@ function formalReportTitle(type: FormalReportExportType) {
     "purchase-statement": "采购对账单",
     "supplier-performance": "供应商绩效评分报表",
     "supplier-discrepancy": "供应商差异统计报表",
+    "material-adjustment-cost-impact": "补退料成本影响报表",
     "quality-exception": "质量异常分析报表",
   };
   return titles[type];
@@ -13814,6 +13979,7 @@ function reportSnapshotType(type: FormalReportExportType) {
     "purchase-statement": "purchase_statement",
     "supplier-performance": "supplier_performance",
     "supplier-discrepancy": "supplier_discrepancy",
+    "material-adjustment-cost-impact": "material_adjustment_cost_impact",
     "quality-exception": "quality_exception",
   };
   return snapshotTypes[type];
@@ -13854,6 +14020,10 @@ function formalReportCoverRows(database: Database.Database, type: FormalReportEx
     { field: "差异处理完成率", value: `${Number(metrics.supplier_discrepancy_resolution_rate ?? 0).toFixed(2)}%` },
     { field: "供应商平均评分", value: Number(metrics.supplier_average_score ?? 0) },
     { field: "高风险供应商", value: Number(metrics.supplier_risk_count ?? 0) },
+    { field: "补退料单数", value: Number(metrics.material_adjustment_count ?? 0) },
+    { field: "待复核补退料", value: Number(metrics.material_adjustment_pending_review_count ?? 0) },
+    { field: "补退料成本影响", value: Number(metrics.material_adjustment_cost_impact_amount ?? 0) },
+    { field: "库存价值变动", value: Number(metrics.material_adjustment_inventory_delta ?? 0) },
   ];
 }
 
@@ -13868,6 +14038,7 @@ function formalReportDescription(type: FormalReportExportType) {
     "purchase-statement": "按采购入库与应付账款生成供应商采购对账明细，支持付款核对。",
     "supplier-performance": "按采购订单、到货准时、IQC合格、到货差异、应付逾期综合评估供应商绩效评分。",
     "supplier-discrepancy": "按到货差异单统计供应商差异频次、数量差异、价格差异、影响金额和处理完成率。",
+    "material-adjustment-cost-impact": "按正式补料、退料执行明细统计生产成本影响、库存价值变动、批次来源和仓库复核状态。",
     "quality-exception": "按不合格请验、技术处置、复检记录和关闭状态统计质量异常、原因分布与处置效率。",
   };
   return descriptions[type];
@@ -13914,10 +14085,17 @@ function reportSnapshotMetrics(database: Database.Database, type: FormalReportEx
   const supplierDiscrepancyRows = supplierDiscrepancyDetailRows(database, filters);
   const supplierDiscrepancySummary = supplierDiscrepancySummaryRows(database, filters);
   const supplierPerformance = supplierPerformanceRows(database, filters);
+  const materialAdjustmentCostRows = materialAdjustmentCostImpactRows(database, undefined, filters);
   const qualityClosedCount = qualityRows.filter((item) => String(item.closure_status) === "已关闭").length;
   const qualityReinspectionCount = qualityRows.reduce((sum, item) => sum + Number(item.reinspection_count ?? 0), 0);
   const supplierDiscrepancyResolvedCount = supplierDiscrepancyRows.filter((item) => String(item.status_label) === "差异已处理").length;
   const supplierRiskCount = supplierPerformance.filter((item) => String(item.risk_level) === "high").length;
+  const materialAdjustmentOrderCount = new Set(materialAdjustmentCostRows.map((item) => String(item.order_no))).size;
+  const materialAdjustmentPendingReviewCount = new Set(
+    materialAdjustmentCostRows
+      .filter((item) => String(item.review_status_label) === "待复核")
+      .map((item) => String(item.order_no)),
+  ).size;
   return {
     ...businessMetrics,
     report_type: snapshotType,
@@ -13952,6 +14130,14 @@ function reportSnapshotMetrics(database: Database.Database, type: FormalReportEx
       : 0,
     supplier_risk_count: supplierRiskCount,
     supplier_performance_count: supplierPerformance.length,
+    material_adjustment_count: materialAdjustmentOrderCount,
+    material_adjustment_pending_review_count: materialAdjustmentPendingReviewCount,
+    material_adjustment_cost_impact_amount: roundMoney(
+      materialAdjustmentCostRows.reduce((sum, item) => sum + Number(item.cost_impact_amount ?? 0), 0),
+    ),
+    material_adjustment_inventory_delta: roundMoney(
+      materialAdjustmentCostRows.reduce((sum, item) => sum + Number(item.inventory_value_delta ?? 0), 0),
+    ),
   };
 }
 
@@ -14525,6 +14711,93 @@ function materialIssueRows(database: Database.Database, entityId?: string) {
     WHERE ra.id = COALESCE(?, ra.id) OR r.id = COALESCE(?, r.id)
     ORDER BY r.issued_at DESC, ra.rowid DESC
   `).all(entityId ?? null, entityId ?? null));
+}
+
+function materialAdjustmentCostImpactRows(database: Database.Database, entityId?: string, filters: ReportFilters = {}) {
+  const conditions = [
+    "(pmao.id = COALESCE(?, pmao.id) OR review.id = COALESCE(?, review.id) OR po.id = COALESCE(?, po.id) OR r.id = COALESCE(?, r.id))",
+  ];
+  const params: unknown[] = [entityId ?? null, entityId ?? null, entityId ?? null, entityId ?? null];
+  addDateFilter(conditions, params, "COALESCE(pmao.executed_at, pmao.created_at)", filters);
+  if (filters.materialId) {
+    conditions.push("pmaol.material_id = ?");
+    params.push(filters.materialId);
+  }
+  if (filters.orderId) {
+    conditions.push("o.id = ?");
+    params.push(filters.orderId);
+  }
+
+  return filteredRows(database, `
+    SELECT '补退料成本影响报表' AS template_title,
+           '本地化生产流转 ERP' AS company,
+           pmao.order_no,
+           review.review_no,
+           pmas.suggestion_no,
+           ppci.impact_no,
+           po.prod_no,
+           r.req_no,
+           o.order_no AS customer_order_no,
+           c.name AS customer,
+           p.name AS product,
+           CASE pmao.adjustment_type
+             WHEN 'supplement' THEN '补料'
+             WHEN 'return' THEN '退料'
+             WHEN 'check' THEN '复核'
+             ELSE pmao.adjustment_type
+           END AS adjustment_type,
+           CASE pmaol.direction
+             WHEN 'out' THEN '补料出库'
+             WHEN 'in' THEN '退料入库'
+             ELSE pmaol.direction
+           END AS execution_direction,
+           m.material_code,
+           m.name AS material,
+           m.spec,
+           m.unit,
+           pmaol.batch_no,
+           pmaol.qty,
+           pmaol.unit_cost,
+           pmaol.line_amount,
+           ROUND(CASE pmaol.direction WHEN 'out' THEN pmaol.line_amount WHEN 'in' THEN -pmaol.line_amount ELSE 0 END, 2) AS cost_impact_amount,
+           ROUND(CASE pmaol.direction WHEN 'out' THEN -pmaol.line_amount WHEN 'in' THEN pmaol.line_amount ELSE 0 END, 2) AS inventory_value_delta,
+           CASE
+             WHEN pmaol.direction = 'out' THEN '生产成本增加'
+             WHEN pmaol.direction = 'in' THEN '生产成本冲减'
+             ELSE '成本复核'
+           END AS cost_impact_direction,
+           CASE
+             WHEN review.id IS NOT NULL THEN '已复核'
+             WHEN pmao.status = 'executed' THEN '待复核'
+             ELSE '未执行'
+           END AS review_status_label,
+           CASE review.review_result
+             WHEN 'approved' THEN '复核通过'
+             WHEN 'exception' THEN '复核异常'
+             ELSE ''
+           END AS review_result_label,
+           reviewer.name AS reviewed_by,
+           review.review_note,
+           pmao.executed_at,
+           executor.name AS executed_by,
+           review.reviewed_at,
+           '补退料成本影响报表用于复核补料、退料对生产成本和库存价值的影响，并追溯到批次库存流水。' AS print_note
+    FROM production_material_adjustment_order_lines pmaol
+    JOIN production_material_adjustment_orders pmao ON pmao.id = pmaol.order_id
+    JOIN production_material_adjustment_suggestions pmas ON pmas.id = pmao.suggestion_id
+    JOIN production_plan_change_impacts ppci ON ppci.id = pmao.impact_id
+    JOIN production_orders po ON po.id = pmao.production_order_id
+    JOIN orders o ON o.id = po.order_id
+    JOIN customers c ON c.id = o.customer_id
+    JOIN products p ON p.id = o.product_id
+    JOIN materials m ON m.id = pmaol.material_id
+    LEFT JOIN requisitions r ON r.id = pmao.requisition_id
+    LEFT JOIN users executor ON executor.id = pmao.executed_by
+    LEFT JOIN production_material_adjustment_order_reviews review ON review.order_id = pmao.id
+    LEFT JOIN users reviewer ON reviewer.id = review.reviewed_by
+    WHERE ${conditions.join(" AND ")}
+    ORDER BY COALESCE(pmao.executed_at, pmao.created_at) DESC, pmaol.rowid ASC
+  `, params);
 }
 
 function materialAdjustmentOrderRows(database: Database.Database, entityId?: string, filters: ReportFilters = {}) {

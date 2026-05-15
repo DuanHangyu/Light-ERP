@@ -6346,9 +6346,12 @@ describe("ERP service production plan lock approval and change notifications", (
       entityId: String(suggestion.id),
       payload: { confirmation_note: "生产确认补料数量，转仓库正式执行并做成本复核。" },
     });
-    const order = service
-      .getSnapshot("U-WH")
-      .board.productionMaterialAdjustmentOrders.find((item) => item.suggestion_id === suggestion.id) as Record<string, unknown>;
+    const pendingOrderSnapshot = service.getSnapshot("U-WH") as {
+      board: { productionMaterialAdjustmentOrders: Array<Record<string, unknown>> };
+    };
+    const order = pendingOrderSnapshot.board.productionMaterialAdjustmentOrders.find(
+      (item) => item.suggestion_id === suggestion.id,
+    ) as Record<string, unknown>;
 
     service.performAction({
       actorId: "U-WH",

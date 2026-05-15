@@ -186,6 +186,7 @@ type Snapshot = {
     productionPlanChangeImpacts: Row[];
     productionMaterialAdjustmentSuggestions: Row[];
     productionMaterialAdjustmentOrders: Row[];
+    productionMaterialAdjustmentOrderReviews: Row[];
     qualityInspectionWindowConfirmations: Row[];
     customerDeliveryConfirmations: Row[];
     requisitions: Row[];
@@ -336,6 +337,7 @@ const taskIcon: Record<string, typeof ClipboardList> = {
   scheduleAndGenerateRequisition: Factory,
   updateProductionSchedule: Factory,
   executeMaterialAdjustmentOrder: Warehouse,
+  reviewMaterialAdjustmentOrder: CheckCircle2,
   requestInspection: FlaskConical,
   createProductionDailyReport: ClipboardList,
   issueMaterials: Boxes,
@@ -4638,6 +4640,16 @@ function ProductionModule({
       },
     });
   };
+  const reviewMaterialAdjustmentOrder = async (order: Row) => {
+    await runAction({
+      action: "reviewMaterialAdjustmentOrder",
+      entityId: String(order.id),
+      payload: {
+        review_result: "approved",
+        review_note: `${currentUser?.role_label ?? "仓库"}已复核补退料执行明细、库存流水与成本影响一致。`,
+      },
+    });
+  };
 
   return (
     <div className="space-y-5">
@@ -4651,6 +4663,10 @@ function ProductionModule({
         <MiniMetric label="生产中" value={`${snapshot.board.productions.filter((item) => item.status === "producing").length} 单`} />
         <MiniMetric label="生产日报" value={`${productionDailyReports.length} 张`} />
         <MiniMetric label="变更影响" value={`${snapshot.board.productionPlanChangeImpacts.filter((item) => item.status === "pending").length} 项`} />
+        <MiniMetric
+          label="补退料待复核"
+          value={`${snapshot.board.productionMaterialAdjustmentOrders.filter((item) => item.review_status === "pending_review").length} 单`}
+        />
         <MiniMetric label="已发货" value={`${snapshot.board.productions.filter((item) => item.status === "shipped").length} 单`} />
       </div>
       <Panel title="生产计划中心" icon={Factory} action="排产 / 负荷 / 交期预警">
@@ -4939,6 +4955,10 @@ function ProductionModule({
             { key: "adjustment_type_label", label: "类型", render: (value) => <StatusBadge value={String(value)} /> },
             { key: "qty", label: "数量", render: (value) => formatQty(value) },
             { key: "status_label", label: "状态", render: (value) => <StatusBadge value={String(value)} /> },
+            { key: "cost_impact_amount", label: "成本影响", render: formatCurrency },
+            { key: "inventory_value_delta", label: "库存变动", render: formatCurrency },
+            { key: "review_status_label", label: "复核状态", render: (value) => <StatusBadge value={String(value)} /> },
+            { key: "reviewed_by_name", label: "复核人", render: (value) => String(value ?? "-") },
             { key: "created_by_name", label: "确认人" },
             {
               key: "adjustment_order_ops",
@@ -4952,13 +4972,21 @@ function ProductionModule({
                       onClick={() => void executeMaterialAdjustmentOrder(row)}
                     />
                   ) : null}
+                  {String(row.review_status) === "pending_review" && canIssue ? (
+                    <InlineActionButton
+                      label="复核"
+                      busy={busy === `reviewMaterialAdjustmentOrder-${String(row.id)}-primary`}
+                      onClick={() => void reviewMaterialAdjustmentOrder(row)}
+                    />
+                  ) : null}
                   <InlineActionButton label="预览" onClick={() => setProductionPreview(buildMaterialAdjustmentOrderPrintPreview(row))} />
                   <InlineActionButton label="导出" onClick={() => downloadExport(snapshot.currentUser.id, "material-adjustment-order", row.id)} />
+                  <InlineActionButton label="成本报表" onClick={() => downloadExport(snapshot.currentUser.id, "material-adjustment-cost-impact", row.id)} />
                 </div>
               ),
             },
           ]}
-          action={{ label: "补退料单导出", onClick: () => downloadExport(snapshot.currentUser.id, "material-adjustment-order") }}
+          action={{ label: "成本影响报表", onClick: () => downloadExport(snapshot.currentUser.id, "material-adjustment-cost-impact") }}
         />
         <DataTable
           title="质检窗口确认"
@@ -4989,6 +5017,27 @@ function ProductionModule({
           ]}
         />
       </div>
+      <DataTable
+        title="补退料仓库复核记录"
+        icon={CheckCircle2}
+        rows={snapshot.board.productionMaterialAdjustmentOrderReviews}
+        empty="暂无已复核的补退料成本影响记录"
+        columns={[
+          { key: "review_no", label: "复核单号" },
+          { key: "order_no", label: "补退料单" },
+          { key: "prod_no", label: "生产单" },
+          { key: "customer_order_no", label: "销售订单" },
+          { key: "customer_name", label: "客户" },
+          { key: "product_name", label: "产品" },
+          { key: "adjustment_type_label", label: "类型", render: (value) => <StatusBadge value={String(value)} /> },
+          { key: "cost_impact_amount", label: "成本影响", render: formatCurrency },
+          { key: "inventory_value_delta", label: "库存价值变动", render: formatCurrency },
+          { key: "review_result_label", label: "复核结果", render: (value) => <StatusBadge value={String(value)} /> },
+          { key: "reviewed_by_name", label: "复核人" },
+          { key: "reviewed_at", label: "复核时间", render: shortDate },
+        ]}
+        action={{ label: "成本影响报表", onClick: () => downloadExport(snapshot.currentUser.id, "material-adjustment-cost-impact") }}
+      />
       <div className="grid gap-5 xl:grid-cols-3">
         <DataTable
           title="生产计划台账"
@@ -9181,6 +9230,12 @@ const reportCards = [
     cadence: "实时",
     detail: "按不合格请验、技术处置和复检关闭状态分析原因分布、处置方式与关闭率。",
   },
+  {
+    title: "补退料成本影响报表",
+    type: "material-adjustment-cost-impact",
+    cadence: "实时",
+    detail: "按正式补料、退料执行明细统计生产成本影响、库存价值变动、批次来源和仓库复核状态。",
+  },
 ] satisfies Array<{ title: string; type: ReportPreviewType; cadence: string; detail: string }>;
 
 function ReportsModule({
@@ -9486,6 +9541,14 @@ function reportPreviewRows(snapshot: Snapshot, filters: ReportFilterState) {
     if (filters.supplierId && String(row.supplier_id) !== filters.supplierId) return false;
     return true;
   });
+  const materialAdjustments = snapshot.board.productionMaterialAdjustmentOrders.filter((row) => {
+    if (filters.orderId && String(row.customer_order_id ?? row.order_id) !== filters.orderId) return false;
+    if (filters.materialId) {
+      const hasMaterial = detailLines(row.lines).some((line) => String(line.materialId ?? line.material_id) === filters.materialId);
+      if (!hasMaterial) return false;
+    }
+    return dateInRange(row.executed_at ?? row.created_at, filters);
+  });
   return {
     receivables,
     payables,
@@ -9496,6 +9559,7 @@ function reportPreviewRows(snapshot: Snapshot, filters: ReportFilterState) {
     supplierDiscrepancies,
     supplierDiscrepancyDetails,
     supplierPerformance,
+    materialAdjustments,
   };
 }
 
@@ -9524,6 +9588,7 @@ function reportPreviewSummary(snapshot: Snapshot, filters: ReportFilterState) {
   ).length;
   const supplierDiscrepancyResolvedCount = rows.supplierDiscrepancyDetails.filter((row) => String(row.status) === "resolved").length;
   const supplierRiskCount = rows.supplierPerformance.filter((row) => String(row.risk_level) === "high").length;
+  const materialAdjustmentPendingReviewCount = rows.materialAdjustments.filter((row) => String(row.review_status) === "pending_review").length;
   return {
     orderAmount: sumRows(orders, "total_amount"),
     purchaseAmount: sumRows(purchaseOrders, "total_amount"),
@@ -9549,6 +9614,10 @@ function reportPreviewSummary(snapshot: Snapshot, filters: ReportFilterState) {
       ? Number((sumRows(rows.supplierPerformance, "performance_score") / rows.supplierPerformance.length).toFixed(2))
       : 0,
     supplierRiskCount,
+    materialAdjustmentCount: rows.materialAdjustments.length,
+    materialAdjustmentPendingReviewCount,
+    materialAdjustmentCostImpactAmount: sumRows(rows.materialAdjustments, "cost_impact_amount"),
+    materialAdjustmentInventoryDelta: sumRows(rows.materialAdjustments, "inventory_value_delta"),
   };
 }
 
@@ -10846,6 +10915,7 @@ function reportTypeLabel(value: string) {
       purchase_statement: "采购对账单",
       supplier_performance: "供应商绩效评分报表",
       supplier_discrepancy: "供应商差异统计报表",
+      material_adjustment_cost_impact: "补退料成本影响报表",
       quality_exception: "质量异常分析报表",
     }[value] ?? value
   );
@@ -10863,6 +10933,7 @@ function reportExportLabel(value: string) {
       "purchase-statement": "采购对账单",
       "supplier-performance": "供应商绩效评分报表",
       "supplier-discrepancy": "供应商差异统计报表",
+      "material-adjustment-cost-impact": "补退料成本影响报表",
       "quality-exception": "质量异常分析报表",
     }[value] ?? value
   );
