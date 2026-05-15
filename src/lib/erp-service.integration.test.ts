@@ -6123,9 +6123,12 @@ describe("ERP service production plan lock approval and change notifications", (
         resolution_note: "现场确认原料不足，需要正式补料。",
       },
     });
-    const suggestion = service
-      .getSnapshot("U-PROD")
-      .board.productionMaterialAdjustmentSuggestions.find((item) => item.impact_id === warehouseImpact.id) as Record<string, unknown>;
+    const suggestionSnapshot = service.getSnapshot("U-PROD") as unknown as {
+      board: { productionMaterialAdjustmentSuggestions: Array<Record<string, unknown>> };
+    };
+    const suggestion = suggestionSnapshot.board.productionMaterialAdjustmentSuggestions.find(
+      (item) => item.impact_id === warehouseImpact.id,
+    ) as Record<string, unknown>;
     service.performAction({
       actorId: "U-PROD",
       action: "confirmMaterialAdjustmentSuggestion",
@@ -6226,9 +6229,12 @@ describe("ERP service production plan lock approval and change notifications", (
         resolution_note: "现场余料需退回仓库并恢复库存。",
       },
     });
-    const suggestion = service
-      .getSnapshot("U-PROD")
-      .board.productionMaterialAdjustmentSuggestions.find((item) => item.impact_id === warehouseImpact.id) as Record<string, unknown>;
+    const suggestionSnapshot = service.getSnapshot("U-PROD") as unknown as {
+      board: { productionMaterialAdjustmentSuggestions: Array<Record<string, unknown>> };
+    };
+    const suggestion = suggestionSnapshot.board.productionMaterialAdjustmentSuggestions.find(
+      (item) => item.impact_id === warehouseImpact.id,
+    ) as Record<string, unknown>;
     service.performAction({
       actorId: "U-PROD",
       action: "confirmMaterialAdjustmentSuggestion",

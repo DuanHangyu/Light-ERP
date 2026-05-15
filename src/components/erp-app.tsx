@@ -335,6 +335,7 @@ const taskIcon: Record<string, typeof ClipboardList> = {
   createShipment: Truck,
   scheduleAndGenerateRequisition: Factory,
   updateProductionSchedule: Factory,
+  executeMaterialAdjustmentOrder: Warehouse,
   requestInspection: FlaskConical,
   createProductionDailyReport: ClipboardList,
   issueMaterials: Boxes,
@@ -4627,6 +4628,16 @@ function ProductionModule({
       },
     });
   };
+  const executeMaterialAdjustmentOrder = async (order: Row) => {
+    await runAction({
+      action: "executeMaterialAdjustmentOrder",
+      entityId: String(order.id),
+      payload: {
+        execution_date: new Date().toISOString().slice(0, 10),
+        execution_note: `${currentUser?.role_label ?? "仓库"}按正式补退料单完成库存执行。`,
+      },
+    });
+  };
 
   return (
     <div className="space-y-5">
@@ -4934,6 +4945,13 @@ function ProductionModule({
               label: "单据",
               render: (_value, row) => (
                 <div className="flex gap-2">
+                  {String(row.status) === "pending_execution" && canIssue ? (
+                    <InlineActionButton
+                      label="执行"
+                      busy={busy === `executeMaterialAdjustmentOrder-${String(row.id)}-primary`}
+                      onClick={() => void executeMaterialAdjustmentOrder(row)}
+                    />
+                  ) : null}
                   <InlineActionButton label="预览" onClick={() => setProductionPreview(buildMaterialAdjustmentOrderPrintPreview(row))} />
                   <InlineActionButton label="导出" onClick={() => downloadExport(snapshot.currentUser.id, "material-adjustment-order", row.id)} />
                 </div>

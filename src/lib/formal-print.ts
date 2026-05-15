@@ -567,6 +567,34 @@ function discrepancyDocumentLines(source: Source) {
 
 export function buildMaterialAdjustmentOrderPrintPreview(source: Source): FormalPrintDocument {
   const adjustmentType = text(source.adjustment_type_label ?? source.adjustment_type, "补退料");
+  const executionLines =
+    Array.isArray(source.lines) && source.lines.length > 0
+      ? (source.lines as Source[]).map((line, index) => ({
+          lineNo: index + 1,
+          type: text(line.directionLabel ?? line.direction ?? adjustmentType),
+          materialCode: text(line.materialCode ?? line.material_code, ""),
+          materialName: text(line.materialName ?? line.material_name, ""),
+          batchNo: text(line.batchNo ?? line.batch_no, ""),
+          qty: qtyText(line.qty),
+          unit: text(line.unit, ""),
+          unitCost: moneyText(line.unitCost ?? line.unit_cost),
+          amount: moneyText(line.lineAmount ?? line.line_amount),
+          reason: text(source.reason ?? source.suggestion_reason, ""),
+        }))
+      : [
+          {
+            lineNo: 1,
+            type: adjustmentType,
+            materialCode: "",
+            materialName: "",
+            batchNo: "",
+            qty: qtyText(source.qty),
+            unit: "",
+            unitCost: "",
+            amount: "",
+            reason: text(source.reason ?? source.suggestion_reason, ""),
+          },
+        ];
   return baseDocument({
     header: {
       companyName: text(source.company_name, "本地化生产流转 ERP"),
@@ -607,19 +635,16 @@ export function buildMaterialAdjustmentOrderPrintPreview(source: Source): Formal
         columns: [
           { key: "lineNo", label: "序号" },
           { key: "type", label: "类型" },
+          { key: "materialCode", label: "物料编码" },
+          { key: "materialName", label: "物料名称" },
+          { key: "batchNo", label: "批次号" },
           { key: "qty", label: "数量", align: "right" },
-          { key: "summary", label: "物料摘要" },
+          { key: "unit", label: "单位" },
+          { key: "unitCost", label: "单位成本", align: "right" },
+          { key: "amount", label: "金额", align: "right" },
           { key: "reason", label: "来源原因" },
         ],
-        rows: [
-          {
-            lineNo: 1,
-            type: adjustmentType,
-            qty: qtyText(source.qty),
-            summary: text(source.material_summary, ""),
-            reason: text(source.reason ?? source.suggestion_reason, ""),
-          },
-        ],
+        rows: executionLines,
         minRows: 4,
       },
     ],

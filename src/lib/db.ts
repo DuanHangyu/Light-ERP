@@ -566,6 +566,20 @@ function applySchema(database: Database.Database) {
       execution_note TEXT NOT NULL DEFAULT ''
     );
 
+    CREATE TABLE IF NOT EXISTS production_material_adjustment_order_lines (
+      id TEXT PRIMARY KEY,
+      order_id TEXT NOT NULL REFERENCES production_material_adjustment_orders(id),
+      material_id TEXT NOT NULL REFERENCES materials(id),
+      batch_id TEXT REFERENCES material_batches(id),
+      batch_no TEXT NOT NULL,
+      direction TEXT NOT NULL,
+      qty REAL NOT NULL,
+      unit_cost REAL NOT NULL,
+      line_amount REAL NOT NULL,
+      movement_id TEXT NOT NULL REFERENCES inventory_movements(id),
+      created_at TEXT NOT NULL
+    );
+
     CREATE TABLE IF NOT EXISTS quality_inspection_window_confirmations (
       id TEXT PRIMARY KEY,
       window_no TEXT NOT NULL,
@@ -3058,6 +3072,31 @@ function applyMigrations(database: Database.Database) {
         `);
       },
     },
+    {
+      id: "049_material_adjustment_execution_lines",
+      description: "正式补退料单执行明细与库存流水关联",
+      up: () => {
+        database.exec(`
+          CREATE TABLE IF NOT EXISTS production_material_adjustment_order_lines (
+            id TEXT PRIMARY KEY,
+            order_id TEXT NOT NULL REFERENCES production_material_adjustment_orders(id),
+            material_id TEXT NOT NULL REFERENCES materials(id),
+            batch_id TEXT REFERENCES material_batches(id),
+            batch_no TEXT NOT NULL,
+            direction TEXT NOT NULL,
+            qty REAL NOT NULL,
+            unit_cost REAL NOT NULL,
+            line_amount REAL NOT NULL,
+            movement_id TEXT NOT NULL REFERENCES inventory_movements(id),
+            created_at TEXT NOT NULL
+          );
+          CREATE INDEX IF NOT EXISTS idx_production_material_adjustment_order_lines_order
+            ON production_material_adjustment_order_lines(order_id);
+          CREATE INDEX IF NOT EXISTS idx_production_material_adjustment_order_lines_material
+            ON production_material_adjustment_order_lines(material_id, created_at);
+        `);
+      },
+    },
   ];
 
   const applied = database
@@ -3375,6 +3414,7 @@ export function resetDemoDatabase() {
     DELETE FROM technical_dispositions;
     DELETE FROM production_daily_reports;
     DELETE FROM inspections;
+    DELETE FROM production_material_adjustment_order_lines;
     DELETE FROM production_material_adjustment_orders;
     DELETE FROM production_material_adjustment_suggestions;
     DELETE FROM quality_inspection_window_confirmations;

@@ -112,6 +112,7 @@ const roleActionMap: Record<string, Role[]> = {
   ackProductionPlanNotification: ["assistant", "warehouse", "quality", "production", "manager", "admin"],
   resolveProductionPlanChangeImpact: ["assistant", "warehouse", "purchasing", "quality", "production", "manager", "admin"],
   confirmMaterialAdjustmentSuggestion: ["production", "admin"],
+  executeMaterialAdjustmentOrder: ["warehouse", "admin"],
   requestInspection: ["production"],
   approveMaterialRequisition: ["warehouse", "admin"],
   rejectMaterialRequisition: ["warehouse", "admin"],
@@ -197,6 +198,7 @@ const actionLabels: Record<string, string> = {
   ackProductionPlanNotification: "确认计划变更通知",
   resolveProductionPlanChangeImpact: "处理计划变更影响",
   confirmMaterialAdjustmentSuggestion: "确认补退料建议",
+  executeMaterialAdjustmentOrder: "执行补退料单",
   requestInspection: "生产请验",
   approveMaterialRequisition: "领料审批",
   rejectMaterialRequisition: "驳回领料",
@@ -2117,7 +2119,30 @@ export function getSnapshot(actorId = "U-SALES") {
   const productionMaterialAdjustmentOrders = database.prepare(`
     SELECT pmao.*, pmas.suggestion_no, ppci.impact_no, po.prod_no, r.req_no,
            o.order_no AS customer_order_no, c.name AS customer_name, p.name AS product_name,
-           creator.name AS created_by_name, executor.name AS executed_by_name
+           creator.name AS created_by_name, executor.name AS executed_by_name,
+           COALESCE((
+             SELECT json_group_array(
+               json_object(
+                 'lineId', pmaol.id,
+                 'materialId', pmaol.material_id,
+                 'materialCode', m.material_code,
+                 'materialName', m.name,
+                 'batchId', pmaol.batch_id,
+                 'batchNo', pmaol.batch_no,
+                 'direction', pmaol.direction,
+                 'directionLabel', CASE pmaol.direction WHEN 'out' THEN '补料出库' WHEN 'in' THEN '退料入库' ELSE pmaol.direction END,
+                 'qty', pmaol.qty,
+                 'unit', m.unit,
+                 'unitCost', pmaol.unit_cost,
+                 'lineAmount', pmaol.line_amount,
+                 'movementId', pmaol.movement_id,
+                 'createdAt', pmaol.created_at
+               )
+             )
+             FROM production_material_adjustment_order_lines pmaol
+             JOIN materials m ON m.id = pmaol.material_id
+             WHERE pmaol.order_id = pmao.id
+           ), '[]') AS lines
     FROM production_material_adjustment_orders pmao
     JOIN production_material_adjustment_suggestions pmas ON pmas.id = pmao.suggestion_id
     JOIN production_plan_change_impacts ppci ON ppci.id = pmao.impact_id
@@ -2135,6 +2160,7 @@ export function getSnapshot(actorId = "U-SALES") {
       ...item,
       adjustment_type_label: materialAdjustmentTypeLabel(String(item.adjustment_type)),
       status_label: materialAdjustmentOrderStatusLabel(String(item.status)),
+      lines: JSON.parse(String(item.lines)) as unknown[],
     };
   });
 
@@ -3444,6 +3470,7 @@ export function getSnapshot(actorId = "U-SALES") {
     productionPlanNotifications,
     productionPlanChangeImpacts,
     productionMaterialAdjustmentSuggestions,
+    productionMaterialAdjustmentOrders,
     purchaseArrivalDiscrepancies,
     mrpRequirementRuns,
     payables,
@@ -4041,6 +4068,7 @@ function actionModuleLabel(action: string) {
       "ackProductionPlanNotification",
       "resolveProductionPlanChangeImpact",
       "confirmMaterialAdjustmentSuggestion",
+      "executeMaterialAdjustmentOrder",
       "approveMaterialRequisition",
       "issueMaterials",
       "requestInspection",
@@ -4111,6 +4139,7 @@ function actionRiskLevel(action: string) {
       "completeMaterialIqcInspection",
       "createTechnicalDisposition",
       "issueMaterials",
+      "executeMaterialAdjustmentOrder",
       "receiveFinishedGoods",
       "createShipment",
       "recordPayablePayment",
@@ -4145,6 +4174,7 @@ function actionRiskLevel(action: string) {
       "ackProductionPlanNotification",
       "resolveProductionPlanChangeImpact",
       "confirmMaterialAdjustmentSuggestion",
+      "executeMaterialAdjustmentOrder",
       "approveApproval",
       "rejectApproval",
       "upsertApprovalRule",
@@ -4823,6 +4853,7 @@ function buildTasks(
     productionPlanNotifications: Array<Record<string, unknown>>;
     productionPlanChangeImpacts: Array<Record<string, unknown>>;
     productionMaterialAdjustmentSuggestions: Array<Record<string, unknown>>;
+    productionMaterialAdjustmentOrders: Array<Record<string, unknown>>;
     purchaseArrivalDiscrepancies: Array<Record<string, unknown>>;
     mrpRequirementRuns?: Array<Record<string, unknown>>;
     payables: Array<Record<string, unknown>>;
@@ -5010,12 +5041,29 @@ function buildTasks(
         confirmation_note: "生产确认补退料建议，转正式补退料单执行。",
       },
     }));
+  const materialAdjustmentOrderTasks = data.productionMaterialAdjustmentOrders
+    .filter((item) => String(item.status) === "pending_execution" && ["warehouse", "admin"].includes(user.role))
+    .slice(0, 6)
+    .map((item) => ({
+      id: `task-material-adjustment-order-${item.id}`,
+      title: `执行补退料单 ${item.order_no}`,
+      detail: `${item.prod_no} / ${item.adjustment_type_label} / ${item.qty}`,
+      entityType: "material_adjustment_order",
+      entityId: String(item.id),
+      action: "executeMaterialAdjustmentOrder",
+      tone: "amber" as const,
+      primaryLabel: "执行补退料",
+      payload: {
+        execution_note: "仓库按正式补退料单完成库存执行。",
+      },
+    }));
   const commonTasks = [
     ...remediationTasks,
     ...supplierGovernanceTasks,
     ...productionPlanNotificationTasks,
     ...productionPlanChangeImpactTasks,
     ...materialAdjustmentSuggestionTasks,
+    ...materialAdjustmentOrderTasks,
   ];
 
   if (user.role === "sales") {
@@ -5544,6 +5592,9 @@ export function performAction(input: ActionInput) {
         break;
       case "confirmMaterialAdjustmentSuggestion":
         confirmMaterialAdjustmentSuggestion(database, input.actorId, mustEntity(input.entityId), input.payload);
+        break;
+      case "executeMaterialAdjustmentOrder":
+        executeMaterialAdjustmentOrder(database, input.actorId, mustEntity(input.entityId), input.payload);
         break;
       case "approveMaterialRequisition":
         approveMaterialRequisition(database, input.actorId, mustEntity(input.entityId), input.payload);
@@ -7420,6 +7471,225 @@ function confirmMaterialAdjustmentSuggestion(
     WHERE id = ?
   `).run(actorId, confirmedAt, confirmationNote, suggestion.id);
   audit(database, actorId, "confirmMaterialAdjustmentSuggestion", "production_material_adjustment_order", orderId, `补退料建议 ${suggestion.suggestion_no} 转正式单 ${orderNo}`);
+}
+
+function materialForAdjustmentOrder(
+  database: Database.Database,
+  order: { requisition_id?: string | null },
+  payload: Record<string, unknown>,
+) {
+  const requestedMaterialId = payloadText(payload, "material_id", "执行物料", false);
+  const material =
+    (requestedMaterialId
+      ? (database.prepare("SELECT * FROM materials WHERE id = ?").get(requestedMaterialId) as
+          | { id: string; name: string; average_cost: number }
+          | undefined)
+      : undefined) ??
+    (order.requisition_id
+      ? (database.prepare(`
+          SELECT m.*
+          FROM requisition_lines rl
+          JOIN materials m ON m.id = rl.material_id
+          WHERE rl.requisition_id = ?
+          ORDER BY rl.is_primary DESC, rl.rowid ASC
+          LIMIT 1
+        `).get(order.requisition_id) as { id: string; name: string; average_cost: number } | undefined)
+      : undefined);
+  if (!material) throw new Error("补退料单缺少可执行物料，请选择物料后再执行。");
+  return material;
+}
+
+function adjustmentExecutionQty(orderQty: number, payload: Record<string, unknown>) {
+  const raw = payload.qty;
+  const qty = raw == null || raw === "" ? Number(orderQty ?? 0) : payloadNumber(payload, "qty", "执行数量", { min: 0 });
+  if (qty <= 0) throw new Error("执行数量必须大于 0。");
+  return roundQty(qty);
+}
+
+function insertMaterialAdjustmentOrderLine(
+  database: Database.Database,
+  input: {
+    orderId: string;
+    materialId: string;
+    batchId?: string | null;
+    batchNo: string;
+    direction: "in" | "out";
+    qty: number;
+    unitCost: number;
+    movementId: string;
+    createdAt: string;
+  },
+) {
+  database.prepare(`
+    INSERT INTO production_material_adjustment_order_lines (
+      id, order_id, material_id, batch_id, batch_no, direction, qty, unit_cost, line_amount, movement_id, created_at
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    uid("PMAOL"),
+    input.orderId,
+    input.materialId,
+    input.batchId ?? null,
+    input.batchNo,
+    input.direction,
+    input.qty,
+    input.unitCost,
+    roundMoney(input.qty * input.unitCost),
+    input.movementId,
+    input.createdAt,
+  );
+}
+
+function executeMaterialAdjustmentOrder(
+  database: Database.Database,
+  actorId: string,
+  orderId: string,
+  rawPayload?: Record<string, unknown>,
+) {
+  const order = database.prepare(`
+    SELECT pmao.*, po.prod_no, pmas.suggestion_no
+    FROM production_material_adjustment_orders pmao
+    JOIN production_orders po ON po.id = pmao.production_order_id
+    JOIN production_material_adjustment_suggestions pmas ON pmas.id = pmao.suggestion_id
+    WHERE pmao.id = ?
+  `).get(orderId) as
+    | {
+        id: string;
+        order_no: string;
+        suggestion_no: string;
+        production_order_id: string;
+        requisition_id?: string | null;
+        adjustment_type: string;
+        qty: number;
+        status: string;
+      }
+    | undefined;
+  if (!order) throw new Error("补退料单不存在。");
+  if (order.status !== "pending_execution") throw new Error("补退料单不是待执行状态。");
+
+  const payload = rawPayload && typeof rawPayload === "object" ? rawPayload : {};
+  const executionDate = payloadDate(payload, "execution_date", "执行日期", new Date().toISOString().slice(0, 10));
+  const executedAt = `${executionDate}T00:00:00.000Z`;
+  const executionNote = payloadText(payload, "execution_note", "执行说明", false) || "仓库按正式补退料单完成库存执行。";
+  const qty = adjustmentExecutionQty(Number(order.qty ?? 0), payload);
+
+  if (order.adjustment_type === "check") {
+    database.prepare(`
+      UPDATE production_material_adjustment_orders
+      SET status = 'executed',
+          executed_by = ?,
+          executed_at = ?,
+          execution_note = ?
+      WHERE id = ?
+    `).run(actorId, executedAt, executionNote, order.id);
+    audit(database, actorId, "executeMaterialAdjustmentOrder", "production_material_adjustment_order", order.id, `复核补退料单 ${order.order_no}`);
+    return;
+  }
+
+  const material = materialForAdjustmentOrder(database, order, payload);
+  if (order.adjustment_type === "supplement") {
+    const manualBatchId = payloadText(payload, "batch_id", "补料批次", false);
+    const batches = manualBatchId
+      ? (database.prepare(`
+          SELECT id AS batchId, qty AS availableQty, received_at AS receivedAt, unit_cost AS unitCost, batch_no AS batchNo
+          FROM material_batches
+          WHERE id = ? AND material_id = ? AND qty > 0
+        `).all(manualBatchId, material.id) as Array<{
+          batchId: string;
+          availableQty: number;
+          receivedAt: string;
+          unitCost: number;
+          batchNo: string;
+        }>)
+      : (database.prepare(`
+          SELECT id AS batchId, qty AS availableQty, received_at AS receivedAt, unit_cost AS unitCost, batch_no AS batchNo
+          FROM material_batches
+          WHERE material_id = ? AND qty > 0
+          ORDER BY received_at ASC, rowid ASC
+        `).all(material.id) as Array<{
+          batchId: string;
+          availableQty: number;
+          receivedAt: string;
+          unitCost: number;
+          batchNo: string;
+        }>);
+    if (manualBatchId && batches.length === 0) throw new Error(`补料批次 ${manualBatchId} 不存在或库存不足。`);
+    const allocation = allocateFifo(batches, qty);
+    if (allocation.shortage > 0) throw new Error(`物料 ${material.id} 库存不足，缺口 ${allocation.shortage}。`);
+
+    for (const item of allocation.allocations) {
+      const batch = batches.find((candidate) => candidate.batchId === item.batchId);
+      if (!batch) throw new Error("补料批次分配异常。");
+      database.prepare("UPDATE material_batches SET qty = ROUND(qty - ?, 3), last_movement_at = ? WHERE id = ?").run(
+        item.qty,
+        executedAt,
+        item.batchId,
+      );
+      const movementId = uid("MV");
+      database.prepare(`
+        INSERT INTO inventory_movements (
+          id, item_type, item_id, batch_no, qty, unit_cost, movement_type, source_type, source_id, created_at
+        )
+        VALUES (?, 'material', ?, ?, ?, ?, 'material_adjustment_issue', 'material_adjustment_order', ?, ?)
+      `).run(movementId, material.id, batch.batchNo, -item.qty, batch.unitCost, order.id, executedAt);
+      insertMaterialAdjustmentOrderLine(database, {
+        orderId: order.id,
+        materialId: material.id,
+        batchId: item.batchId,
+        batchNo: batch.batchNo,
+        direction: "out",
+        qty: item.qty,
+        unitCost: batch.unitCost,
+        movementId,
+        createdAt: executedAt,
+      });
+    }
+    recalculateMaterialInventory(database, material.id, executedAt);
+  } else if (order.adjustment_type === "return") {
+    const unitCost =
+      payload.unit_cost == null || payload.unit_cost === ""
+        ? roundMoney(Number(material.average_cost ?? 0))
+        : roundMoney(payloadNumber(payload, "unit_cost", "退料单价", { min: 0 }));
+    const batchNo =
+      payloadText(payload, "batch_no", "退料批次", false) ||
+      `TL-${order.order_no}-${String(material.id).replace(/[^A-Z0-9]/gi, "")}`;
+    const batchId = uid("B");
+    database.prepare(`
+      INSERT INTO material_batches (id, material_id, batch_no, qty, unit_cost, received_at, last_movement_at, status)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 'available')
+    `).run(batchId, material.id, batchNo, qty, unitCost, executedAt, executedAt);
+    const movementId = uid("MV");
+    database.prepare(`
+      INSERT INTO inventory_movements (
+        id, item_type, item_id, batch_no, qty, unit_cost, movement_type, source_type, source_id, created_at
+      )
+      VALUES (?, 'material', ?, ?, ?, ?, 'material_adjustment_return', 'material_adjustment_order', ?, ?)
+    `).run(movementId, material.id, batchNo, qty, unitCost, order.id, executedAt);
+    insertMaterialAdjustmentOrderLine(database, {
+      orderId: order.id,
+      materialId: material.id,
+      batchId,
+      batchNo,
+      direction: "in",
+      qty,
+      unitCost,
+      movementId,
+      createdAt: executedAt,
+    });
+    recalculateMaterialInventory(database, material.id, executedAt);
+  } else {
+    throw new Error("补退料类型不正确。");
+  }
+
+  database.prepare(`
+    UPDATE production_material_adjustment_orders
+    SET status = 'executed',
+        executed_by = ?,
+        executed_at = ?,
+        execution_note = ?
+    WHERE id = ?
+  `).run(actorId, executedAt, executionNote, order.id);
+  audit(database, actorId, "executeMaterialAdjustmentOrder", "production_material_adjustment_order", order.id, `执行补退料单 ${order.order_no}`);
 }
 
 function approveMaterialRequisition(
@@ -14296,6 +14566,18 @@ function materialAdjustmentOrderRows(database: Database.Database, entityId?: str
            executor.name AS executed_by,
            pmao.executed_at,
            pmao.execution_note,
+           line_material.material_code AS execution_material_code,
+           line_material.name AS execution_material,
+           line_material.unit AS execution_unit,
+           pmaol.batch_no AS execution_batch_no,
+           CASE pmaol.direction
+             WHEN 'out' THEN '补料出库'
+             WHEN 'in' THEN '退料入库'
+             ELSE pmaol.direction
+           END AS execution_direction,
+           pmaol.qty AS execution_qty,
+           pmaol.unit_cost AS execution_unit_cost,
+           pmaol.line_amount AS execution_line_amount,
            '正式补退料单由生产确认补退料建议后生成，作为仓库补发、退料、盘点复核和生产计划变更追溯依据。' AS print_note
     FROM production_material_adjustment_orders pmao
     JOIN production_material_adjustment_suggestions pmas ON pmas.id = pmao.suggestion_id
@@ -14307,8 +14589,10 @@ function materialAdjustmentOrderRows(database: Database.Database, entityId?: str
     LEFT JOIN requisitions r ON r.id = pmao.requisition_id
     JOIN users creator ON creator.id = pmao.created_by
     LEFT JOIN users executor ON executor.id = pmao.executed_by
+    LEFT JOIN production_material_adjustment_order_lines pmaol ON pmaol.order_id = pmao.id
+    LEFT JOIN materials line_material ON line_material.id = pmaol.material_id
     WHERE ${conditions.join(" AND ")}
-    ORDER BY pmao.created_at DESC
+    ORDER BY pmao.created_at DESC, pmaol.rowid ASC
   `, params);
 }
 
@@ -14567,6 +14851,8 @@ function inventoryTraceRows(database: Database.Database, entityId?: string, filt
              WHEN 'replacement_shipment_outbound' THEN '售后补发出库'
              WHEN 'stocktake_gain' THEN '盘点盘盈'
              WHEN 'stocktake_loss' THEN '盘点盘亏'
+             WHEN 'material_adjustment_issue' THEN '补料出库'
+             WHEN 'material_adjustment_return' THEN '退料入库'
              ELSE im.movement_type
            END AS movement_type_label,
            im.source_type,
@@ -14581,6 +14867,7 @@ function inventoryTraceRows(database: Database.Database, entityId?: string, filt
              WHEN 'sales_return' THEN '销售退货单'
              WHEN 'stocktake' THEN '库存盘点'
              WHEN 'purchase' THEN '采购入库'
+             WHEN 'material_adjustment_order' THEN '补退料单'
              ELSE im.source_type
            END AS source_label,
            COALESCE(
@@ -14593,6 +14880,7 @@ function inventoryTraceRows(database: Database.Database, entityId?: string, filt
              dr.reversal_no,
              sr.return_no,
              st.stocktake_no,
+             pmao.order_no,
              im.source_id
            ) AS source_no,
            COALESCE(o_req.order_no, o_fgr.order_no, o_shp.order_no, '') AS order_no,
@@ -14621,6 +14909,7 @@ function inventoryTraceRows(database: Database.Database, entityId?: string, filt
     LEFT JOIN document_reversals dr ON im.source_type = 'document_reversal' AND dr.id = im.source_id
     LEFT JOIN sales_returns sr ON im.source_type = 'sales_return' AND sr.id = im.source_id
     LEFT JOIN stocktakes st ON im.source_type = 'stocktake' AND st.id = im.source_id
+    LEFT JOIN production_material_adjustment_orders pmao ON im.source_type = 'material_adjustment_order' AND pmao.id = im.source_id
     WHERE ${conditions.join(" AND ")}
     ORDER BY im.created_at DESC, im.rowid DESC
   `, params);
