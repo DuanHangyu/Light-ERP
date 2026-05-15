@@ -428,6 +428,25 @@ function applySchema(database: Database.Database) {
       status TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS production_schedule_changes (
+      id TEXT PRIMARY KEY,
+      schedule_id TEXT REFERENCES schedules(id),
+      production_order_id TEXT NOT NULL REFERENCES production_orders(id),
+      old_planned_date TEXT,
+      new_planned_date TEXT NOT NULL,
+      old_machine TEXT,
+      new_machine TEXT NOT NULL,
+      old_owner TEXT,
+      new_owner TEXT NOT NULL,
+      old_shift TEXT,
+      new_shift TEXT NOT NULL DEFAULT '',
+      old_schedule_note TEXT,
+      new_schedule_note TEXT NOT NULL DEFAULT '',
+      change_reason TEXT NOT NULL,
+      changed_by TEXT REFERENCES users(id),
+      changed_at TEXT NOT NULL
+    );
+
     CREATE TABLE IF NOT EXISTS requisitions (
       id TEXT PRIMARY KEY,
       req_no TEXT NOT NULL,
@@ -2547,6 +2566,36 @@ function applyMigrations(database: Database.Database) {
             ON supplier_qualification_requirements(scope_type, material_id, status);
           CREATE INDEX IF NOT EXISTS idx_supplier_qualification_requirements_certificate
             ON supplier_qualification_requirements(certificate_type, certificate_name, status);
+        `);
+      },
+    },
+    {
+      id: "044_production_schedule_change_traceability",
+      description: "生产排产变更留痕与交期预警基础表",
+      up: () => {
+        database.exec(`
+          CREATE TABLE IF NOT EXISTS production_schedule_changes (
+            id TEXT PRIMARY KEY,
+            schedule_id TEXT REFERENCES schedules(id),
+            production_order_id TEXT NOT NULL REFERENCES production_orders(id),
+            old_planned_date TEXT,
+            new_planned_date TEXT NOT NULL,
+            old_machine TEXT,
+            new_machine TEXT NOT NULL,
+            old_owner TEXT,
+            new_owner TEXT NOT NULL,
+            old_shift TEXT,
+            new_shift TEXT NOT NULL DEFAULT '',
+            old_schedule_note TEXT,
+            new_schedule_note TEXT NOT NULL DEFAULT '',
+            change_reason TEXT NOT NULL,
+            changed_by TEXT REFERENCES users(id),
+            changed_at TEXT NOT NULL
+          );
+          CREATE INDEX IF NOT EXISTS idx_schedule_changes_production_changed
+            ON production_schedule_changes(production_order_id, changed_at);
+          CREATE INDEX IF NOT EXISTS idx_schedule_changes_schedule
+            ON production_schedule_changes(schedule_id);
         `);
       },
     },

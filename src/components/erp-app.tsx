@@ -172,6 +172,8 @@ type Snapshot = {
     orders: Row[];
     customers: Row[];
     productions: Row[];
+    productionScheduleChanges: Row[];
+    productionDeliveryWarnings: Row[];
     requisitions: Row[];
     materialIssues: Row[];
     inspections: Row[];
@@ -317,6 +319,7 @@ const taskIcon: Record<string, typeof ClipboardList> = {
   createProductionInstruction: ClipboardList,
   createShipment: Truck,
   scheduleAndGenerateRequisition: Factory,
+  updateProductionSchedule: Factory,
   requestInspection: FlaskConical,
   createProductionDailyReport: ClipboardList,
   issueMaterials: Boxes,
@@ -581,6 +584,12 @@ const statusClass: Record<string, string> = {
   待推进: "bg-amber-50 text-amber-700 ring-amber-200",
   已流转: "bg-emerald-50 text-emerald-700 ring-emerald-200",
   暂无数据: "bg-slate-100 text-slate-600 ring-slate-200",
+  计划晚于交期: "bg-rose-50 text-rose-700 ring-rose-200",
+  逾期未排产: "bg-rose-50 text-rose-700 ring-rose-200",
+  临期未排产: "bg-amber-50 text-amber-700 ring-amber-200",
+  临期未完成: "bg-amber-50 text-amber-700 ring-amber-200",
+  超负荷: "bg-rose-50 text-rose-700 ring-rose-200",
+  空闲: "bg-blue-50 text-blue-700 ring-blue-200",
 };
 
 function formatCurrency(value: unknown) {
@@ -666,6 +675,16 @@ function alertActionPayload(alert: Row, actorId: string) {
       status: "tracking",
       action_plan: "经营预警中心登记跟进：核查订单需求、替代消耗、退换货或报废处理方案。",
       note: String(alert.detail ?? ""),
+    };
+  }
+  if (action === "updateProductionSchedule") {
+    return {
+      planned_date: String(alert.planned_date || alert.due_date || new Date().toISOString().slice(0, 10)),
+      machine: String(alert.machine || "待定机台"),
+      owner: String(alert.owner || "待定负责人"),
+      shift: "白班",
+      schedule_note: "经营预警中心触发：生产计划存在交期风险，需要生产主管复核调整。",
+      change_reason: String(alert.detail ?? "生产交期预警触发排产调整。"),
     };
   }
   if (action === "approveMaterialRequisition" || action === "approveStocktake" || action === "approveApproval") {
@@ -4276,6 +4295,49 @@ function productionPrintColumnLabel(key: string) {
   );
 }
 
+function averageProductionProgress(rows: Row[]) {
+  if (rows.length === 0) return 0;
+  return Math.round(rows.reduce((sum, row) => sum + productionProgressPercent(row.status), 0) / rows.length);
+}
+
+function buildMachineLoadRows(productions: Row[]): Row[] {
+  const grouped = new Map<string, Row & { owners_set: Set<string> }>();
+  productions
+    .filter((production) => production.planned_date || production.machine)
+    .forEach((production) => {
+      const plannedDate = String(production.planned_date ?? "未排产");
+      const machine = String(production.machine ?? "未指定机台");
+      const key = `${plannedDate}-${machine}`;
+      const current =
+        grouped.get(key) ??
+        ({
+          id: key,
+          plan_key: `${plannedDate} / ${machine}`,
+          planned_date: plannedDate,
+          machine,
+          order_count: 0,
+          planned_qty: 0,
+          owners_set: new Set<string>(),
+        } as Row & { owners_set: Set<string> });
+      current.order_count = Number(current.order_count ?? 0) + 1;
+      current.planned_qty = Number(current.planned_qty ?? 0) + Number(production.order_qty ?? 0);
+      current.owners_set.add(String(production.owner ?? "-"));
+      grouped.set(key, current);
+    });
+
+  return Array.from(grouped.values())
+    .map((row): Row => {
+      const orderCount = Number(row.order_count ?? 0);
+      return {
+        ...row,
+        owners: Array.from(row.owners_set).filter(Boolean).join("、"),
+        load_status: orderCount >= 4 ? "overload" : orderCount >= 2 ? "normal_load" : "light_load",
+        load_status_label: orderCount >= 4 ? "超负荷" : orderCount >= 2 ? "正常" : "空闲",
+      };
+    })
+    .sort((a, b) => String(a.planned_date).localeCompare(String(b.planned_date)) || String(a.machine).localeCompare(String(b.machine)));
+}
+
 function ProductionModule({
   snapshot,
   currentUser,
@@ -4300,9 +4362,16 @@ function ProductionModule({
   const productionDailyReports = snapshot.board.productionDailyReports ?? [];
   const submittedOrders = snapshot.board.orders.filter((item) => item.status === "submitted");
   const instructedProductions = snapshot.board.productions.filter((item) => item.status === "instructed");
+  const activeProductions = snapshot.board.productions.filter((item) => !["shipped", "voided", "cancelled"].includes(String(item.status)));
+  const scheduleChangeCandidates = activeProductions.filter((item) => item.planned_date);
+  const machineOptions = Array.from(
+    new Set(snapshot.board.productions.map((item) => String(item.machine ?? "")).filter(Boolean)),
+  );
   const reportableProductions = snapshot.board.productions.filter((item) =>
     ["producing", "inspection_requested", "qa_failed", "qa_approved", "in_stock"].includes(String(item.status)),
   );
+  const [planningStatusFilter, setPlanningStatusFilter] = useState("all");
+  const [planningMachineFilter, setPlanningMachineFilter] = useState("all");
   const [instructionForm, setInstructionForm] = useState<Record<string, string>>({
     order_id: String(submittedOrders[0]?.id ?? ""),
     priority: "normal",
@@ -4317,6 +4386,15 @@ function ProductionModule({
     shift: "白班",
     schedule_note: "按订单交期优先安排。",
     requisition_note: "按系统计算需求量领料，仓库默认 FIFO 发料。",
+  });
+  const [rescheduleForm, setRescheduleForm] = useState<Record<string, string>>({
+    production_id: String(scheduleChangeCandidates[0]?.id ?? ""),
+    planned_date: String(scheduleChangeCandidates[0]?.planned_date ?? new Date(Date.now() + 1000 * 60 * 60 * 24).toISOString().slice(0, 10)),
+    machine: String(scheduleChangeCandidates[0]?.machine ?? "CNC-02"),
+    owner: String(scheduleChangeCandidates[0]?.owner ?? "马工"),
+    shift: String(scheduleChangeCandidates[0]?.shift ?? "白班"),
+    schedule_note: String(scheduleChangeCandidates[0]?.schedule_note ?? "按最新交付优先级调整排产。"),
+    change_reason: "生产资源或订单交期变化，按正式排产变更流程留痕。",
   });
   const [dailyReportForm, setDailyReportForm] = useState<Record<string, string>>({
     production_id: String(reportableProductions[0]?.id ?? ""),
@@ -4336,13 +4414,36 @@ function ProductionModule({
   const selectedOrder = submittedOrders.find((item) => String(item.id) === instructionForm.order_id) ?? submittedOrders[0];
   const selectedProduction =
     instructedProductions.find((item) => String(item.id) === scheduleForm.production_id) ?? instructedProductions[0];
+  const selectedRescheduleProduction =
+    scheduleChangeCandidates.find((item) => String(item.id) === rescheduleForm.production_id) ?? scheduleChangeCandidates[0];
   const selectedReportProduction =
     reportableProductions.find((item) => String(item.id) === dailyReportForm.production_id) ?? reportableProductions[0];
+  const planningRows = activeProductions.filter((item) => {
+    const statusMatch = planningStatusFilter === "all" || String(item.status) === planningStatusFilter;
+    const machineMatch = planningMachineFilter === "all" || String(item.machine ?? "") === planningMachineFilter;
+    return statusMatch && machineMatch;
+  });
+  const machineLoadRows = buildMachineLoadRows(activeProductions);
+  const deliveryWarnings = snapshot.board.productionDeliveryWarnings ?? [];
   const setInstructionField = (key: string, value: string) =>
     setInstructionForm((current) => ({ ...current, [key]: value }));
   const setScheduleField = (key: string, value: string) => setScheduleForm((current) => ({ ...current, [key]: value }));
+  const setRescheduleField = (key: string, value: string) =>
+    setRescheduleForm((current) => ({ ...current, [key]: value }));
   const setDailyReportField = (key: string, value: string) =>
     setDailyReportForm((current) => ({ ...current, [key]: value }));
+  const selectRescheduleProduction = (value: string) => {
+    const next = scheduleChangeCandidates.find((item) => String(item.id) === value);
+    setRescheduleForm({
+      production_id: value,
+      planned_date: String(next?.planned_date ?? rescheduleForm.planned_date),
+      machine: String(next?.machine ?? rescheduleForm.machine),
+      owner: String(next?.owner ?? rescheduleForm.owner),
+      shift: String(next?.shift ?? rescheduleForm.shift),
+      schedule_note: String(next?.schedule_note ?? rescheduleForm.schedule_note),
+      change_reason: "生产资源或订单交期变化，按正式排产变更流程留痕。",
+    });
+  };
   const submitInstruction = async () => {
     if (!selectedOrder) return;
     await runAction({
@@ -4359,6 +4460,14 @@ function ProductionModule({
       payload: scheduleForm,
     });
   };
+  const submitReschedule = async () => {
+    if (!selectedRescheduleProduction) return;
+    await runAction({
+      action: "updateProductionSchedule",
+      entityId: String(selectedRescheduleProduction.id),
+      payload: rescheduleForm,
+    });
+  };
   const submitDailyReport = async () => {
     if (!selectedReportProduction) return;
     await runAction({
@@ -4372,12 +4481,140 @@ function ProductionModule({
     <div className="space-y-5">
       <div className="grid gap-3 md:grid-cols-4">
         <MiniMetric label="生产单" value={`${snapshot.board.productions.length} 单`} />
+        <MiniMetric label="在制计划" value={`${activeProductions.length} 单`} />
+        <MiniMetric label="交期预警" value={`${deliveryWarnings.length} 条`} />
+        <MiniMetric label="排产变更" value={`${snapshot.board.productionScheduleChanges.length} 次`} />
         <MiniMetric label="待审批" value={`${snapshot.board.requisitions.filter((item) => item.status === "pending_approval").length} 单`} />
         <MiniMetric label="待发料" value={`${snapshot.board.requisitions.filter((item) => item.status === "approved" || item.status === "pending").length} 单`} />
         <MiniMetric label="生产中" value={`${snapshot.board.productions.filter((item) => item.status === "producing").length} 单`} />
         <MiniMetric label="生产日报" value={`${productionDailyReports.length} 张`} />
         <MiniMetric label="已发货" value={`${snapshot.board.productions.filter((item) => item.status === "shipped").length} 单`} />
       </div>
+      <Panel title="生产计划中心" icon={Factory} action="排产 / 负荷 / 交期预警">
+        <div className="grid gap-3 md:grid-cols-4">
+          <MasterSelect label="状态筛选" value={planningStatusFilter} onChange={setPlanningStatusFilter}>
+            <option value="all">全部状态</option>
+            <option value="instructed">待排产</option>
+            <option value="material_requested">待发料</option>
+            <option value="producing">生产中</option>
+            <option value="inspection_requested">待品控</option>
+            <option value="qa_approved">待入库</option>
+            <option value="in_stock">待发货</option>
+          </MasterSelect>
+          <MasterSelect label="机台筛选" value={planningMachineFilter} onChange={setPlanningMachineFilter}>
+            <option value="all">全部机台</option>
+            {machineOptions.map((machine) => (
+              <option key={machine} value={machine}>
+                {machine}
+              </option>
+            ))}
+          </MasterSelect>
+          <MiniMetric label="筛选结果" value={`${planningRows.length} 单`} />
+          <MiniMetric label="平均进度" value={`${averageProductionProgress(planningRows)}%`} />
+        </div>
+      </Panel>
+      <div className="grid gap-5 xl:grid-cols-[1fr_380px]">
+        <DataTable
+          title="生产计划台账"
+          icon={Factory}
+          rows={planningRows}
+          empty="暂无符合条件的生产计划"
+          columns={[
+            { key: "prod_no", label: "生产单" },
+            { key: "order_no", label: "订单号" },
+            { key: "customer_name", label: "客户" },
+            { key: "product_name", label: "产品" },
+            { key: "planned_date", label: "计划日期", render: shortDate },
+            { key: "due_date", label: "交付期限", render: shortDate },
+            { key: "machine", label: "机台" },
+            { key: "owner", label: "负责人" },
+            { key: "shift", label: "班次" },
+            { key: "status_label", label: "状态", render: (value) => <StatusBadge value={String(value)} /> },
+            { key: "delivery_risk_label", label: "交期风险", render: (value, row) => <StatusBadge value={String(value)} tone={String(row.delivery_risk_status) === "normal" ? "success" : "warning"} /> },
+            { key: "schedule_change_count", label: "变更" },
+          ]}
+        />
+        <div className="space-y-5">
+          <DataTable
+            title="机台负荷"
+            icon={Gauge}
+            rows={machineLoadRows}
+            empty="暂无机台负荷"
+            columns={[
+              { key: "plan_key", label: "日期/机台" },
+              { key: "order_count", label: "任务数" },
+              { key: "planned_qty", label: "计划量", render: (value) => formatQty(value) },
+              { key: "owners", label: "负责人" },
+              { key: "load_status_label", label: "负荷", render: (value) => <StatusBadge value={String(value)} /> },
+            ]}
+          />
+          <DataTable
+            title="交期预警"
+            icon={AlertTriangle}
+            rows={deliveryWarnings}
+            empty="当前无生产交期预警"
+            columns={[
+              { key: "prod_no", label: "生产单" },
+              { key: "warning_type_label", label: "风险" },
+              { key: "due_date", label: "交期", render: shortDate },
+              { key: "planned_date", label: "计划", render: shortDate },
+              { key: "delay_days", label: "影响天数" },
+            ]}
+          />
+        </div>
+      </div>
+      <Panel title="排产变更留痕" icon={FileCheck2} action={canSchedule ? "正式变更" : "只读"}>
+        {canSchedule && selectedRescheduleProduction ? (
+          <div className="grid gap-3 xl:grid-cols-[1.4fr_repeat(4,minmax(120px,0.75fr))_1.5fr_auto]">
+            <MasterSelect label="已排产生产单" value={String(selectedRescheduleProduction.id)} onChange={selectRescheduleProduction}>
+              {scheduleChangeCandidates.map((production) => (
+                <option key={String(production.id)} value={String(production.id)}>
+                  {String(production.prod_no)} / {String(production.order_no)} / {String(production.product_name)}
+                </option>
+              ))}
+            </MasterSelect>
+            <MasterInput
+              label="新计划日期"
+              type="date"
+              value={rescheduleForm.planned_date}
+              onChange={(value) => setRescheduleField("planned_date", value)}
+            />
+            <MasterInput label="机台" value={rescheduleForm.machine} onChange={(value) => setRescheduleField("machine", value)} />
+            <MasterInput label="负责人" value={rescheduleForm.owner} onChange={(value) => setRescheduleField("owner", value)} />
+            <MasterInput label="班次" value={rescheduleForm.shift} onChange={(value) => setRescheduleField("shift", value)} />
+            <MasterInput
+              label="变更原因"
+              value={rescheduleForm.change_reason}
+              onChange={(value) => setRescheduleField("change_reason", value)}
+            />
+            <div className="flex items-end">
+              <MasterSubmitButton
+                busy={busy === `updateProductionSchedule-${String(selectedRescheduleProduction.id)}-primary`}
+                label="保存变更"
+                onClick={submitReschedule}
+              />
+            </div>
+          </div>
+        ) : (
+          <EmptyText text={scheduleChangeCandidates.length === 0 ? "暂无已排产生产单可变更" : "请切换生产主管或管理员调整排产。"} />
+        )}
+      </Panel>
+      <DataTable
+        title="排产变更记录"
+        icon={FileCheck2}
+        rows={snapshot.board.productionScheduleChanges}
+        empty="暂无排产变更记录"
+        columns={[
+          { key: "prod_no", label: "生产单" },
+          { key: "old_planned_date", label: "原日期", render: shortDate },
+          { key: "new_planned_date", label: "新日期", render: shortDate },
+          { key: "old_machine", label: "原机台" },
+          { key: "new_machine", label: "新机台" },
+          { key: "change_reason", label: "原因" },
+          { key: "changed_by_name", label: "变更人" },
+          { key: "changed_at", label: "变更时间", render: shortDate },
+        ]}
+      />
       <div className="grid gap-5 xl:grid-cols-2">
         <Panel title="生产指令下发" icon={ClipboardList} action={canCreateInstruction ? "正式单据" : "只读"}>
           {canCreateInstruction && selectedOrder ? (

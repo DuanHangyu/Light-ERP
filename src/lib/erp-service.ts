@@ -107,6 +107,7 @@ const roleActionMap: Record<string, Role[]> = {
   createProductionInstruction: ["assistant", "admin"],
   createShipment: ["assistant"],
   scheduleAndGenerateRequisition: ["production", "admin"],
+  updateProductionSchedule: ["production", "admin"],
   requestInspection: ["production"],
   approveMaterialRequisition: ["warehouse", "admin"],
   rejectMaterialRequisition: ["warehouse", "admin"],
@@ -187,6 +188,7 @@ const actionLabels: Record<string, string> = {
   createProductionInstruction: "下发生产指令",
   createShipment: "生成发货单",
   scheduleAndGenerateRequisition: "排产并生成领料",
+  updateProductionSchedule: "调整生产排产",
   requestInspection: "生产请验",
   approveMaterialRequisition: "领料审批",
   rejectMaterialRequisition: "驳回领料",
@@ -1504,6 +1506,65 @@ function daysUntil(dateText: unknown) {
   return Math.ceil((due - Date.now()) / (1000 * 60 * 60 * 24));
 }
 
+function dateDiffDays(fromDate: unknown, toDate: unknown) {
+  const from = Date.parse(String(fromDate ?? ""));
+  const to = Date.parse(String(toDate ?? ""));
+  if (Number.isNaN(from) || Number.isNaN(to)) return 0;
+  return Math.ceil((to - from) / (1000 * 60 * 60 * 24));
+}
+
+function productionDeliveryRisk(row: Record<string, unknown>) {
+  const status = String(row.status ?? "");
+  if (["shipped", "voided", "cancelled"].includes(status)) return { status: "normal", label: "正常" };
+  const dueDays = daysUntil(row.due_date);
+  const plannedDate = String(row.planned_date ?? "");
+  if (!plannedDate && dueDays < 0) return { status: "overdue_unscheduled", label: "逾期未排产" };
+  if (!plannedDate && dueDays <= 3) return { status: "due_soon_unscheduled", label: "临期未排产" };
+  if (plannedDate && dateDiffDays(row.due_date, plannedDate) > 0) return { status: "delayed", label: "计划晚于交期" };
+  if (plannedDate && dueDays <= 3 && ["material_requested", "producing", "inspection_requested", "qa_failed"].includes(status)) {
+    return { status: "at_risk", label: "临期未完成" };
+  }
+  return { status: "normal", label: "正常" };
+}
+
+function productionDeliveryWarningRows(productions: Array<Record<string, unknown>>) {
+  return productions
+    .map((production) => {
+      const risk = productionDeliveryRisk(production);
+      if (risk.status === "normal") return null;
+      const warningType =
+        risk.status === "delayed"
+          ? "scheduled_after_due"
+          : risk.status === "overdue_unscheduled"
+            ? "overdue_unscheduled"
+            : risk.status === "due_soon_unscheduled"
+              ? "due_soon_unscheduled"
+              : "due_soon_unfinished";
+      const warningLevel = risk.status === "overdue_unscheduled" ? "critical" : "high";
+      return {
+        id: `production-delivery-risk-${production.id}`,
+        production_order_id: production.id,
+        prod_no: production.prod_no,
+        order_id: production.order_id,
+        order_no: production.order_no,
+        customer_name: production.customer_name,
+        product_name: production.product_name,
+        status: production.status,
+        status_label: productionStatusLabel(String(production.status)),
+        planned_date: production.planned_date ?? "",
+        due_date: production.due_date,
+        machine: production.machine ?? "",
+        owner: production.owner ?? "",
+        warning_type: warningType,
+        warning_type_label: risk.label,
+        warning_level: warningLevel,
+        warning_level_label: alertSeverityLabel(warningLevel),
+        delay_days: production.planned_date ? Math.max(dateDiffDays(production.due_date, production.planned_date), 0) : Math.max(-daysUntil(production.due_date), 0),
+      } satisfies Record<string, unknown>;
+    })
+    .filter(Boolean) as Array<Record<string, unknown>>;
+}
+
 function alertCenterRows(input: {
   materials: Array<Record<string, unknown>>;
   inventoryAging: Array<Record<string, unknown>>;
@@ -1511,6 +1572,7 @@ function alertCenterRows(input: {
   receivables: Array<Record<string, unknown>>;
   payables: Array<Record<string, unknown>>;
   inspections: Array<Record<string, unknown>>;
+  productionDeliveryWarnings?: Array<Record<string, unknown>>;
   mrpRequirementRuns?: Array<Record<string, unknown>>;
   systemHealthRemediations?: Array<Record<string, unknown>>;
   operatingParameters: OperatingParameters;
@@ -1586,6 +1648,29 @@ function alertCenterRows(input: {
         generated_at: generatedAt,
       });
     });
+
+  (input.productionDeliveryWarnings ?? []).forEach((warning) => {
+    rows.push({
+      id: `alert-production-delivery-${warning.production_order_id}`,
+      alert_type: "production_delivery_risk",
+      alert_type_label: "生产交期预警",
+      severity: warning.warning_level ?? "high",
+      module_label: "生产执行",
+      owner_role: "production",
+      owner_role_label: roleLabel("production"),
+      title: `${warning.prod_no ?? "生产单"} ${warning.warning_type_label ?? "存在交期风险"}`,
+      detail: `${warning.customer_name ?? "-"} / ${warning.product_name ?? "-"}，交期 ${warning.due_date ?? "-"}，计划 ${warning.planned_date || "未排产"}。`,
+      entity_type: "production",
+      entity_id: warning.production_order_id,
+      planned_date: warning.planned_date,
+      due_date: warning.due_date,
+      machine: warning.machine,
+      owner: warning.owner,
+      action: "updateProductionSchedule",
+      action_label: "调整排产",
+      generated_at: generatedAt,
+    });
+  });
 
   input.approvalCenter.forEach((approval) => {
     rows.push({
@@ -1756,7 +1841,19 @@ export function getSnapshot(actorId = "U-SALES") {
            c.name AS customer_name,
            p.name AS product_name, p.unit,
            s.planned_date, s.machine, s.owner, s.shift, s.schedule_note,
-           issuer.name AS issued_by_name
+           issuer.name AS issued_by_name,
+           COALESCE((
+             SELECT COUNT(*)
+             FROM production_schedule_changes psc
+             WHERE psc.production_order_id = po.id
+           ), 0) AS schedule_change_count,
+           COALESCE((
+             SELECT psc.change_reason
+             FROM production_schedule_changes psc
+             WHERE psc.production_order_id = po.id
+             ORDER BY psc.changed_at DESC
+             LIMIT 1
+           ), '') AS latest_schedule_change_reason
     FROM production_orders po
     JOIN orders o ON o.id = po.order_id
     JOIN customers c ON c.id = o.customer_id
@@ -1767,7 +1864,25 @@ export function getSnapshot(actorId = "U-SALES") {
   `).all() as Array<Record<string, unknown>>;
   productions.forEach((item) => {
     item.priority_label = priorityLabel(String(item.priority ?? "normal"));
+    const risk = productionDeliveryRisk(item);
+    item.delivery_risk_status = risk.status;
+    item.delivery_risk_label = risk.label;
   });
+
+  const productionScheduleChanges = database.prepare(`
+    SELECT psc.*, po.prod_no, o.order_no, o.due_date,
+           c.name AS customer_name,
+           p.name AS product_name,
+           changer.name AS changed_by_name
+    FROM production_schedule_changes psc
+    JOIN production_orders po ON po.id = psc.production_order_id
+    JOIN orders o ON o.id = po.order_id
+    JOIN customers c ON c.id = o.customer_id
+    JOIN products p ON p.id = o.product_id
+    LEFT JOIN users changer ON changer.id = psc.changed_by
+    ORDER BY psc.changed_at DESC
+  `).all() as Array<Record<string, unknown>>;
+  const productionDeliveryWarnings = productionDeliveryWarningRows(productions);
 
   const requisitions = database.prepare(`
     SELECT r.*, po.prod_no, po.priority, o.order_no, o.qty AS order_qty,
@@ -2941,6 +3056,7 @@ export function getSnapshot(actorId = "U-SALES") {
     receivables,
     payables,
     inspections,
+    productionDeliveryWarnings,
     mrpRequirementRuns,
     systemHealthRemediations,
     operatingParameters,
@@ -3101,6 +3217,8 @@ export function getSnapshot(actorId = "U-SALES") {
         ...item,
         status_label: productionStatusLabel(String(item.status)),
       })),
+      productionScheduleChanges,
+      productionDeliveryWarnings,
       requisitions: requisitions.map((item) => ({
         ...item,
         lines: JSON.parse(String(item.lines)) as unknown[],
@@ -3592,6 +3710,7 @@ function actionModuleLabel(action: string) {
     [
       "createProductionInstruction",
       "scheduleAndGenerateRequisition",
+      "updateProductionSchedule",
       "approveMaterialRequisition",
       "issueMaterials",
       "requestInspection",
@@ -5021,6 +5140,9 @@ export function performAction(input: ActionInput) {
       case "scheduleAndGenerateRequisition":
         scheduleAndGenerateRequisition(database, input.actorId, mustEntity(input.entityId), input.payload);
         break;
+      case "updateProductionSchedule":
+        updateProductionSchedule(database, input.actorId, mustEntity(input.entityId), input.payload);
+        break;
       case "approveMaterialRequisition":
         approveMaterialRequisition(database, input.actorId, mustEntity(input.entityId), input.payload);
         break;
@@ -5915,6 +6037,86 @@ function scheduleAndGenerateRequisition(
 
   database.prepare("UPDATE production_orders SET status = 'material_requested' WHERE id = ?").run(production.id);
   audit(database, actorId, "scheduleAndGenerateRequisition", "requisition", requisitionId, `排产并生成领料单 ${reqNo}`);
+}
+
+function updateProductionSchedule(
+  database: Database.Database,
+  actorId: string,
+  productionId: string,
+  rawPayload?: Record<string, unknown>,
+) {
+  const payload = rawPayload && typeof rawPayload === "object" ? rawPayload : {};
+  const schedule = database.prepare(`
+    SELECT s.*, po.prod_no, po.status AS production_status
+    FROM schedules s
+    JOIN production_orders po ON po.id = s.production_order_id
+    WHERE po.id = ?
+    ORDER BY s.rowid DESC
+    LIMIT 1
+  `).get(productionId) as
+    | {
+        id: string;
+        production_order_id: string;
+        planned_date: string;
+        machine: string;
+        owner: string;
+        shift: string;
+        schedule_note: string;
+        prod_no: string;
+        production_status: string;
+      }
+    | undefined;
+  if (!schedule) throw new Error("生产单尚未排产，不能执行排产变更。");
+  if (["shipped", "voided", "cancelled"].includes(schedule.production_status)) {
+    throw new Error("生产单已完成或关闭，不能调整排产。");
+  }
+
+  const plannedDate = payloadDate(payload, "planned_date", "计划生产日期", schedule.planned_date);
+  const machine = payloadText(payload, "machine", "机台", false) || schedule.machine;
+  const owner = payloadText(payload, "owner", "负责人", false) || schedule.owner;
+  const shift = payloadText(payload, "shift", "班次", false) || schedule.shift || "白班";
+  const scheduleNote = payloadText(payload, "schedule_note", "排产备注", false) || schedule.schedule_note || "";
+  const changeReason = payloadText(payload, "change_reason", "变更原因", true);
+  const changedAt = now();
+  const changeId = uid("SCHC");
+
+  database.prepare(`
+    INSERT INTO production_schedule_changes (
+      id, schedule_id, production_order_id,
+      old_planned_date, new_planned_date,
+      old_machine, new_machine,
+      old_owner, new_owner,
+      old_shift, new_shift,
+      old_schedule_note, new_schedule_note,
+      change_reason, changed_by, changed_at
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    changeId,
+    schedule.id,
+    schedule.production_order_id,
+    schedule.planned_date,
+    plannedDate,
+    schedule.machine,
+    machine,
+    schedule.owner,
+    owner,
+    schedule.shift,
+    shift,
+    schedule.schedule_note,
+    scheduleNote,
+    changeReason,
+    actorId,
+    changedAt,
+  );
+
+  database.prepare(`
+    UPDATE schedules
+    SET planned_date = ?, machine = ?, owner = ?, shift = ?, schedule_note = ?, status = 'revised'
+    WHERE id = ?
+  `).run(plannedDate, machine, owner, shift, scheduleNote, schedule.id);
+
+  audit(database, actorId, "updateProductionSchedule", "production_order", productionId, `调整生产排产 ${schedule.prod_no}：${changeReason}`);
 }
 
 function approveMaterialRequisition(

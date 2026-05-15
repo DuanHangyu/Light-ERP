@@ -4212,7 +4212,9 @@ describe("ERP service formal production instruction and scheduling", () => {
     });
 
     const snapshot = service.getSnapshot("U-PROD");
-    const updatedProduction = snapshot.board.productions.find((item) => item.id === production.id) as Record<string, unknown>;
+    const updatedProduction = (snapshot.board.productions as Array<Record<string, unknown>>).find(
+      (item) => item.id === production.id,
+    ) as Record<string, unknown>;
     expect(updatedProduction).toMatchObject({
       planned_date: delayedPlanDate,
       machine: "CNC-09",
