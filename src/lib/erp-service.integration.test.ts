@@ -6318,6 +6318,132 @@ describe("ERP service production plan lock approval and change notifications", (
       unit_cost: returnUnitCost,
     });
   });
+
+  it("reviews executed material adjustment orders and exports cost impact reports", async () => {
+    const service = await loadService();
+    const scenario = createPlanChangeImpactScenario(service);
+    const warehouseImpact = scenario.impacts.find((item) => item.impact_type === "material_requisition") as Record<string, unknown>;
+
+    service.performAction({
+      actorId: "U-WH",
+      action: "resolveProductionPlanChangeImpact",
+      entityId: String(warehouseImpact.id),
+      payload: {
+        adjustment_type: "supplement",
+        suggested_qty: "2.5",
+        resolution_note: "现场确认原料不足，需要正式补料并进行成本复核。",
+      },
+    });
+    const suggestionSnapshot = service.getSnapshot("U-PROD") as unknown as {
+      board: { productionMaterialAdjustmentSuggestions: Array<Record<string, unknown>> };
+    };
+    const suggestion = suggestionSnapshot.board.productionMaterialAdjustmentSuggestions.find(
+      (item) => item.impact_id === warehouseImpact.id,
+    ) as Record<string, unknown>;
+    service.performAction({
+      actorId: "U-PROD",
+      action: "confirmMaterialAdjustmentSuggestion",
+      entityId: String(suggestion.id),
+      payload: { confirmation_note: "生产确认补料数量，转仓库正式执行并做成本复核。" },
+    });
+    const order = service
+      .getSnapshot("U-WH")
+      .board.productionMaterialAdjustmentOrders.find((item) => item.suggestion_id === suggestion.id) as Record<string, unknown>;
+
+    service.performAction({
+      actorId: "U-WH",
+      action: "executeMaterialAdjustmentOrder",
+      entityId: String(order.id),
+      payload: {
+        material_id: "M-STEEL",
+        execution_date: "2026-07-04",
+        execution_note: "仓库按正式补料单 FIFO 补发主材，等待复核成本影响。",
+      },
+    });
+
+    const reviewPendingSnapshot = service.getSnapshot("U-WH") as unknown as {
+      board: {
+        productionMaterialAdjustmentOrders: Array<Record<string, unknown>>;
+        productionMaterialAdjustmentOrderReviews: Array<Record<string, unknown>>;
+      };
+      tasks: Array<Record<string, unknown>>;
+    };
+    const executedOrder = reviewPendingSnapshot.board.productionMaterialAdjustmentOrders.find((item) => item.id === order.id) as Record<string, unknown>;
+    expect(executedOrder).toMatchObject({
+      status: "executed",
+      review_status: "pending_review",
+      review_status_label: "待复核",
+    });
+    expect(Number(executedOrder.cost_impact_amount)).toBeGreaterThan(0);
+    expect(Number(executedOrder.inventory_value_delta)).toBeLessThan(0);
+    expect(reviewPendingSnapshot.tasks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: `task-material-adjustment-review-${order.id}`,
+          action: "reviewMaterialAdjustmentOrder",
+          primaryLabel: "复核成本影响",
+        }),
+      ]),
+    );
+
+    service.performAction({
+      actorId: "U-WH",
+      action: "reviewMaterialAdjustmentOrder",
+      entityId: String(order.id),
+      payload: {
+        review_result: "approved",
+        review_note: "仓库复核补料批次、数量、库存流水与成本影响一致。",
+      },
+    });
+
+    const reviewedSnapshot = service.getSnapshot("U-WH") as unknown as {
+      board: {
+        productionMaterialAdjustmentOrders: Array<Record<string, unknown>>;
+        productionMaterialAdjustmentOrderReviews: Array<Record<string, unknown>>;
+      };
+      tasks: Array<Record<string, unknown>>;
+    };
+    const reviewedOrder = reviewedSnapshot.board.productionMaterialAdjustmentOrders.find((item) => item.id === order.id) as Record<string, unknown>;
+    const review = reviewedSnapshot.board.productionMaterialAdjustmentOrderReviews.find((item) => item.order_id === order.id) as Record<string, unknown>;
+    expect(reviewedOrder).toMatchObject({
+      review_status: "reviewed",
+      review_status_label: "已复核",
+      reviewed_by_name: "仓库管理员-吴勇",
+      review_note: "仓库复核补料批次、数量、库存流水与成本影响一致。",
+    });
+    expect(review).toMatchObject({
+      review_no: expect.stringMatching(/^BTFH-/),
+      order_id: order.id,
+      review_result: "approved",
+      review_result_label: "复核通过",
+      cost_impact_amount: reviewedOrder.cost_impact_amount,
+      inventory_value_delta: reviewedOrder.inventory_value_delta,
+    });
+    expect(reviewedSnapshot.tasks.some((task) => task.id === `task-material-adjustment-review-${order.id}`)).toBe(false);
+
+    const exportResult = await service.buildExport({
+      actorId: "U-MGR",
+      type: "material-adjustment-cost-impact",
+      format: "xlsx",
+      entityId: String(order.id),
+    });
+    const xml = xlsxXml(exportResult.buffer);
+    expect(exportResult.fileName).toContain("material-adjustment-cost-impact");
+    expect(xml).toContain('name="report_cover"');
+    expect(xml).toContain('name="material_adjustment_cost_impact"');
+    expect(xml).toContain("补退料成本影响报表");
+    expect(xml).toContain(String(reviewedOrder.order_no));
+    expect(xml).toContain(String(review.review_no));
+
+    expect(() =>
+      service.performAction({
+        actorId: "U-WH",
+        action: "reviewMaterialAdjustmentOrder",
+        entityId: String(order.id),
+        payload: { review_result: "approved" },
+      }),
+    ).toThrow("补退料单已复核");
+  });
 });
 
 describe("ERP service formal report center", () => {
