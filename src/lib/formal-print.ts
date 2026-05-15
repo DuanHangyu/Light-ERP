@@ -458,6 +458,72 @@ export function buildPurchaseArrivalNoticePrintPreview(source: Source): FormalPr
   });
 }
 
+export function buildPurchaseArrivalChangeLogPrintPreview(source: Source): FormalPrintDocument {
+  return baseDocument({
+    header: {
+      companyName: text(source.company_name, "本地化生产流转 ERP"),
+      title: "到货通知变更留痕单",
+      documentNo: text(source.change_no),
+      documentDate: dateText(source.changed_at ?? source.created_at),
+      statusText: text(source.document_status ?? source.status_label, "已留痕"),
+    },
+    eyebrow: "LOCAL ERP ARRIVAL CHANGE LOG",
+    description: "采购到货通知发生计划调整时自动生成，记录变更前后信息、关联生产计划影响和责任人，用于仓库签收、供应商沟通及审计追溯",
+    fieldSections: [
+      {
+        title: "来源单据",
+        fields: [
+          { label: "变更留痕单", value: text(source.change_no) },
+          { label: "到货通知", value: text(source.arrival_no) },
+          { label: "采购订单", value: text(source.purchase_no) },
+          { label: "采购合同", value: text(source.contract_no, "") },
+          { label: "供应商", value: text(source.supplier_name ?? source.supplier) },
+          { label: "影响单号", value: text(source.impact_no, "") },
+        ],
+      },
+      {
+        title: "变更信息",
+        fields: [
+          { label: "变更类型", value: text(source.change_type_label ?? source.change_type, "生产计划影响调整") },
+          { label: "原到货日期", value: dateText(source.old_arrived_at) },
+          { label: "新到货日期", value: dateText(source.new_arrived_at) },
+          { label: "变更人", value: text(source.changed_by_name ?? source.changed_by, "") },
+          { label: "变更时间", value: dateText(source.changed_at) },
+          { label: "变更原因", value: text(source.reason, "") },
+        ],
+      },
+    ],
+    lineSections: [
+      {
+        title: "变更对照",
+        columns: [
+          { key: "field", label: "字段" },
+          { key: "before", label: "变更前" },
+          { key: "after", label: "变更后" },
+        ],
+        rows: [
+          { field: "到货日期", before: dateText(source.old_arrived_at), after: dateText(source.new_arrived_at) },
+          { field: "到货说明", before: text(source.old_note, ""), after: text(source.new_note, "") },
+        ],
+        minRows: 4,
+      },
+    ],
+    notesTitle: "留痕说明",
+    notes: [
+      "本单由系统在处理生产计划变更影响并调整采购到货通知时自动生成。",
+      "任何到货通知日期、说明或执行节奏变更均应保留变更前后信息、变更原因和责任人。",
+      "仓库签收、IQC请检、采购对账和供应商交期沟通应以最新到货通知为准，同时保留本留痕单用于追溯。",
+    ],
+    signatures: [
+      { label: "采购确认", hint: "到货日期" },
+      { label: "生产知会", hint: "计划影响" },
+      { label: "仓库知会", hint: "签收节奏" },
+      { label: "管理复核", hint: "变更追溯" },
+    ],
+    footerLeft: "第一联：采购执行联 / 第二联：仓库知会联 / 第三联：生产追溯联",
+  });
+}
+
 function discrepancyDocumentLines(source: Source) {
   const rawLines = Array.isArray(source.lines) ? (source.lines as Source[]) : [];
   const lines =
@@ -497,6 +563,80 @@ function discrepancyDocumentLines(source: Source) {
     lineAdjustmentAmount: moneyText(line.lineAdjustmentAmount ?? line.line_adjustment_amount),
     remark: text(line.note ?? line.remark, ""),
   }));
+}
+
+export function buildMaterialAdjustmentOrderPrintPreview(source: Source): FormalPrintDocument {
+  const adjustmentType = text(source.adjustment_type_label ?? source.adjustment_type, "补退料");
+  return baseDocument({
+    header: {
+      companyName: text(source.company_name, "本地化生产流转 ERP"),
+      title: "正式补退料单",
+      documentNo: text(source.order_no),
+      documentDate: dateText(source.created_at),
+      statusText: text(source.status_label ?? source.document_status, "待执行"),
+    },
+    eyebrow: "LOCAL ERP MATERIAL ADJUSTMENT ORDER",
+    description: "生产确认补退料建议后生成，作为仓库补发、退料、复核和生产计划变更追溯的正式执行单据",
+    fieldSections: [
+      {
+        title: "生产与来源",
+        fields: [
+          { label: "正式单号", value: text(source.order_no) },
+          { label: "建议单号", value: text(source.suggestion_no) },
+          { label: "影响单号", value: text(source.impact_no) },
+          { label: "生产单", value: text(source.prod_no) },
+          { label: "领料单", value: text(source.req_no, "") },
+          { label: "客户订单", value: text(source.order_no === source.customer_order_no ? "" : source.customer_order_no, "") },
+        ],
+      },
+      {
+        title: "执行要求",
+        fields: [
+          { label: "调整类型", value: adjustmentType },
+          { label: "调整数量", value: qtyText(source.qty) },
+          { label: "产品", value: text(source.product_name ?? source.product, "") },
+          { label: "客户", value: text(source.customer_name ?? source.customer, "") },
+          { label: "制单人", value: text(source.created_by_name ?? source.created_by, "") },
+          { label: "制单时间", value: dateText(source.created_at) },
+        ],
+      },
+    ],
+    lineSections: [
+      {
+        title: "补退料执行明细",
+        columns: [
+          { key: "lineNo", label: "序号" },
+          { key: "type", label: "类型" },
+          { key: "qty", label: "数量", align: "right" },
+          { key: "summary", label: "物料摘要" },
+          { key: "reason", label: "来源原因" },
+        ],
+        rows: [
+          {
+            lineNo: 1,
+            type: adjustmentType,
+            qty: qtyText(source.qty),
+            summary: text(source.material_summary, ""),
+            reason: text(source.reason ?? source.suggestion_reason, ""),
+          },
+        ],
+        minRows: 4,
+      },
+    ],
+    notesTitle: "执行说明",
+    notes: [
+      text(source.confirmation_note, "本单已由生产确认补退料建议后转正式单。"),
+      "仓库执行补料或退料时，应核对生产单、领料单、物料摘要和实际数量，并形成库存流水。",
+      "本单与生产计划变更影响单、补退料建议单、领料单共同构成完整追溯链。",
+    ],
+    signatures: [
+      { label: "生产确认", hint: "需求/数量" },
+      { label: "仓库执行", hint: "补料/退料" },
+      { label: "品控/技术知会", hint: "必要时" },
+      { label: "主管复核", hint: "异常闭环" },
+    ],
+    footerLeft: "第一联：仓库执行联 / 第二联：生产留存联 / 第三联：异常追溯联",
+  });
 }
 
 export function buildPurchaseArrivalDiscrepancyPrintPreview(source: Source): FormalPrintDocument {

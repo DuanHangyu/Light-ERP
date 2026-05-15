@@ -44,6 +44,8 @@ import {
 } from "recharts";
 import { buildDeliveryNotePreview, type DeliveryNotePreview } from "@/lib/delivery-note";
 import {
+  buildMaterialAdjustmentOrderPrintPreview,
+  buildPurchaseArrivalChangeLogPrintPreview,
   buildPurchaseArrivalNoticePrintPreview,
   buildPurchaseContractPrintPreview,
   buildPurchaseArrivalDiscrepancyPrintPreview,
@@ -183,6 +185,7 @@ type Snapshot = {
     productionPlanNotifications: Row[];
     productionPlanChangeImpacts: Row[];
     productionMaterialAdjustmentSuggestions: Row[];
+    productionMaterialAdjustmentOrders: Row[];
     qualityInspectionWindowConfirmations: Row[];
     customerDeliveryConfirmations: Row[];
     requisitions: Row[];
@@ -231,6 +234,7 @@ type Snapshot = {
     mrpRequirementLines: Row[];
     purchaseContracts: Row[];
     purchaseArrivalNotices: Row[];
+    purchaseArrivalNoticeChangeLogs: Row[];
     purchaseArrivalDiscrepancies: Row[];
     purchaseOrders: Row[];
     materialIqcInspections: Row[];
@@ -4614,6 +4618,15 @@ function ProductionModule({
       payload: linkedPayload,
     });
   };
+  const confirmMaterialAdjustmentSuggestion = async (suggestion: Row) => {
+    await runAction({
+      action: "confirmMaterialAdjustmentSuggestion",
+      entityId: String(suggestion.id),
+      payload: {
+        confirmation_note: `${currentUser?.role_label ?? "生产"}确认补退料建议，转正式补退料单执行。`,
+      },
+    });
+  };
 
   return (
     <div className="space-y-5">
@@ -4870,7 +4883,7 @@ function ProductionModule({
           },
         ]}
       />
-      <div className="grid gap-5 xl:grid-cols-3">
+      <div className="grid gap-5 xl:grid-cols-4">
         <DataTable
           title="补退料建议单"
           icon={PackageCheck}
@@ -4884,7 +4897,50 @@ function ProductionModule({
             { key: "suggested_qty", label: "建议数量", render: (value) => formatQty(value) },
             { key: "status_label", label: "状态", render: (value) => <StatusBadge value={String(value)} /> },
             { key: "created_by_name", label: "创建人" },
+            {
+              key: "suggestion_ops",
+              label: "确认",
+              render: (_value, row) => {
+                const canConfirm = String(row.status) === "pending_confirmation" && ["production", "admin"].includes(currentUser?.role ?? "");
+                return canConfirm ? (
+                  <InlineActionButton
+                    label="转正式单"
+                    busy={busy === `confirmMaterialAdjustmentSuggestion-${String(row.id)}-primary`}
+                    onClick={() => void confirmMaterialAdjustmentSuggestion(row)}
+                  />
+                ) : (
+                  <span className="text-xs text-slate-400">-</span>
+                );
+              },
+            },
           ]}
+        />
+        <DataTable
+          title="正式补退料单"
+          icon={FileCheck2}
+          rows={snapshot.board.productionMaterialAdjustmentOrders}
+          empty="暂无正式补退料单"
+          columns={[
+            { key: "order_no", label: "正式单号" },
+            { key: "suggestion_no", label: "建议单" },
+            { key: "prod_no", label: "生产单" },
+            { key: "req_no", label: "领料单", render: (value) => String(value ?? "-") },
+            { key: "adjustment_type_label", label: "类型", render: (value) => <StatusBadge value={String(value)} /> },
+            { key: "qty", label: "数量", render: (value) => formatQty(value) },
+            { key: "status_label", label: "状态", render: (value) => <StatusBadge value={String(value)} /> },
+            { key: "created_by_name", label: "确认人" },
+            {
+              key: "adjustment_order_ops",
+              label: "单据",
+              render: (_value, row) => (
+                <div className="flex gap-2">
+                  <InlineActionButton label="预览" onClick={() => setProductionPreview(buildMaterialAdjustmentOrderPrintPreview(row))} />
+                  <InlineActionButton label="导出" onClick={() => downloadExport(snapshot.currentUser.id, "material-adjustment-order", row.id)} />
+                </div>
+              ),
+            },
+          ]}
+          action={{ label: "补退料单导出", onClick: () => downloadExport(snapshot.currentUser.id, "material-adjustment-order") }}
         />
         <DataTable
           title="质检窗口确认"
@@ -4915,7 +4971,7 @@ function ProductionModule({
           ]}
         />
       </div>
-      <div className="grid gap-5 xl:grid-cols-[1fr_380px]">
+      <div className="grid gap-5 xl:grid-cols-3">
         <DataTable
           title="生产计划台账"
           icon={Factory}
@@ -7019,6 +7075,35 @@ function InventoryModule({
             },
           ]}
           action={{ label: "到货单导出", onClick: () => downloadExport(actorId, "purchase-arrival-notice") }}
+        />
+        <DataTable
+          title="到货通知变更留痕"
+          icon={FileCheck2}
+          rows={snapshot.board.purchaseArrivalNoticeChangeLogs}
+          empty="暂无到货通知变更留痕"
+          columns={[
+            { key: "change_no", label: "留痕单号" },
+            { key: "arrival_no", label: "到货通知" },
+            { key: "purchase_no", label: "采购单" },
+            { key: "supplier_name", label: "供应商" },
+            { key: "impact_no", label: "影响单", render: (value) => String(value ?? "-") },
+            { key: "change_type_label", label: "变更类型", render: (value) => <StatusBadge value={String(value)} /> },
+            { key: "old_arrived_at", label: "原到货", render: shortDate },
+            { key: "new_arrived_at", label: "新到货", render: shortDate },
+            { key: "changed_by_name", label: "变更人" },
+            { key: "changed_at", label: "时间", render: shortDate },
+            {
+              key: "change_log_ops",
+              label: "单据",
+              render: (_value, row) => (
+                <div className="flex gap-2">
+                  <InlineActionButton label="预览" onClick={() => setFormalPreview(buildPurchaseArrivalChangeLogPrintPreview(row))} />
+                  <InlineActionButton label="导出" onClick={() => downloadExport(actorId, "purchase-arrival-change-log", row.arrival_notice_id ?? row.id)} />
+                </div>
+              ),
+            },
+          ]}
+          action={{ label: "留痕导出", onClick: () => downloadExport(actorId, "purchase-arrival-change-log") }}
         />
       </div>
       <DataTable

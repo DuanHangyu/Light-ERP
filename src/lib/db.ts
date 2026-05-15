@@ -548,6 +548,24 @@ function applySchema(database: Database.Database) {
       confirmation_note TEXT NOT NULL DEFAULT ''
     );
 
+    CREATE TABLE IF NOT EXISTS production_material_adjustment_orders (
+      id TEXT PRIMARY KEY,
+      order_no TEXT NOT NULL,
+      suggestion_id TEXT NOT NULL REFERENCES production_material_adjustment_suggestions(id),
+      impact_id TEXT NOT NULL REFERENCES production_plan_change_impacts(id),
+      production_order_id TEXT NOT NULL REFERENCES production_orders(id),
+      requisition_id TEXT REFERENCES requisitions(id),
+      adjustment_type TEXT NOT NULL,
+      qty REAL NOT NULL DEFAULT 0,
+      material_summary TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL,
+      created_by TEXT NOT NULL REFERENCES users(id),
+      created_at TEXT NOT NULL,
+      executed_by TEXT REFERENCES users(id),
+      executed_at TEXT,
+      execution_note TEXT NOT NULL DEFAULT ''
+    );
+
     CREATE TABLE IF NOT EXISTS quality_inspection_window_confirmations (
       id TEXT PRIMARY KEY,
       window_no TEXT NOT NULL,
@@ -577,6 +595,22 @@ function applySchema(database: Database.Database) {
       status TEXT NOT NULL,
       created_by TEXT NOT NULL REFERENCES users(id),
       created_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS purchase_arrival_notice_change_logs (
+      id TEXT PRIMARY KEY,
+      change_no TEXT NOT NULL,
+      arrival_notice_id TEXT NOT NULL REFERENCES purchase_arrival_notices(id),
+      purchase_order_id TEXT NOT NULL REFERENCES purchase_orders(id),
+      impact_id TEXT REFERENCES production_plan_change_impacts(id),
+      change_type TEXT NOT NULL,
+      old_arrived_at TEXT NOT NULL DEFAULT '',
+      new_arrived_at TEXT NOT NULL DEFAULT '',
+      old_note TEXT NOT NULL DEFAULT '',
+      new_note TEXT NOT NULL DEFAULT '',
+      reason TEXT NOT NULL DEFAULT '',
+      changed_by TEXT NOT NULL REFERENCES users(id),
+      changed_at TEXT NOT NULL
     );
 
     CREATE TABLE IF NOT EXISTS requisitions (
@@ -2882,6 +2916,30 @@ function applyMigrations(database: Database.Database) {
           CREATE INDEX IF NOT EXISTS idx_production_material_adjustment_suggestions_status
             ON production_material_adjustment_suggestions(status, created_at);
 
+          CREATE TABLE IF NOT EXISTS production_material_adjustment_orders (
+            id TEXT PRIMARY KEY,
+            order_no TEXT NOT NULL,
+            suggestion_id TEXT NOT NULL REFERENCES production_material_adjustment_suggestions(id),
+            impact_id TEXT NOT NULL REFERENCES production_plan_change_impacts(id),
+            production_order_id TEXT NOT NULL REFERENCES production_orders(id),
+            requisition_id TEXT REFERENCES requisitions(id),
+            adjustment_type TEXT NOT NULL,
+            qty REAL NOT NULL DEFAULT 0,
+            material_summary TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL,
+            created_by TEXT NOT NULL REFERENCES users(id),
+            created_at TEXT NOT NULL,
+            executed_by TEXT REFERENCES users(id),
+            executed_at TEXT,
+            execution_note TEXT NOT NULL DEFAULT ''
+          );
+          CREATE UNIQUE INDEX IF NOT EXISTS ux_production_material_adjustment_orders_no
+            ON production_material_adjustment_orders(order_no);
+          CREATE INDEX IF NOT EXISTS idx_production_material_adjustment_orders_suggestion
+            ON production_material_adjustment_orders(suggestion_id);
+          CREATE INDEX IF NOT EXISTS idx_production_material_adjustment_orders_status
+            ON production_material_adjustment_orders(status, created_at);
+
           CREATE TABLE IF NOT EXISTS quality_inspection_window_confirmations (
             id TEXT PRIMARY KEY,
             window_no TEXT NOT NULL,
@@ -2922,6 +2980,81 @@ function applyMigrations(database: Database.Database) {
             ON customer_delivery_confirmations(impact_id);
           CREATE INDEX IF NOT EXISTS idx_customer_delivery_confirmations_order
             ON customer_delivery_confirmations(order_id, created_at);
+
+          CREATE TABLE IF NOT EXISTS purchase_arrival_notice_change_logs (
+            id TEXT PRIMARY KEY,
+            change_no TEXT NOT NULL,
+            arrival_notice_id TEXT NOT NULL REFERENCES purchase_arrival_notices(id),
+            purchase_order_id TEXT NOT NULL REFERENCES purchase_orders(id),
+            impact_id TEXT REFERENCES production_plan_change_impacts(id),
+            change_type TEXT NOT NULL,
+            old_arrived_at TEXT NOT NULL DEFAULT '',
+            new_arrived_at TEXT NOT NULL DEFAULT '',
+            old_note TEXT NOT NULL DEFAULT '',
+            new_note TEXT NOT NULL DEFAULT '',
+            reason TEXT NOT NULL DEFAULT '',
+            changed_by TEXT NOT NULL REFERENCES users(id),
+            changed_at TEXT NOT NULL
+          );
+          CREATE UNIQUE INDEX IF NOT EXISTS ux_purchase_arrival_notice_change_logs_no
+            ON purchase_arrival_notice_change_logs(change_no);
+          CREATE INDEX IF NOT EXISTS idx_purchase_arrival_notice_change_logs_notice
+            ON purchase_arrival_notice_change_logs(arrival_notice_id, changed_at);
+          CREATE INDEX IF NOT EXISTS idx_purchase_arrival_notice_change_logs_impact
+            ON purchase_arrival_notice_change_logs(impact_id);
+        `);
+      },
+    },
+    {
+      id: "048_material_adjustment_order_and_arrival_change_logs",
+      description: "补退料建议确认转正式单与到货通知变更留痕",
+      up: () => {
+        database.exec(`
+          CREATE TABLE IF NOT EXISTS production_material_adjustment_orders (
+            id TEXT PRIMARY KEY,
+            order_no TEXT NOT NULL,
+            suggestion_id TEXT NOT NULL REFERENCES production_material_adjustment_suggestions(id),
+            impact_id TEXT NOT NULL REFERENCES production_plan_change_impacts(id),
+            production_order_id TEXT NOT NULL REFERENCES production_orders(id),
+            requisition_id TEXT REFERENCES requisitions(id),
+            adjustment_type TEXT NOT NULL,
+            qty REAL NOT NULL DEFAULT 0,
+            material_summary TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL,
+            created_by TEXT NOT NULL REFERENCES users(id),
+            created_at TEXT NOT NULL,
+            executed_by TEXT REFERENCES users(id),
+            executed_at TEXT,
+            execution_note TEXT NOT NULL DEFAULT ''
+          );
+          CREATE UNIQUE INDEX IF NOT EXISTS ux_production_material_adjustment_orders_no
+            ON production_material_adjustment_orders(order_no);
+          CREATE INDEX IF NOT EXISTS idx_production_material_adjustment_orders_suggestion
+            ON production_material_adjustment_orders(suggestion_id);
+          CREATE INDEX IF NOT EXISTS idx_production_material_adjustment_orders_status
+            ON production_material_adjustment_orders(status, created_at);
+
+          CREATE TABLE IF NOT EXISTS purchase_arrival_notice_change_logs (
+            id TEXT PRIMARY KEY,
+            change_no TEXT NOT NULL,
+            arrival_notice_id TEXT NOT NULL REFERENCES purchase_arrival_notices(id),
+            purchase_order_id TEXT NOT NULL REFERENCES purchase_orders(id),
+            impact_id TEXT REFERENCES production_plan_change_impacts(id),
+            change_type TEXT NOT NULL,
+            old_arrived_at TEXT NOT NULL DEFAULT '',
+            new_arrived_at TEXT NOT NULL DEFAULT '',
+            old_note TEXT NOT NULL DEFAULT '',
+            new_note TEXT NOT NULL DEFAULT '',
+            reason TEXT NOT NULL DEFAULT '',
+            changed_by TEXT NOT NULL REFERENCES users(id),
+            changed_at TEXT NOT NULL
+          );
+          CREATE UNIQUE INDEX IF NOT EXISTS ux_purchase_arrival_notice_change_logs_no
+            ON purchase_arrival_notice_change_logs(change_no);
+          CREATE INDEX IF NOT EXISTS idx_purchase_arrival_notice_change_logs_notice
+            ON purchase_arrival_notice_change_logs(arrival_notice_id, changed_at);
+          CREATE INDEX IF NOT EXISTS idx_purchase_arrival_notice_change_logs_impact
+            ON purchase_arrival_notice_change_logs(impact_id);
         `);
       },
     },
@@ -2962,6 +3095,7 @@ function backfillDocumentSequences(database: Database.Database) {
     { table: "purchase_orders", column: "purchase_no", prefix: "CG" },
     { table: "purchase_contracts", column: "contract_no", prefix: "HT" },
     { table: "purchase_arrival_notices", column: "arrival_no", prefix: "DH" },
+    { table: "purchase_arrival_notice_change_logs", column: "change_no", prefix: "DHB" },
     { table: "purchase_arrival_discrepancies", column: "discrepancy_no", prefix: "CY" },
     { table: "supplier_admission_controls", column: "control_no", prefix: "ZR" },
     { table: "supplier_corrective_actions", column: "action_no", prefix: "ZG" },
@@ -2980,6 +3114,7 @@ function backfillDocumentSequences(database: Database.Database) {
     { table: "production_plan_notifications", column: "notification_no", prefix: "TZ" },
     { table: "production_plan_change_impacts", column: "impact_no", prefix: "YX" },
     { table: "production_material_adjustment_suggestions", column: "suggestion_no", prefix: "BT" },
+    { table: "production_material_adjustment_orders", column: "order_no", prefix: "BTD" },
     { table: "quality_inspection_window_confirmations", column: "window_no", prefix: "ZJ" },
     { table: "customer_delivery_confirmations", column: "confirmation_no", prefix: "JQ" },
     { table: "approval_requests", column: "request_no", prefix: "SP" },
@@ -3240,6 +3375,14 @@ export function resetDemoDatabase() {
     DELETE FROM technical_dispositions;
     DELETE FROM production_daily_reports;
     DELETE FROM inspections;
+    DELETE FROM production_material_adjustment_orders;
+    DELETE FROM production_material_adjustment_suggestions;
+    DELETE FROM quality_inspection_window_confirmations;
+    DELETE FROM customer_delivery_confirmations;
+    DELETE FROM production_plan_notifications;
+    DELETE FROM production_plan_change_impacts;
+    DELETE FROM production_plan_lines;
+    DELETE FROM production_plan_versions;
     DELETE FROM requisition_allocations;
     DELETE FROM requisition_lines;
     DELETE FROM requisitions;
@@ -3249,6 +3392,7 @@ export function resetDemoDatabase() {
     DELETE FROM quotes;
     DELETE FROM purchase_arrival_discrepancy_lines;
     DELETE FROM purchase_arrival_discrepancies;
+    DELETE FROM purchase_arrival_notice_change_logs;
     DELETE FROM purchase_arrival_notice_lines;
     DELETE FROM purchase_arrival_notices;
     DELETE FROM purchase_contracts;

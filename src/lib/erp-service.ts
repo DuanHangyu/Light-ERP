@@ -111,6 +111,7 @@ const roleActionMap: Record<string, Role[]> = {
   lockProductionPlan: ["production", "admin"],
   ackProductionPlanNotification: ["assistant", "warehouse", "quality", "production", "manager", "admin"],
   resolveProductionPlanChangeImpact: ["assistant", "warehouse", "purchasing", "quality", "production", "manager", "admin"],
+  confirmMaterialAdjustmentSuggestion: ["production", "admin"],
   requestInspection: ["production"],
   approveMaterialRequisition: ["warehouse", "admin"],
   rejectMaterialRequisition: ["warehouse", "admin"],
@@ -195,6 +196,7 @@ const actionLabels: Record<string, string> = {
   lockProductionPlan: "生产计划锁版",
   ackProductionPlanNotification: "确认计划变更通知",
   resolveProductionPlanChangeImpact: "处理计划变更影响",
+  confirmMaterialAdjustmentSuggestion: "确认补退料建议",
   requestInspection: "生产请验",
   approveMaterialRequisition: "领料审批",
   rejectMaterialRequisition: "驳回领料",
@@ -704,6 +706,16 @@ function materialAdjustmentStatusLabel(status: string) {
     {
       pending_confirmation: "待确认",
       confirmed: "已确认",
+      voided: "已关闭",
+    }[status] ?? status
+  );
+}
+
+function materialAdjustmentOrderStatusLabel(status: string) {
+  return (
+    {
+      pending_execution: "待执行",
+      executed: "已执行",
       voided: "已关闭",
     }[status] ?? status
   );
@@ -2102,6 +2114,30 @@ export function getSnapshot(actorId = "U-SALES") {
     };
   });
 
+  const productionMaterialAdjustmentOrders = database.prepare(`
+    SELECT pmao.*, pmas.suggestion_no, ppci.impact_no, po.prod_no, r.req_no,
+           o.order_no AS customer_order_no, c.name AS customer_name, p.name AS product_name,
+           creator.name AS created_by_name, executor.name AS executed_by_name
+    FROM production_material_adjustment_orders pmao
+    JOIN production_material_adjustment_suggestions pmas ON pmas.id = pmao.suggestion_id
+    JOIN production_plan_change_impacts ppci ON ppci.id = pmao.impact_id
+    JOIN production_orders po ON po.id = pmao.production_order_id
+    JOIN orders o ON o.id = po.order_id
+    JOIN customers c ON c.id = o.customer_id
+    JOIN products p ON p.id = o.product_id
+    LEFT JOIN requisitions r ON r.id = pmao.requisition_id
+    JOIN users creator ON creator.id = pmao.created_by
+    LEFT JOIN users executor ON executor.id = pmao.executed_by
+    ORDER BY pmao.created_at DESC
+  `).all().map((row) => {
+    const item = row as Record<string, unknown>;
+    return {
+      ...item,
+      adjustment_type_label: materialAdjustmentTypeLabel(String(item.adjustment_type)),
+      status_label: materialAdjustmentOrderStatusLabel(String(item.status)),
+    };
+  });
+
   const qualityInspectionWindowConfirmations = database.prepare(`
     SELECT qiwc.*, ppci.impact_no, po.prod_no, i.inspection_no,
            o.order_no, c.name AS customer_name, p.name AS product_name,
@@ -2141,6 +2177,24 @@ export function getSnapshot(actorId = "U-SALES") {
       ...item,
       confirmation_status_label: deliveryConfirmationStatusLabel(String(item.confirmation_status)),
       status_label: String(item.status) === "active" ? "有效" : String(item.status),
+    };
+  });
+
+  const purchaseArrivalNoticeChangeLogs = database.prepare(`
+    SELECT pancl.*, pan.arrival_no, po.purchase_no, s.name AS supplier_name,
+           ppci.impact_no, changer.name AS changed_by_name
+    FROM purchase_arrival_notice_change_logs pancl
+    JOIN purchase_arrival_notices pan ON pan.id = pancl.arrival_notice_id
+    JOIN purchase_orders po ON po.id = pancl.purchase_order_id
+    JOIN suppliers s ON s.id = pan.supplier_id
+    LEFT JOIN production_plan_change_impacts ppci ON ppci.id = pancl.impact_id
+    JOIN users changer ON changer.id = pancl.changed_by
+    ORDER BY pancl.changed_at DESC
+  `).all().map((row) => {
+    const item = row as Record<string, unknown>;
+    return {
+      ...item,
+      change_type_label: String(item.change_type) === "plan_impact_reschedule" ? "生产计划影响调整" : String(item.change_type),
     };
   });
 
@@ -3389,6 +3443,7 @@ export function getSnapshot(actorId = "U-SALES") {
     purchaseOrders,
     productionPlanNotifications,
     productionPlanChangeImpacts,
+    productionMaterialAdjustmentSuggestions,
     purchaseArrivalDiscrepancies,
     mrpRequirementRuns,
     payables,
@@ -3486,6 +3541,7 @@ export function getSnapshot(actorId = "U-SALES") {
       productionPlanNotifications,
       productionPlanChangeImpacts,
       productionMaterialAdjustmentSuggestions,
+      productionMaterialAdjustmentOrders,
       qualityInspectionWindowConfirmations,
       customerDeliveryConfirmations,
       requisitions: requisitions.map((item) => ({
@@ -3531,6 +3587,7 @@ export function getSnapshot(actorId = "U-SALES") {
       mrpRequirementLines,
       purchaseContracts,
       purchaseArrivalNotices,
+      purchaseArrivalNoticeChangeLogs,
       purchaseArrivalDiscrepancies,
       purchaseOrders: purchaseOrders.map((item) => ({
         ...item,
@@ -3983,6 +4040,7 @@ function actionModuleLabel(action: string) {
       "lockProductionPlan",
       "ackProductionPlanNotification",
       "resolveProductionPlanChangeImpact",
+      "confirmMaterialAdjustmentSuggestion",
       "approveMaterialRequisition",
       "issueMaterials",
       "requestInspection",
@@ -4086,6 +4144,7 @@ function actionRiskLevel(action: string) {
       "rejectMaterialRequisition",
       "ackProductionPlanNotification",
       "resolveProductionPlanChangeImpact",
+      "confirmMaterialAdjustmentSuggestion",
       "approveApproval",
       "rejectApproval",
       "upsertApprovalRule",
@@ -4763,6 +4822,7 @@ function buildTasks(
     purchaseOrders: Array<Record<string, unknown>>;
     productionPlanNotifications: Array<Record<string, unknown>>;
     productionPlanChangeImpacts: Array<Record<string, unknown>>;
+    productionMaterialAdjustmentSuggestions: Array<Record<string, unknown>>;
     purchaseArrivalDiscrepancies: Array<Record<string, unknown>>;
     mrpRequirementRuns?: Array<Record<string, unknown>>;
     payables: Array<Record<string, unknown>>;
@@ -4934,11 +4994,28 @@ function buildTasks(
         resolution_note: "已确认影响并同步调整责任事项。",
       },
     }));
+  const materialAdjustmentSuggestionTasks = data.productionMaterialAdjustmentSuggestions
+    .filter((item) => String(item.status) === "pending_confirmation" && ["production", "admin"].includes(user.role))
+    .slice(0, 6)
+    .map((item) => ({
+      id: `task-material-adjustment-suggestion-${item.id}`,
+      title: `确认补退料建议 ${item.suggestion_no}`,
+      detail: `${item.prod_no} / ${item.adjustment_type_label} / ${item.suggested_qty}`,
+      entityType: "material_adjustment_suggestion",
+      entityId: String(item.id),
+      action: "confirmMaterialAdjustmentSuggestion",
+      tone: "blue" as const,
+      primaryLabel: "确认转正式单",
+      payload: {
+        confirmation_note: "生产确认补退料建议，转正式补退料单执行。",
+      },
+    }));
   const commonTasks = [
     ...remediationTasks,
     ...supplierGovernanceTasks,
     ...productionPlanNotificationTasks,
     ...productionPlanChangeImpactTasks,
+    ...materialAdjustmentSuggestionTasks,
   ];
 
   if (user.role === "sales") {
@@ -5464,6 +5541,9 @@ export function performAction(input: ActionInput) {
         break;
       case "resolveProductionPlanChangeImpact":
         resolveProductionPlanChangeImpact(database, input.actorId, mustEntity(input.entityId), input.payload);
+        break;
+      case "confirmMaterialAdjustmentSuggestion":
+        confirmMaterialAdjustmentSuggestion(database, input.actorId, mustEntity(input.entityId), input.payload);
         break;
       case "approveMaterialRequisition":
         approveMaterialRequisition(database, input.actorId, mustEntity(input.entityId), input.payload);
@@ -6969,6 +7049,16 @@ function linkPurchaseArrivalNoticeFromPlanImpact(
   const note =
     payloadText(payload, "arrival_note", "到货通知说明", false) ||
     `生产计划变更影响 ${impact.impact_no} 已处理：${resolutionNote}`;
+  const purchase = database.prepare("SELECT due_date FROM purchase_orders WHERE id = ?").get(purchaseOrderId) as
+    | { due_date: string }
+    | undefined;
+  const contractBefore = database.prepare(`
+    SELECT id, delivery_date
+    FROM purchase_contracts
+    WHERE purchase_order_id = ?
+    LIMIT 1
+  `).get(purchaseOrderId) as { id: string; delivery_date: string } | undefined;
+  const fallbackOldArrivalDate = String(contractBefore?.delivery_date ?? purchase?.due_date ?? "");
 
   database.prepare(`
     UPDATE purchase_contracts
@@ -6977,13 +7067,7 @@ function linkPurchaseArrivalNoticeFromPlanImpact(
     WHERE purchase_order_id = ?
   `).run(arrivalDate, `生产计划变更后供应商到货日调整为 ${arrivalDate}`, purchaseOrderId);
 
-  const contract = database.prepare(`
-    SELECT id
-    FROM purchase_contracts
-    WHERE purchase_order_id = ?
-    LIMIT 1
-  `).get(purchaseOrderId) as { id: string } | undefined;
-  if (!contract) {
+  if (!contractBefore) {
     createPurchaseContract(database, actorId, purchaseOrderId, {
       delivery_date: arrivalDate,
       note: `生产计划变更影响 ${impact.impact_no} 处理时自动生成采购合同，并同步到货计划。`,
@@ -6991,13 +7075,13 @@ function linkPurchaseArrivalNoticeFromPlanImpact(
   }
 
   const existing = database.prepare(`
-    SELECT id, arrival_no
+    SELECT id, arrival_no, arrived_at, note
     FROM purchase_arrival_notices
     WHERE purchase_order_id = ?
       AND status IN ('pending_signoff', 'signed', 'iqc_created', 'discrepancy_pending', 'discrepancy_approved')
     ORDER BY created_at DESC
     LIMIT 1
-  `).get(purchaseOrderId) as { id: string; arrival_no: string } | undefined;
+  `).get(purchaseOrderId) as { id: string; arrival_no: string; arrived_at: string; note: string } | undefined;
   if (existing) {
     database.prepare(`
       UPDATE purchase_arrival_notices
@@ -7005,6 +7089,16 @@ function linkPurchaseArrivalNoticeFromPlanImpact(
           note = TRIM(COALESCE(note, '') || CASE WHEN COALESCE(note, '') = '' THEN '' ELSE '；' END || ?)
       WHERE id = ?
     `).run(arrivalDate, note, existing.id);
+    createPurchaseArrivalNoticeChangeLog(database, actorId, {
+      arrivalNoticeId: existing.id,
+      purchaseOrderId,
+      impactId: impact.id,
+      oldArrivedAt: String(existing.arrived_at ?? fallbackOldArrivalDate),
+      newArrivedAt: arrivalDate,
+      oldNote: String(existing.note ?? ""),
+      newNote: note,
+      reason: resolutionNote,
+    });
     return {
       documentType: "purchase_arrival_notice",
       documentId: existing.id,
@@ -7016,11 +7110,63 @@ function linkPurchaseArrivalNoticeFromPlanImpact(
     arrived_at: arrivalDate,
     note,
   });
+  createPurchaseArrivalNoticeChangeLog(database, actorId, {
+    arrivalNoticeId: created.id,
+    purchaseOrderId,
+    impactId: impact.id,
+    oldArrivedAt: fallbackOldArrivalDate,
+    newArrivedAt: arrivalDate,
+    oldNote: "",
+    newNote: note,
+    reason: resolutionNote,
+  });
   return {
     documentType: "purchase_arrival_notice",
     documentId: created.id,
     documentNo: created.documentNo,
   };
+}
+
+function createPurchaseArrivalNoticeChangeLog(
+  database: Database.Database,
+  actorId: string,
+  input: {
+    arrivalNoticeId: string;
+    purchaseOrderId: string;
+    impactId?: string | null;
+    oldArrivedAt: string;
+    newArrivedAt: string;
+    oldNote: string;
+    newNote: string;
+    reason: string;
+  },
+) {
+  const changeId = uid("PANCL");
+  const changeNo = serial(database, "purchase_arrival_notice_change_logs", "DHB");
+  const changedAt = now();
+  database.prepare(`
+    INSERT INTO purchase_arrival_notice_change_logs (
+      id, change_no, arrival_notice_id, purchase_order_id, impact_id,
+      change_type, old_arrived_at, new_arrived_at, old_note, new_note,
+      reason, changed_by, changed_at
+    )
+    VALUES (?, ?, ?, ?, ?, 'plan_impact_reschedule', ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    changeId,
+    changeNo,
+    input.arrivalNoticeId,
+    input.purchaseOrderId,
+    input.impactId ?? null,
+    input.oldArrivedAt,
+    input.newArrivedAt,
+    input.oldNote,
+    input.newNote,
+    input.reason,
+    actorId,
+    changedAt,
+  );
+  audit(database, actorId, "createPurchaseArrivalNoticeChangeLog", "purchase_arrival_notice", input.arrivalNoticeId, `到货通知变更留痕 ${changeNo}`);
+  return { id: changeId, changeNo };
 }
 
 function linkMaterialAdjustmentSuggestionFromPlanImpact(
@@ -7203,6 +7349,77 @@ function linkCustomerDeliveryConfirmationFromPlanImpact(
     documentId: confirmationId,
     documentNo: confirmationNo,
   };
+}
+
+function confirmMaterialAdjustmentSuggestion(
+  database: Database.Database,
+  actorId: string,
+  suggestionId: string,
+  rawPayload?: Record<string, unknown>,
+) {
+  const suggestion = database.prepare(`
+    SELECT pmas.*, po.prod_no, r.req_no
+    FROM production_material_adjustment_suggestions pmas
+    JOIN production_orders po ON po.id = pmas.production_order_id
+    LEFT JOIN requisitions r ON r.id = pmas.requisition_id
+    WHERE pmas.id = ?
+  `).get(suggestionId) as
+    | {
+        id: string;
+        suggestion_no: string;
+        impact_id: string;
+        production_order_id: string;
+        requisition_id?: string | null;
+        adjustment_type: string;
+        suggested_qty: number;
+        material_summary: string;
+        status: string;
+      }
+    | undefined;
+  if (!suggestion) throw new Error("补退料建议单不存在。");
+  if (suggestion.status !== "pending_confirmation") throw new Error("补退料建议单不是待确认状态。");
+  const existingOrder = database.prepare(`
+    SELECT order_no
+    FROM production_material_adjustment_orders
+    WHERE suggestion_id = ?
+    LIMIT 1
+  `).get(suggestion.id) as { order_no: string } | undefined;
+  if (existingOrder) throw new Error(`补退料建议单已转正式单：${existingOrder.order_no}。`);
+
+  const payload = rawPayload && typeof rawPayload === "object" ? rawPayload : {};
+  const confirmationNote = payloadText(payload, "confirmation_note", "确认说明", false) || "生产确认补退料建议，转正式补退料单执行。";
+  const confirmedAt = now();
+  const orderId = uid("PMAO");
+  const orderNo = serial(database, "production_material_adjustment_orders", "BTD");
+  database.prepare(`
+    INSERT INTO production_material_adjustment_orders (
+      id, order_no, suggestion_id, impact_id, production_order_id, requisition_id,
+      adjustment_type, qty, material_summary, status, created_by, created_at,
+      executed_by, executed_at, execution_note
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending_execution', ?, ?, NULL, NULL, '')
+  `).run(
+    orderId,
+    orderNo,
+    suggestion.id,
+    suggestion.impact_id,
+    suggestion.production_order_id,
+    suggestion.requisition_id ?? null,
+    suggestion.adjustment_type,
+    roundQty(Number(suggestion.suggested_qty ?? 0)),
+    suggestion.material_summary ?? "",
+    actorId,
+    confirmedAt,
+  );
+  database.prepare(`
+    UPDATE production_material_adjustment_suggestions
+    SET status = 'confirmed',
+        confirmed_by = ?,
+        confirmed_at = ?,
+        confirmation_note = ?
+    WHERE id = ?
+  `).run(actorId, confirmedAt, confirmationNote, suggestion.id);
+  audit(database, actorId, "confirmMaterialAdjustmentSuggestion", "production_material_adjustment_order", orderId, `补退料建议 ${suggestion.suggestion_no} 转正式单 ${orderNo}`);
 }
 
 function approveMaterialRequisition(
@@ -12413,10 +12630,12 @@ export async function buildExport(input: {
     | "purchase-statement"
     | "purchase-contract"
     | "purchase-arrival-notice"
+    | "purchase-arrival-change-log"
     | "purchase-arrival-discrepancy"
     | "warehouse-signoff"
     | "purchase-receipt"
     | "material-issue"
+    | "material-adjustment-order"
     | "stocktake"
     | "production-plan"
     | "sales-return"
@@ -12550,6 +12769,10 @@ export async function buildExport(input: {
     sheets.push({ name: "purchase_arrival_notice", rows: purchaseArrivalNoticeRows(database, input.entityId) });
   }
 
+  if (input.type === "purchase-arrival-change-log") {
+    sheets.push({ name: "purchase_arrival_change_log", rows: purchaseArrivalNoticeChangeLogRows(database, input.entityId, filters) });
+  }
+
   if (input.type === "purchase-arrival-discrepancy") {
     sheets.push({ name: "purchase_arrival_discrepancy", rows: purchaseArrivalDiscrepancyRows(database, input.entityId, filters) });
   }
@@ -12564,6 +12787,10 @@ export async function buildExport(input: {
 
   if (input.type === "material-issue") {
     sheets.push({ name: "material_issue", rows: materialIssueRows(database, input.entityId) });
+  }
+
+  if (input.type === "material-adjustment-order") {
+    sheets.push({ name: "material_adjustment_order", rows: materialAdjustmentOrderRows(database, input.entityId, filters) });
   }
 
   if (input.type === "stocktake") {
@@ -13773,6 +14000,55 @@ function purchaseArrivalNoticeRows(database: Database.Database, entityId?: strin
   `).all(entityId ?? null, entityId ?? null));
 }
 
+function purchaseArrivalNoticeChangeLogRows(database: Database.Database, entityId?: string, filters: ReportFilters = {}) {
+  const conditions = [
+    "(pancl.id = COALESCE(?, pancl.id) OR pan.id = COALESCE(?, pan.id) OR po.id = COALESCE(?, po.id) OR ppci.id = COALESCE(?, ppci.id))",
+  ];
+  const params: unknown[] = [entityId ?? null, entityId ?? null, entityId ?? null, entityId ?? null];
+  addDateFilter(conditions, params, "pancl.changed_at", filters);
+  if (filters.supplierId) {
+    conditions.push("pan.supplier_id = ?");
+    params.push(filters.supplierId);
+  }
+  if (filters.purchaseOrderId) {
+    conditions.push("po.id = ?");
+    params.push(filters.purchaseOrderId);
+  }
+
+  return filteredRows(database, `
+    SELECT '到货通知单变更留痕' AS template_title,
+           '已留痕' AS document_status,
+           '本地化生产流转 ERP' AS company,
+           pancl.change_no,
+           pan.arrival_no,
+           po.purchase_no,
+           pc.contract_no,
+           s.name AS supplier,
+           ppci.impact_no,
+           CASE pancl.change_type
+             WHEN 'plan_impact_reschedule' THEN '生产计划影响调整'
+             ELSE pancl.change_type
+           END AS change_type,
+           pancl.old_arrived_at,
+           pancl.new_arrived_at,
+           pancl.old_note,
+           pancl.new_note,
+           pancl.reason,
+           changer.name AS changed_by,
+           pancl.changed_at,
+           '到货通知变更留痕用于追溯采购到货计划调整、生产计划影响处理、仓库签收节奏和供应商沟通记录。' AS print_note
+    FROM purchase_arrival_notice_change_logs pancl
+    JOIN purchase_arrival_notices pan ON pan.id = pancl.arrival_notice_id
+    JOIN purchase_orders po ON po.id = pancl.purchase_order_id
+    LEFT JOIN purchase_contracts pc ON pc.id = pan.purchase_contract_id
+    JOIN suppliers s ON s.id = pan.supplier_id
+    LEFT JOIN production_plan_change_impacts ppci ON ppci.id = pancl.impact_id
+    JOIN users changer ON changer.id = pancl.changed_by
+    WHERE ${conditions.join(" AND ")}
+    ORDER BY pancl.changed_at DESC
+  `, params);
+}
+
 function purchaseArrivalDiscrepancyStatusSql(alias = "pad") {
   return `CASE ${alias}.status
              WHEN 'pending_approval' THEN '差异待审批'
@@ -13979,6 +14255,61 @@ function materialIssueRows(database: Database.Database, entityId?: string) {
     WHERE ra.id = COALESCE(?, ra.id) OR r.id = COALESCE(?, r.id)
     ORDER BY r.issued_at DESC, ra.rowid DESC
   `).all(entityId ?? null, entityId ?? null));
+}
+
+function materialAdjustmentOrderRows(database: Database.Database, entityId?: string, filters: ReportFilters = {}) {
+  const conditions = [
+    "(pmao.id = COALESCE(?, pmao.id) OR pmas.id = COALESCE(?, pmas.id) OR ppci.id = COALESCE(?, ppci.id) OR r.id = COALESCE(?, r.id) OR po.id = COALESCE(?, po.id))",
+  ];
+  const params: unknown[] = [entityId ?? null, entityId ?? null, entityId ?? null, entityId ?? null, entityId ?? null];
+  addDateFilter(conditions, params, "pmao.created_at", filters);
+
+  return filteredRows(database, `
+    SELECT '正式补退料单' AS template_title,
+           CASE pmao.status
+             WHEN 'pending_execution' THEN '待执行'
+             WHEN 'executed' THEN '已执行'
+             WHEN 'voided' THEN '已关闭'
+             ELSE pmao.status
+           END AS document_status,
+           '本地化生产流转 ERP' AS company,
+           pmao.order_no,
+           pmas.suggestion_no,
+           ppci.impact_no,
+           po.prod_no,
+           r.req_no,
+           o.order_no AS customer_order_no,
+           c.name AS customer,
+           p.name AS product,
+           CASE pmao.adjustment_type
+             WHEN 'supplement' THEN '补料'
+             WHEN 'return' THEN '退料'
+             WHEN 'check' THEN '复核'
+             ELSE pmao.adjustment_type
+           END AS adjustment_type,
+           pmao.qty,
+           pmao.material_summary,
+           pmas.reason AS suggestion_reason,
+           pmas.confirmation_note,
+           creator.name AS created_by,
+           pmao.created_at,
+           executor.name AS executed_by,
+           pmao.executed_at,
+           pmao.execution_note,
+           '正式补退料单由生产确认补退料建议后生成，作为仓库补发、退料、盘点复核和生产计划变更追溯依据。' AS print_note
+    FROM production_material_adjustment_orders pmao
+    JOIN production_material_adjustment_suggestions pmas ON pmas.id = pmao.suggestion_id
+    JOIN production_plan_change_impacts ppci ON ppci.id = pmao.impact_id
+    JOIN production_orders po ON po.id = pmao.production_order_id
+    JOIN orders o ON o.id = po.order_id
+    JOIN customers c ON c.id = o.customer_id
+    JOIN products p ON p.id = o.product_id
+    LEFT JOIN requisitions r ON r.id = pmao.requisition_id
+    JOIN users creator ON creator.id = pmao.created_by
+    LEFT JOIN users executor ON executor.id = pmao.executed_by
+    WHERE ${conditions.join(" AND ")}
+    ORDER BY pmao.created_at DESC
+  `, params);
 }
 
 function stocktakeRows(database: Database.Database, entityId?: string) {
