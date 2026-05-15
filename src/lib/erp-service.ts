@@ -6977,6 +6977,19 @@ function linkPurchaseArrivalNoticeFromPlanImpact(
     WHERE purchase_order_id = ?
   `).run(arrivalDate, `生产计划变更后供应商到货日调整为 ${arrivalDate}`, purchaseOrderId);
 
+  const contract = database.prepare(`
+    SELECT id
+    FROM purchase_contracts
+    WHERE purchase_order_id = ?
+    LIMIT 1
+  `).get(purchaseOrderId) as { id: string } | undefined;
+  if (!contract) {
+    createPurchaseContract(database, actorId, purchaseOrderId, {
+      delivery_date: arrivalDate,
+      note: `生产计划变更影响 ${impact.impact_no} 处理时自动生成采购合同，并同步到货计划。`,
+    });
+  }
+
   const existing = database.prepare(`
     SELECT id, arrival_no
     FROM purchase_arrival_notices
