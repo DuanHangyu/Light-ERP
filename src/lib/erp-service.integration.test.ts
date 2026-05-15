@@ -6107,6 +6107,211 @@ describe("ERP service production plan lock approval and change notifications", (
       confirmedSnapshot.tasks.some((task) => task.id === `task-material-adjustment-suggestion-${suggestion.id}`),
     ).toBe(false);
   });
+
+  it("executes formal supplement material orders with inventory movements and execution lines", async () => {
+    const service = await loadService();
+    const scenario = createPlanChangeImpactScenario(service);
+    const warehouseImpact = scenario.impacts.find((item) => item.impact_type === "material_requisition") as Record<string, unknown>;
+
+    service.performAction({
+      actorId: "U-WH",
+      action: "resolveProductionPlanChangeImpact",
+      entityId: String(warehouseImpact.id),
+      payload: {
+        adjustment_type: "supplement",
+        suggested_qty: "2.5",
+        resolution_note: "现场确认原料不足，需要正式补料。",
+      },
+    });
+    const suggestion = service
+      .getSnapshot("U-PROD")
+      .board.productionMaterialAdjustmentSuggestions.find((item) => item.impact_id === warehouseImpact.id) as Record<string, unknown>;
+    service.performAction({
+      actorId: "U-PROD",
+      action: "confirmMaterialAdjustmentSuggestion",
+      entityId: String(suggestion.id),
+      payload: { confirmation_note: "生产确认补料数量，转仓库正式执行。" },
+    });
+
+    const pendingSnapshot = service.getSnapshot("U-WH") as unknown as {
+      board: {
+        productionMaterialAdjustmentOrders: Array<Record<string, unknown>>;
+        materials: Array<Record<string, unknown>>;
+      };
+      tasks: Array<Record<string, unknown>>;
+    };
+    const order = pendingSnapshot.board.productionMaterialAdjustmentOrders.find((item) => item.suggestion_id === suggestion.id) as Record<string, unknown>;
+    const materialBefore = pendingSnapshot.board.materials.find((item) => item.id === "M-STEEL") as Record<string, unknown>;
+    expect(pendingSnapshot.tasks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: `task-material-adjustment-order-${order.id}`,
+          action: "executeMaterialAdjustmentOrder",
+          primaryLabel: "执行补退料",
+        }),
+      ]),
+    );
+
+    service.performAction({
+      actorId: "U-WH",
+      action: "executeMaterialAdjustmentOrder",
+      entityId: String(order.id),
+      payload: {
+        material_id: "M-STEEL",
+        execution_date: "2026-07-04",
+        execution_note: "仓库按正式补料单 FIFO 补发主材。",
+      },
+    });
+
+    const executedSnapshot = service.getSnapshot("U-WH") as unknown as {
+      board: {
+        productionMaterialAdjustmentOrders: Array<Record<string, unknown>>;
+        materials: Array<Record<string, unknown>>;
+        inventoryTrace: Array<Record<string, unknown>>;
+      };
+      tasks: Array<Record<string, unknown>>;
+    };
+    const executedOrder = executedSnapshot.board.productionMaterialAdjustmentOrders.find((item) => item.id === order.id) as Record<string, unknown>;
+    const materialAfter = executedSnapshot.board.materials.find((item) => item.id === "M-STEEL") as Record<string, unknown>;
+    const executionLines = executedOrder.lines as Array<Record<string, unknown>>;
+    const movement = executedSnapshot.board.inventoryTrace.find(
+      (item) => item.source_type === "material_adjustment_order" && item.source_id === order.id && item.item_id === "M-STEEL",
+    ) as Record<string, unknown>;
+
+    expect(executedOrder).toMatchObject({
+      status: "executed",
+      status_label: "已执行",
+      executed_by_name: "仓库管理员-吴勇",
+      execution_note: "仓库按正式补料单 FIFO 补发主材。",
+    });
+    expect(executionLines).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          materialId: "M-STEEL",
+          direction: "out",
+          qty: 2.5,
+        }),
+      ]),
+    );
+    expect(Number(materialAfter.stock_qty)).toBe(Number(materialBefore.stock_qty) - 2.5);
+    expect(movement).toMatchObject({
+      movement_type: "material_adjustment_issue",
+      qty: -2.5,
+      source_type: "material_adjustment_order",
+      source_id: order.id,
+    });
+    expect(executedSnapshot.tasks.some((task) => task.id === `task-material-adjustment-order-${order.id}`)).toBe(false);
+    expect(() =>
+      service.performAction({
+        actorId: "U-WH",
+        action: "executeMaterialAdjustmentOrder",
+        entityId: String(order.id),
+        payload: { material_id: "M-STEEL" },
+      }),
+    ).toThrow("补退料单不是待执行状态");
+  });
+
+  it("executes formal return material orders back into inventory with weighted cost refresh", async () => {
+    const service = await loadService();
+    const scenario = createPlanChangeImpactScenario(service);
+    const warehouseImpact = scenario.impacts.find((item) => item.impact_type === "material_requisition") as Record<string, unknown>;
+
+    service.performAction({
+      actorId: "U-WH",
+      action: "resolveProductionPlanChangeImpact",
+      entityId: String(warehouseImpact.id),
+      payload: {
+        adjustment_type: "return",
+        suggested_qty: "1.25",
+        resolution_note: "现场余料需退回仓库并恢复库存。",
+      },
+    });
+    const suggestion = service
+      .getSnapshot("U-PROD")
+      .board.productionMaterialAdjustmentSuggestions.find((item) => item.impact_id === warehouseImpact.id) as Record<string, unknown>;
+    service.performAction({
+      actorId: "U-PROD",
+      action: "confirmMaterialAdjustmentSuggestion",
+      entityId: String(suggestion.id),
+      payload: { confirmation_note: "生产确认退料数量，转仓库正式执行。" },
+    });
+
+    const pendingSnapshot = service.getSnapshot("U-WH") as unknown as {
+      board: {
+        productionMaterialAdjustmentOrders: Array<Record<string, unknown>>;
+        materials: Array<Record<string, unknown>>;
+      };
+    };
+    const order = pendingSnapshot.board.productionMaterialAdjustmentOrders.find((item) => item.suggestion_id === suggestion.id) as Record<string, unknown>;
+    const materialBefore = pendingSnapshot.board.materials.find((item) => item.id === "M-STEEL") as Record<string, unknown>;
+    const returnQty = 1.25;
+    const returnUnitCost = 11.75;
+    const expectedAverageCost =
+      Math.round(
+        ((Number(materialBefore.stock_qty) * Number(materialBefore.average_cost) + returnQty * returnUnitCost) /
+          (Number(materialBefore.stock_qty) + returnQty) +
+          Number.EPSILON) *
+          100,
+      ) / 100;
+
+    service.performAction({
+      actorId: "U-WH",
+      action: "executeMaterialAdjustmentOrder",
+      entityId: String(order.id),
+      payload: {
+        material_id: "M-STEEL",
+        unit_cost: String(returnUnitCost),
+        batch_no: "RET-PLAN-001",
+        execution_date: "2026-07-04",
+        execution_note: "生产余料退回仓库，建立退料批次。",
+      },
+    });
+
+    const executedSnapshot = service.getSnapshot("U-WH") as unknown as {
+      board: {
+        productionMaterialAdjustmentOrders: Array<Record<string, unknown>>;
+        materials: Array<Record<string, unknown>>;
+        batches: Array<Record<string, unknown>>;
+        inventoryTrace: Array<Record<string, unknown>>;
+      };
+    };
+    const executedOrder = executedSnapshot.board.productionMaterialAdjustmentOrders.find((item) => item.id === order.id) as Record<string, unknown>;
+    const materialAfter = executedSnapshot.board.materials.find((item) => item.id === "M-STEEL") as Record<string, unknown>;
+    const returnBatch = executedSnapshot.board.batches.find((item) => item.batch_no === "RET-PLAN-001") as Record<string, unknown>;
+    const movement = executedSnapshot.board.inventoryTrace.find(
+      (item) => item.source_type === "material_adjustment_order" && item.source_id === order.id && item.batch_no === "RET-PLAN-001",
+    ) as Record<string, unknown>;
+
+    expect(executedOrder).toMatchObject({
+      status: "executed",
+      status_label: "已执行",
+      execution_note: "生产余料退回仓库，建立退料批次。",
+    });
+    expect(executedOrder.lines).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          materialId: "M-STEEL",
+          batchNo: "RET-PLAN-001",
+          direction: "in",
+          qty: returnQty,
+          unitCost: returnUnitCost,
+        }),
+      ]),
+    );
+    expect(Number(materialAfter.stock_qty)).toBe(Number(materialBefore.stock_qty) + returnQty);
+    expect(materialAfter.average_cost).toBe(expectedAverageCost);
+    expect(returnBatch).toMatchObject({
+      material_id: "M-STEEL",
+      batch_no: "RET-PLAN-001",
+      qty: returnQty,
+      unit_cost: returnUnitCost,
+    });
+    expect(movement).toMatchObject({
+      movement_type: "material_adjustment_return",
+      qty: returnQty,
+      unit_cost: returnUnitCost,
+    });
+  });
 });
 
 describe("ERP service formal report center", () => {
