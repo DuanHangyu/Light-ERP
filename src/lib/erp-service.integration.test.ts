@@ -5416,6 +5416,175 @@ describe("ERP service formal after-sales return refund and replacement loop", ()
   });
 });
 
+describe("ERP service production plan lock approval and change notifications", () => {
+  it("locks a schedule snapshot, publishes it through approval, and creates role todo notifications after changes", async () => {
+    const service = await loadService();
+    const { production } = createProducingOrder(service, "10");
+
+    service.performAction({
+      actorId: "U-PROD",
+      action: "updateProductionSchedule",
+      entityId: String(production.id),
+      payload: {
+        planned_date: "2026-07-03",
+        machine: "CNC-02",
+        owner: "马工",
+        shift: "白班",
+        schedule_note: "锁版前确认生产排程。",
+        change_reason: "锁版前标准化排程。",
+      },
+    });
+
+    service.performAction({
+      actorId: "U-PROD",
+      action: "lockProductionPlan",
+      payload: {
+        date_from: "2026-07-01",
+        date_to: "2026-07-10",
+        note: "第 27 周生产计划锁版，提交管理层审批后发布。",
+      },
+    });
+
+    const productionSnapshot = service.getSnapshot("U-PROD") as unknown as {
+      board: {
+        productionPlanVersions: Array<Record<string, unknown>>;
+        productionPlanLines: Array<Record<string, unknown>>;
+      };
+    };
+    const plan = productionSnapshot.board.productionPlanVersions[0];
+    expect(plan).toMatchObject({
+      status: "pending_approval",
+      status_label: "待审批发布",
+      line_count: expect.any(Number),
+      locked_by_name: "生产操作员-马工",
+      approval_request_no: expect.stringMatching(/^SP-/),
+    });
+    expect(Number(plan.line_count)).toBeGreaterThan(0);
+    expect(productionSnapshot.board.productionPlanLines).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          plan_id: plan.id,
+          prod_no: expect.stringMatching(/^SC-/),
+          planned_date: "2026-07-03",
+          machine: "CNC-02",
+          owner: "马工",
+        }),
+      ]),
+    );
+
+    const managerSnapshot = service.getSnapshot("U-MGR") as unknown as {
+      board: {
+        approvalCenter: Array<Record<string, unknown>>;
+        approvalRequests: Array<Record<string, unknown>>;
+      };
+      tasks: Array<Record<string, unknown>>;
+    };
+    const approval = managerSnapshot.board.approvalRequests.find((item) => item.entity_type === "production_plan");
+    expect(approval).toMatchObject({
+      entity_id: plan.id,
+      title: expect.stringContaining(String(plan.plan_no)),
+      status: "pending",
+      approver_role: "manager",
+    });
+    expect(managerSnapshot.board.approvalCenter).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          business_entity_type: "production_plan",
+          business_entity_id: plan.id,
+          source_type_label: "生产计划发布",
+          module_label: "生产执行",
+          approve_action: "approveApproval",
+        }),
+      ]),
+    );
+    expect(managerSnapshot.tasks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          entityType: "approval",
+          entityId: approval?.id,
+          title: expect.stringContaining("审批"),
+        }),
+      ]),
+    );
+
+    service.performAction({
+      actorId: "U-MGR",
+      action: "approveApproval",
+      entityId: String(approval?.id),
+      payload: { approval_note: "计划范围清晰，同意发布执行。" },
+    });
+
+    const published = service.getSnapshot("U-MGR").board.productionPlanVersions[0] as Record<string, unknown>;
+    expect(published).toMatchObject({
+      id: plan.id,
+      status: "published",
+      status_label: "已发布",
+      published_by_name: "管理层-王总",
+      approval_note: "计划范围清晰，同意发布执行。",
+    });
+
+    service.performAction({
+      actorId: "U-PROD",
+      action: "updateProductionSchedule",
+      entityId: String(production.id),
+      payload: {
+        planned_date: "2026-07-04",
+        machine: "CNC-03",
+        owner: "赵工",
+        shift: "夜班",
+        schedule_note: "发布后调整排程，需仓库和品控确认。",
+        change_reason: "客户交期变更，计划发布后正式调整。",
+      },
+    });
+
+    const warehouseSnapshot = service.getSnapshot("U-WH") as unknown as {
+      board: { productionPlanNotifications: Array<Record<string, unknown>> };
+      tasks: Array<Record<string, unknown>>;
+    };
+    const warehouseNotification = warehouseSnapshot.board.productionPlanNotifications.find(
+      (item) => item.recipient_role === "warehouse",
+    );
+    expect(warehouseNotification).toMatchObject({
+      plan_id: plan.id,
+      status: "pending",
+      status_label: "待确认",
+      recipient_role_label: "仓库管理员",
+      prod_no: expect.stringMatching(/^SC-/),
+      detail: expect.stringContaining("2026-07-03"),
+    });
+    expect(warehouseSnapshot.tasks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: `task-production-plan-notification-${warehouseNotification?.id}`,
+          title: expect.stringContaining("生产计划变更"),
+          action: "ackProductionPlanNotification",
+          primaryLabel: "确认变更",
+        }),
+      ]),
+    );
+
+    service.performAction({
+      actorId: "U-WH",
+      action: "ackProductionPlanNotification",
+      entityId: String(warehouseNotification?.id),
+      payload: { acknowledge_note: "仓库已同步备料计划。" },
+    });
+
+    const acknowledged = service.getSnapshot("U-WH") as unknown as {
+      board: { productionPlanNotifications: Array<Record<string, unknown>> };
+      tasks: Array<Record<string, unknown>>;
+    };
+    expect(acknowledged.board.productionPlanNotifications.find((item) => item.id === warehouseNotification?.id)).toMatchObject({
+      status: "acknowledged",
+      acknowledged_by_name: "仓库管理员-吴勇",
+      acknowledge_note: "仓库已同步备料计划。",
+    });
+    expect(
+      acknowledged.tasks.some((task) => task.id === `task-production-plan-notification-${warehouseNotification?.id}`),
+    ).toBe(false);
+  });
+});
+
 describe("ERP service formal report center", () => {
   it("exports daily weekly monthly overstock and reconciliation reports with formal templates and snapshots", async () => {
     const service = await loadService();
