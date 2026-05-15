@@ -520,11 +520,63 @@ function applySchema(database: Database.Database) {
       source_document_no TEXT NOT NULL DEFAULT '',
       old_value TEXT NOT NULL DEFAULT '',
       new_value TEXT NOT NULL DEFAULT '',
+      linked_document_type TEXT NOT NULL DEFAULT '',
+      linked_document_id TEXT,
+      linked_document_no TEXT NOT NULL DEFAULT '',
       status TEXT NOT NULL DEFAULT 'pending',
       created_at TEXT NOT NULL,
       resolved_by TEXT REFERENCES users(id),
       resolved_at TEXT,
       resolution_note TEXT NOT NULL DEFAULT ''
+    );
+
+    CREATE TABLE IF NOT EXISTS production_material_adjustment_suggestions (
+      id TEXT PRIMARY KEY,
+      suggestion_no TEXT NOT NULL,
+      impact_id TEXT NOT NULL REFERENCES production_plan_change_impacts(id),
+      production_order_id TEXT NOT NULL REFERENCES production_orders(id),
+      requisition_id TEXT REFERENCES requisitions(id),
+      adjustment_type TEXT NOT NULL,
+      suggested_qty REAL NOT NULL DEFAULT 0,
+      material_summary TEXT NOT NULL DEFAULT '',
+      reason TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL,
+      created_by TEXT NOT NULL REFERENCES users(id),
+      created_at TEXT NOT NULL,
+      confirmed_by TEXT REFERENCES users(id),
+      confirmed_at TEXT,
+      confirmation_note TEXT NOT NULL DEFAULT ''
+    );
+
+    CREATE TABLE IF NOT EXISTS quality_inspection_window_confirmations (
+      id TEXT PRIMARY KEY,
+      window_no TEXT NOT NULL,
+      impact_id TEXT NOT NULL REFERENCES production_plan_change_impacts(id),
+      production_order_id TEXT NOT NULL REFERENCES production_orders(id),
+      inspection_id TEXT REFERENCES inspections(id),
+      inspection_window_date TEXT NOT NULL,
+      inspector TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL,
+      note TEXT NOT NULL DEFAULT '',
+      created_by TEXT NOT NULL REFERENCES users(id),
+      created_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS customer_delivery_confirmations (
+      id TEXT PRIMARY KEY,
+      confirmation_no TEXT NOT NULL,
+      impact_id TEXT NOT NULL REFERENCES production_plan_change_impacts(id),
+      order_id TEXT NOT NULL REFERENCES orders(id),
+      production_order_id TEXT NOT NULL REFERENCES production_orders(id),
+      customer_id TEXT NOT NULL REFERENCES customers(id),
+      original_due_date TEXT NOT NULL,
+      proposed_delivery_date TEXT NOT NULL,
+      confirmation_status TEXT NOT NULL,
+      contact_method TEXT NOT NULL DEFAULT '',
+      customer_feedback TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL,
+      created_by TEXT NOT NULL REFERENCES users(id),
+      created_at TEXT NOT NULL
     );
 
     CREATE TABLE IF NOT EXISTS requisitions (
@@ -2778,6 +2830,9 @@ function applyMigrations(database: Database.Database) {
             source_document_no TEXT NOT NULL DEFAULT '',
             old_value TEXT NOT NULL DEFAULT '',
             new_value TEXT NOT NULL DEFAULT '',
+            linked_document_type TEXT NOT NULL DEFAULT '',
+            linked_document_id TEXT,
+            linked_document_no TEXT NOT NULL DEFAULT '',
             status TEXT NOT NULL DEFAULT 'pending',
             created_at TEXT NOT NULL,
             resolved_by TEXT REFERENCES users(id),
@@ -2792,6 +2847,81 @@ function applyMigrations(database: Database.Database) {
             ON production_plan_change_impacts(affected_role, status, created_at);
           CREATE INDEX IF NOT EXISTS idx_production_plan_change_impacts_plan
             ON production_plan_change_impacts(plan_id, production_order_id);
+        `);
+      },
+    },
+    {
+      id: "047_production_plan_impact_business_documents",
+      description: "生产计划影响处理后的业务单据联动",
+      up: () => {
+        ensureColumn(database, "production_plan_change_impacts", "linked_document_type", "TEXT NOT NULL DEFAULT ''");
+        ensureColumn(database, "production_plan_change_impacts", "linked_document_id", "TEXT");
+        ensureColumn(database, "production_plan_change_impacts", "linked_document_no", "TEXT NOT NULL DEFAULT ''");
+        database.exec(`
+          CREATE TABLE IF NOT EXISTS production_material_adjustment_suggestions (
+            id TEXT PRIMARY KEY,
+            suggestion_no TEXT NOT NULL,
+            impact_id TEXT NOT NULL REFERENCES production_plan_change_impacts(id),
+            production_order_id TEXT NOT NULL REFERENCES production_orders(id),
+            requisition_id TEXT REFERENCES requisitions(id),
+            adjustment_type TEXT NOT NULL,
+            suggested_qty REAL NOT NULL DEFAULT 0,
+            material_summary TEXT NOT NULL DEFAULT '',
+            reason TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL,
+            created_by TEXT NOT NULL REFERENCES users(id),
+            created_at TEXT NOT NULL,
+            confirmed_by TEXT REFERENCES users(id),
+            confirmed_at TEXT,
+            confirmation_note TEXT NOT NULL DEFAULT ''
+          );
+          CREATE UNIQUE INDEX IF NOT EXISTS ux_production_material_adjustment_suggestions_no
+            ON production_material_adjustment_suggestions(suggestion_no);
+          CREATE INDEX IF NOT EXISTS idx_production_material_adjustment_suggestions_impact
+            ON production_material_adjustment_suggestions(impact_id);
+          CREATE INDEX IF NOT EXISTS idx_production_material_adjustment_suggestions_status
+            ON production_material_adjustment_suggestions(status, created_at);
+
+          CREATE TABLE IF NOT EXISTS quality_inspection_window_confirmations (
+            id TEXT PRIMARY KEY,
+            window_no TEXT NOT NULL,
+            impact_id TEXT NOT NULL REFERENCES production_plan_change_impacts(id),
+            production_order_id TEXT NOT NULL REFERENCES production_orders(id),
+            inspection_id TEXT REFERENCES inspections(id),
+            inspection_window_date TEXT NOT NULL,
+            inspector TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL,
+            note TEXT NOT NULL DEFAULT '',
+            created_by TEXT NOT NULL REFERENCES users(id),
+            created_at TEXT NOT NULL
+          );
+          CREATE UNIQUE INDEX IF NOT EXISTS ux_quality_inspection_window_confirmations_no
+            ON quality_inspection_window_confirmations(window_no);
+          CREATE INDEX IF NOT EXISTS idx_quality_inspection_window_confirmations_impact
+            ON quality_inspection_window_confirmations(impact_id);
+
+          CREATE TABLE IF NOT EXISTS customer_delivery_confirmations (
+            id TEXT PRIMARY KEY,
+            confirmation_no TEXT NOT NULL,
+            impact_id TEXT NOT NULL REFERENCES production_plan_change_impacts(id),
+            order_id TEXT NOT NULL REFERENCES orders(id),
+            production_order_id TEXT NOT NULL REFERENCES production_orders(id),
+            customer_id TEXT NOT NULL REFERENCES customers(id),
+            original_due_date TEXT NOT NULL,
+            proposed_delivery_date TEXT NOT NULL,
+            confirmation_status TEXT NOT NULL,
+            contact_method TEXT NOT NULL DEFAULT '',
+            customer_feedback TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL,
+            created_by TEXT NOT NULL REFERENCES users(id),
+            created_at TEXT NOT NULL
+          );
+          CREATE UNIQUE INDEX IF NOT EXISTS ux_customer_delivery_confirmations_no
+            ON customer_delivery_confirmations(confirmation_no);
+          CREATE INDEX IF NOT EXISTS idx_customer_delivery_confirmations_impact
+            ON customer_delivery_confirmations(impact_id);
+          CREATE INDEX IF NOT EXISTS idx_customer_delivery_confirmations_order
+            ON customer_delivery_confirmations(order_id, created_at);
         `);
       },
     },
@@ -2849,6 +2979,9 @@ function backfillDocumentSequences(database: Database.Database) {
     { table: "production_plan_versions", column: "plan_no", prefix: "SCJH" },
     { table: "production_plan_notifications", column: "notification_no", prefix: "TZ" },
     { table: "production_plan_change_impacts", column: "impact_no", prefix: "YX" },
+    { table: "production_material_adjustment_suggestions", column: "suggestion_no", prefix: "BT" },
+    { table: "quality_inspection_window_confirmations", column: "window_no", prefix: "ZJ" },
+    { table: "customer_delivery_confirmations", column: "confirmation_no", prefix: "JQ" },
     { table: "approval_requests", column: "request_no", prefix: "SP" },
     { table: "payables", column: "payable_no", prefix: "YF" },
     { table: "formula_price_calculations", column: "formula_no", prefix: "PF" },

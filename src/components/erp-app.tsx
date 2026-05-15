@@ -8,6 +8,7 @@ import {
   Calculator,
   CalendarDays,
   CheckCircle2,
+  ClipboardCheck,
   ClipboardList,
   DatabaseBackup,
   Download,
@@ -17,6 +18,7 @@ import {
   FlaskConical,
   Gauge,
   LogIn,
+  MessagesSquare,
   PackageCheck,
   Printer,
   ReceiptText,
@@ -180,6 +182,9 @@ type Snapshot = {
     productionPlanLines: Row[];
     productionPlanNotifications: Row[];
     productionPlanChangeImpacts: Row[];
+    productionMaterialAdjustmentSuggestions: Row[];
+    qualityInspectionWindowConfirmations: Row[];
+    customerDeliveryConfirmations: Row[];
     requisitions: Row[];
     materialIssues: Row[];
     inspections: Row[];
@@ -4576,10 +4581,37 @@ function ProductionModule({
     });
   };
   const resolvePlanChangeImpact = async (impact: Row) => {
+    const impactType = String(impact.impact_type);
+    const linkedPayload =
+      impactType === "purchase_arrival"
+        ? {
+            new_arrival_date: String(impact.new_planned_date ?? new Date().toISOString().slice(0, 10)),
+            resolution_note: `${currentUser?.role_label ?? "当前岗位"}已调整采购到货计划并生成/更新到货通知单。`,
+          }
+        : impactType === "material_requisition"
+          ? {
+              adjustment_type: "check",
+              suggested_qty: "0",
+              resolution_note: `${currentUser?.role_label ?? "当前岗位"}已生成补退料复核建议单。`,
+            }
+          : impactType === "quality_window"
+            ? {
+                inspection_window_date: String(impact.new_planned_date ?? new Date().toISOString().slice(0, 10)),
+                inspector: currentUser?.name ?? "",
+                resolution_note: `${currentUser?.role_label ?? "当前岗位"}已确认质检窗口。`,
+              }
+            : impactType === "delivery_commitment"
+              ? {
+                  proposed_delivery_date: String(impact.new_planned_date ?? new Date().toISOString().slice(0, 10)),
+                  contact_method: "系统确认",
+                  customer_feedback: "已形成客户交期确认记录，待商务补充客户最终反馈。",
+                  resolution_note: `${currentUser?.role_label ?? "当前岗位"}已生成客户交期确认记录。`,
+                }
+              : { resolution_note: `${currentUser?.role_label ?? "当前岗位"}已处理生产计划变更影响并同步责任事项。` };
     await runAction({
       action: "resolveProductionPlanChangeImpact",
       entityId: String(impact.id),
-      payload: { resolution_note: `${currentUser?.role_label ?? "当前岗位"}已处理生产计划变更影响并同步责任事项。` },
+      payload: linkedPayload,
     });
   };
 
@@ -4838,6 +4870,51 @@ function ProductionModule({
           },
         ]}
       />
+      <div className="grid gap-5 xl:grid-cols-3">
+        <DataTable
+          title="补退料建议单"
+          icon={PackageCheck}
+          rows={snapshot.board.productionMaterialAdjustmentSuggestions}
+          empty="暂无补退料建议"
+          columns={[
+            { key: "suggestion_no", label: "建议单号" },
+            { key: "prod_no", label: "生产单" },
+            { key: "req_no", label: "领料单" },
+            { key: "adjustment_type_label", label: "类型", render: (value) => <StatusBadge value={String(value)} /> },
+            { key: "suggested_qty", label: "建议数量", render: (value) => formatQty(value) },
+            { key: "status_label", label: "状态", render: (value) => <StatusBadge value={String(value)} /> },
+            { key: "created_by_name", label: "创建人" },
+          ]}
+        />
+        <DataTable
+          title="质检窗口确认"
+          icon={ClipboardCheck}
+          rows={snapshot.board.qualityInspectionWindowConfirmations}
+          empty="暂无质检窗口确认"
+          columns={[
+            { key: "window_no", label: "确认单号" },
+            { key: "prod_no", label: "生产单" },
+            { key: "inspection_no", label: "请验单" },
+            { key: "inspection_window_date", label: "检验日期", render: shortDate },
+            { key: "inspector", label: "检验员" },
+            { key: "status_label", label: "状态", render: (value) => <StatusBadge value={String(value)} /> },
+          ]}
+        />
+        <DataTable
+          title="客户交期确认"
+          icon={MessagesSquare}
+          rows={snapshot.board.customerDeliveryConfirmations}
+          empty="暂无客户交期确认"
+          columns={[
+            { key: "confirmation_no", label: "确认单号" },
+            { key: "order_no", label: "订单号" },
+            { key: "customer_name", label: "客户" },
+            { key: "original_due_date", label: "原交期", render: shortDate },
+            { key: "proposed_delivery_date", label: "建议交期", render: shortDate },
+            { key: "confirmation_status_label", label: "状态", render: (value) => <StatusBadge value={String(value)} /> },
+          ]}
+        />
+      </div>
       <div className="grid gap-5 xl:grid-cols-[1fr_380px]">
         <DataTable
           title="生产计划台账"

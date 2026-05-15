@@ -689,6 +689,46 @@ function productionPlanChangeImpactSeverityLabel(severity: string) {
   );
 }
 
+function materialAdjustmentTypeLabel(type: string) {
+  return (
+    {
+      supplement: "补料建议",
+      return: "退料建议",
+      check: "复核建议",
+    }[type] ?? type
+  );
+}
+
+function materialAdjustmentStatusLabel(status: string) {
+  return (
+    {
+      pending_confirmation: "待确认",
+      confirmed: "已确认",
+      voided: "已关闭",
+    }[status] ?? status
+  );
+}
+
+function qualityInspectionWindowStatusLabel(status: string) {
+  return (
+    {
+      confirmed: "已确认",
+      rescheduled: "已调整",
+      voided: "已关闭",
+    }[status] ?? status
+  );
+}
+
+function deliveryConfirmationStatusLabel(status: string) {
+  return (
+    {
+      accepted: "客户接受",
+      pending_customer: "待客户确认",
+      rejected: "客户不接受",
+    }[status] ?? status
+  );
+}
+
 function productionDailyReportStatusLabel(status: string) {
   return (
     {
@@ -2039,6 +2079,71 @@ export function getSnapshot(actorId = "U-SALES") {
     };
   });
 
+  const productionMaterialAdjustmentSuggestions = database.prepare(`
+    SELECT pmas.*, ppci.impact_no, po.prod_no, r.req_no,
+           o.order_no, c.name AS customer_name, p.name AS product_name,
+           creator.name AS created_by_name, confirmer.name AS confirmed_by_name
+    FROM production_material_adjustment_suggestions pmas
+    JOIN production_plan_change_impacts ppci ON ppci.id = pmas.impact_id
+    JOIN production_orders po ON po.id = pmas.production_order_id
+    JOIN orders o ON o.id = po.order_id
+    JOIN customers c ON c.id = o.customer_id
+    JOIN products p ON p.id = o.product_id
+    LEFT JOIN requisitions r ON r.id = pmas.requisition_id
+    JOIN users creator ON creator.id = pmas.created_by
+    LEFT JOIN users confirmer ON confirmer.id = pmas.confirmed_by
+    ORDER BY pmas.created_at DESC
+  `).all().map((row) => {
+    const item = row as Record<string, unknown>;
+    return {
+      ...item,
+      adjustment_type_label: materialAdjustmentTypeLabel(String(item.adjustment_type)),
+      status_label: materialAdjustmentStatusLabel(String(item.status)),
+    };
+  });
+
+  const qualityInspectionWindowConfirmations = database.prepare(`
+    SELECT qiwc.*, ppci.impact_no, po.prod_no, i.inspection_no,
+           o.order_no, c.name AS customer_name, p.name AS product_name,
+           creator.name AS created_by_name
+    FROM quality_inspection_window_confirmations qiwc
+    JOIN production_plan_change_impacts ppci ON ppci.id = qiwc.impact_id
+    JOIN production_orders po ON po.id = qiwc.production_order_id
+    JOIN orders o ON o.id = po.order_id
+    JOIN customers c ON c.id = o.customer_id
+    JOIN products p ON p.id = o.product_id
+    LEFT JOIN inspections i ON i.id = qiwc.inspection_id
+    JOIN users creator ON creator.id = qiwc.created_by
+    ORDER BY qiwc.created_at DESC
+  `).all().map((row) => {
+    const item = row as Record<string, unknown>;
+    return {
+      ...item,
+      status_label: qualityInspectionWindowStatusLabel(String(item.status)),
+    };
+  });
+
+  const customerDeliveryConfirmations = database.prepare(`
+    SELECT cdc.*, ppci.impact_no, po.prod_no,
+           o.order_no, c.name AS customer_name, p.name AS product_name,
+           creator.name AS created_by_name
+    FROM customer_delivery_confirmations cdc
+    JOIN production_plan_change_impacts ppci ON ppci.id = cdc.impact_id
+    JOIN production_orders po ON po.id = cdc.production_order_id
+    JOIN orders o ON o.id = cdc.order_id
+    JOIN customers c ON c.id = cdc.customer_id
+    JOIN products p ON p.id = o.product_id
+    JOIN users creator ON creator.id = cdc.created_by
+    ORDER BY cdc.created_at DESC
+  `).all().map((row) => {
+    const item = row as Record<string, unknown>;
+    return {
+      ...item,
+      confirmation_status_label: deliveryConfirmationStatusLabel(String(item.confirmation_status)),
+      status_label: String(item.status) === "active" ? "有效" : String(item.status),
+    };
+  });
+
   const requisitions = database.prepare(`
     SELECT r.*, po.prod_no, po.priority, o.order_no, o.qty AS order_qty,
       c.name AS customer_name, p.name AS product_name, p.unit,
@@ -3380,6 +3485,9 @@ export function getSnapshot(actorId = "U-SALES") {
       productionPlanLines,
       productionPlanNotifications,
       productionPlanChangeImpacts,
+      productionMaterialAdjustmentSuggestions,
+      qualityInspectionWindowConfirmations,
+      customerDeliveryConfirmations,
       requisitions: requisitions.map((item) => ({
         ...item,
         lines: JSON.parse(String(item.lines)) as unknown[],
@@ -6735,8 +6843,37 @@ function resolveProductionPlanChangeImpact(
   impactId: string,
   rawPayload?: Record<string, unknown>,
 ) {
-  const impact = database.prepare("SELECT * FROM production_plan_change_impacts WHERE id = ?").get(impactId) as
-    | { id: string; impact_no: string; affected_role: Role; status: string }
+  const impact = database.prepare(`
+    SELECT ppci.*, psc.old_planned_date, psc.new_planned_date, psc.old_machine, psc.new_machine,
+           po.prod_no, o.id AS order_id, o.order_no, o.customer_id, o.due_date,
+           c.name AS customer_name, p.name AS product_name
+    FROM production_plan_change_impacts ppci
+    JOIN production_schedule_changes psc ON psc.id = ppci.schedule_change_id
+    JOIN production_orders po ON po.id = ppci.production_order_id
+    JOIN orders o ON o.id = po.order_id
+    JOIN customers c ON c.id = o.customer_id
+    JOIN products p ON p.id = o.product_id
+    WHERE ppci.id = ?
+  `).get(impactId) as
+    | {
+        id: string;
+        impact_no: string;
+        impact_type: string;
+        affected_role: Role;
+        status: string;
+        production_order_id: string;
+        source_document_type?: string | null;
+        source_document_id?: string | null;
+        source_document_no?: string | null;
+        new_planned_date?: string | null;
+        prod_no: string;
+        order_id: string;
+        order_no: string;
+        customer_id: string;
+        due_date: string;
+        customer_name: string;
+        product_name: string;
+      }
     | undefined;
   if (!impact) throw new Error("生产计划变更影响记录不存在。");
   if (impact.status !== "pending") throw new Error("生产计划变更影响记录已处理。");
@@ -6746,13 +6883,313 @@ function resolveProductionPlanChangeImpact(
   }
   const payload = rawPayload && typeof rawPayload === "object" ? rawPayload : {};
   const note = payloadText(payload, "resolution_note", "处理说明", false) || "已确认影响并同步调整责任事项。";
+  const linkedDocument = createProductionPlanImpactLinkedDocument(database, actorId, impact, payload, note);
   const resolvedAt = now();
   database.prepare(`
     UPDATE production_plan_change_impacts
-    SET status = 'resolved', resolved_by = ?, resolved_at = ?, resolution_note = ?
+    SET status = 'resolved',
+        resolved_by = ?,
+        resolved_at = ?,
+        resolution_note = ?,
+        linked_document_type = ?,
+        linked_document_id = ?,
+        linked_document_no = ?
     WHERE id = ?
-  `).run(actorId, resolvedAt, note, impact.id);
-  audit(database, actorId, "resolveProductionPlanChangeImpact", "production_plan_change_impact", impact.id, `处理生产计划变更影响 ${impact.impact_no}`);
+  `).run(
+    actorId,
+    resolvedAt,
+    note,
+    linkedDocument.documentType,
+    linkedDocument.documentId,
+    linkedDocument.documentNo,
+    impact.id,
+  );
+  audit(database, actorId, "resolveProductionPlanChangeImpact", "production_plan_change_impact", impact.id, `处理生产计划变更影响 ${impact.impact_no}，联动 ${linkedDocument.documentNo}`);
+}
+
+function createProductionPlanImpactLinkedDocument(
+  database: Database.Database,
+  actorId: string,
+  impact: {
+    id: string;
+    impact_no: string;
+    impact_type: string;
+    production_order_id: string;
+    source_document_id?: string | null;
+    source_document_no?: string | null;
+    new_planned_date?: string | null;
+    prod_no: string;
+    order_id: string;
+    customer_id: string;
+    due_date: string;
+  },
+  payload: Record<string, unknown>,
+  resolutionNote: string,
+) {
+  if (impact.impact_type === "purchase_arrival") {
+    return linkPurchaseArrivalNoticeFromPlanImpact(database, actorId, impact, payload, resolutionNote);
+  }
+  if (impact.impact_type === "material_requisition") {
+    return linkMaterialAdjustmentSuggestionFromPlanImpact(database, actorId, impact, payload, resolutionNote);
+  }
+  if (impact.impact_type === "quality_window") {
+    return linkQualityInspectionWindowFromPlanImpact(database, actorId, impact, payload, resolutionNote);
+  }
+  if (impact.impact_type === "delivery_commitment") {
+    return linkCustomerDeliveryConfirmationFromPlanImpact(database, actorId, impact, payload, resolutionNote);
+  }
+  return {
+    documentType: "production_plan_change_impact",
+    documentId: impact.id,
+    documentNo: impact.impact_no,
+  };
+}
+
+function linkPurchaseArrivalNoticeFromPlanImpact(
+  database: Database.Database,
+  actorId: string,
+  impact: {
+    id: string;
+    impact_no: string;
+    source_document_id?: string | null;
+    source_document_no?: string | null;
+    new_planned_date?: string | null;
+  },
+  payload: Record<string, unknown>,
+  resolutionNote: string,
+) {
+  const purchaseOrderId = impact.source_document_id;
+  if (!purchaseOrderId) throw new Error("采购到货影响缺少关联采购订单，不能联动到货通知单。");
+  const arrivalDate = payloadDate(
+    payload,
+    "new_arrival_date",
+    "调整后到货日期",
+    payloadText(payload, "arrival_date", "调整后到货日期", false) || String(impact.new_planned_date ?? new Date().toISOString().slice(0, 10)),
+  );
+  const note =
+    payloadText(payload, "arrival_note", "到货通知说明", false) ||
+    `生产计划变更影响 ${impact.impact_no} 已处理：${resolutionNote}`;
+
+  database.prepare(`
+    UPDATE purchase_contracts
+    SET delivery_date = ?,
+        note = TRIM(COALESCE(note, '') || CASE WHEN COALESCE(note, '') = '' THEN '' ELSE '；' END || ?)
+    WHERE purchase_order_id = ?
+  `).run(arrivalDate, `生产计划变更后供应商到货日调整为 ${arrivalDate}`, purchaseOrderId);
+
+  const existing = database.prepare(`
+    SELECT id, arrival_no
+    FROM purchase_arrival_notices
+    WHERE purchase_order_id = ?
+      AND status IN ('pending_signoff', 'signed', 'iqc_created', 'discrepancy_pending', 'discrepancy_approved')
+    ORDER BY created_at DESC
+    LIMIT 1
+  `).get(purchaseOrderId) as { id: string; arrival_no: string } | undefined;
+  if (existing) {
+    database.prepare(`
+      UPDATE purchase_arrival_notices
+      SET arrived_at = ?,
+          note = TRIM(COALESCE(note, '') || CASE WHEN COALESCE(note, '') = '' THEN '' ELSE '；' END || ?)
+      WHERE id = ?
+    `).run(arrivalDate, note, existing.id);
+    return {
+      documentType: "purchase_arrival_notice",
+      documentId: existing.id,
+      documentNo: existing.arrival_no,
+    };
+  }
+
+  const created = createPurchaseArrivalNotice(database, actorId, purchaseOrderId, {
+    arrived_at: arrivalDate,
+    note,
+  });
+  return {
+    documentType: "purchase_arrival_notice",
+    documentId: created.id,
+    documentNo: created.documentNo,
+  };
+}
+
+function linkMaterialAdjustmentSuggestionFromPlanImpact(
+  database: Database.Database,
+  actorId: string,
+  impact: {
+    id: string;
+    impact_no: string;
+    production_order_id: string;
+    source_document_id?: string | null;
+  },
+  payload: Record<string, unknown>,
+  resolutionNote: string,
+) {
+  const adjustmentTypeRaw = payloadText(payload, "adjustment_type", "补退料类型", false) || "check";
+  const adjustmentType = ["supplement", "return", "check"].includes(adjustmentTypeRaw) ? adjustmentTypeRaw : "check";
+  const suggestedQty =
+    payloadText(payload, "suggested_qty", "建议数量", false) === ""
+      ? 0
+      : roundQty(payloadNumber(payload, "suggested_qty", "建议数量", { min: 0 }));
+  const requisition =
+    (impact.source_document_id
+      ? (database.prepare("SELECT * FROM requisitions WHERE id = ?").get(impact.source_document_id) as Record<string, unknown> | undefined)
+      : undefined) ??
+    (database.prepare(`
+      SELECT *
+      FROM requisitions
+      WHERE production_order_id = ?
+      ORDER BY created_at DESC
+      LIMIT 1
+    `).get(impact.production_order_id) as Record<string, unknown> | undefined);
+  const materialSummary = requisition
+    ? ((database.prepare(`
+        SELECT GROUP_CONCAT(m.name || ' ' || rl.required_qty || m.unit, '、') AS summary
+        FROM requisition_lines rl
+        JOIN materials m ON m.id = rl.material_id
+        WHERE rl.requisition_id = ?
+      `).get(requisition.id) as { summary?: string | null }).summary ?? "")
+    : "";
+  const suggestionId = uid("PMAS");
+  const suggestionNo = serial(database, "production_material_adjustment_suggestions", "BT");
+  const createdAt = now();
+  database.prepare(`
+    INSERT INTO production_material_adjustment_suggestions (
+      id, suggestion_no, impact_id, production_order_id, requisition_id,
+      adjustment_type, suggested_qty, material_summary, reason, status,
+      created_by, created_at, confirmed_by, confirmed_at, confirmation_note
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending_confirmation', ?, ?, NULL, NULL, '')
+  `).run(
+    suggestionId,
+    suggestionNo,
+    impact.id,
+    impact.production_order_id,
+    requisition?.id ?? null,
+    adjustmentType,
+    suggestedQty,
+    payloadText(payload, "material_summary", "物料摘要", false) || materialSummary,
+    resolutionNote,
+    actorId,
+    createdAt,
+  );
+  return {
+    documentType: "material_adjustment_suggestion",
+    documentId: suggestionId,
+    documentNo: suggestionNo,
+  };
+}
+
+function linkQualityInspectionWindowFromPlanImpact(
+  database: Database.Database,
+  actorId: string,
+  impact: {
+    id: string;
+    impact_no: string;
+    production_order_id: string;
+    source_document_id?: string | null;
+    new_planned_date?: string | null;
+  },
+  payload: Record<string, unknown>,
+  resolutionNote: string,
+) {
+  const actor = getUser(database, actorId);
+  const inspection =
+    (impact.source_document_id
+      ? (database.prepare("SELECT * FROM inspections WHERE id = ?").get(impact.source_document_id) as Record<string, unknown> | undefined)
+      : undefined) ??
+    (database.prepare(`
+      SELECT *
+      FROM inspections
+      WHERE production_order_id = ?
+      ORDER BY created_at DESC
+      LIMIT 1
+    `).get(impact.production_order_id) as Record<string, unknown> | undefined);
+  const windowDate = payloadDate(
+    payload,
+    "inspection_window_date",
+    "检验窗口日期",
+    addDays(String(impact.new_planned_date ?? new Date().toISOString().slice(0, 10)), 1),
+  );
+  const windowId = uid("QIW");
+  const windowNo = serial(database, "quality_inspection_window_confirmations", "ZJ");
+  const createdAt = now();
+  database.prepare(`
+    INSERT INTO quality_inspection_window_confirmations (
+      id, window_no, impact_id, production_order_id, inspection_id,
+      inspection_window_date, inspector, status, note, created_by, created_at
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, 'confirmed', ?, ?, ?)
+  `).run(
+    windowId,
+    windowNo,
+    impact.id,
+    impact.production_order_id,
+    inspection?.id ?? null,
+    windowDate,
+    payloadText(payload, "inspector", "检验员", false) || actor.name,
+    resolutionNote,
+    actorId,
+    createdAt,
+  );
+  return {
+    documentType: "quality_inspection_window",
+    documentId: windowId,
+    documentNo: windowNo,
+  };
+}
+
+function linkCustomerDeliveryConfirmationFromPlanImpact(
+  database: Database.Database,
+  actorId: string,
+  impact: {
+    id: string;
+    impact_no: string;
+    production_order_id: string;
+    order_id: string;
+    customer_id: string;
+    due_date: string;
+    new_planned_date?: string | null;
+  },
+  payload: Record<string, unknown>,
+  resolutionNote: string,
+) {
+  const proposedDate = payloadDate(
+    payload,
+    "proposed_delivery_date",
+    "建议交付日期",
+    addDays(String(impact.new_planned_date ?? new Date().toISOString().slice(0, 10)), 3),
+  );
+  const customerFeedback = payloadText(payload, "customer_feedback", "客户反馈", false);
+  const confirmationStatus =
+    payloadText(payload, "confirmation_status", "确认状态", false) || (customerFeedback ? "accepted" : "pending_customer");
+  const confirmationId = uid("CDC");
+  const confirmationNo = serial(database, "customer_delivery_confirmations", "JQ");
+  const createdAt = now();
+  database.prepare(`
+    INSERT INTO customer_delivery_confirmations (
+      id, confirmation_no, impact_id, order_id, production_order_id, customer_id,
+      original_due_date, proposed_delivery_date, confirmation_status, contact_method,
+      customer_feedback, status, created_by, created_at
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
+  `).run(
+    confirmationId,
+    confirmationNo,
+    impact.id,
+    impact.order_id,
+    impact.production_order_id,
+    impact.customer_id,
+    impact.due_date,
+    proposedDate,
+    ["accepted", "pending_customer", "rejected"].includes(confirmationStatus) ? confirmationStatus : "pending_customer",
+    payloadText(payload, "contact_method", "沟通方式", false) || "系统记录",
+    customerFeedback || resolutionNote,
+    actorId,
+    createdAt,
+  );
+  return {
+    documentType: "customer_delivery_confirmation",
+    documentId: confirmationId,
+    documentNo: confirmationNo,
+  };
 }
 
 function approveMaterialRequisition(
@@ -9508,6 +9945,7 @@ function createPurchaseArrivalNotice(
     );
   });
   audit(database, actorId, "createPurchaseArrivalNotice", "purchase_arrival_notice", noticeId, `生成到货通知单 ${arrivalNo}：${purchase.purchase_no}`);
+  return { id: noticeId, documentNo: arrivalNo };
 }
 
 function registerPurchaseArrivalDiscrepancy(
