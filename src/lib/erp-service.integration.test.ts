@@ -6,6 +6,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 const tempDirs: string[] = [];
 
+function offsetDate(days: number) {
+  return new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+}
+
 async function loadService() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "erp-service-test-"));
   tempDirs.push(dir);
@@ -4141,6 +4145,116 @@ describe("ERP service formal production instruction and scheduling", () => {
           materialName: "42CrMo 圆钢",
           requiredQty: 20,
           isPrimary: 1,
+        }),
+      ]),
+    );
+  });
+
+  it("tracks schedule changes and raises delivery risk warnings for delayed production plans", async () => {
+    const service = await loadService();
+    const before = service.getSnapshot("U-SALES");
+    const customer = before.board.customers.find((item) => item.status === "active");
+    const product = before.board.products.find((item) => item.status === "active");
+    const dueDate = offsetDate(5);
+    const firstPlanDate = offsetDate(2);
+    const delayedPlanDate = offsetDate(8);
+
+    service.performAction({
+      actorId: "U-SALES",
+      action: "createQuote",
+      payload: {
+        customer_id: customer?.id,
+        product_id: product?.id,
+        qty: "16",
+        margin_rate: "0.2",
+      },
+    });
+    const quote = service.getSnapshot("U-SALES").board.quotes[0] as Record<string, unknown>;
+    service.performAction({ actorId: "U-SALES", action: "confirmQuote", entityId: String(quote.id) });
+    service.performAction({
+      actorId: "U-SALES",
+      action: "createOrder",
+      entityId: String(quote.id),
+      payload: {
+        due_date: dueDate,
+        special_requirements: "生产排产变更与交期预警测试",
+      },
+    });
+    const order = service.getSnapshot("U-ASSIST").board.orders[0] as Record<string, unknown>;
+    service.performAction({ actorId: "U-ASSIST", action: "createProductionInstruction", entityId: String(order.id) });
+    const production = service.getSnapshot("U-PROD").board.productions[0] as Record<string, unknown>;
+
+    service.performAction({
+      actorId: "U-PROD",
+      action: "scheduleAndGenerateRequisition",
+      entityId: String(production.id),
+      payload: {
+        planned_date: firstPlanDate,
+        machine: "CNC-03",
+        owner: "马工",
+        shift: "白班",
+        schedule_note: "按原交期排产。",
+      },
+    });
+
+    service.performAction({
+      actorId: "U-PROD",
+      action: "updateProductionSchedule",
+      entityId: String(production.id),
+      payload: {
+        planned_date: delayedPlanDate,
+        machine: "CNC-09",
+        owner: "李工",
+        shift: "夜班",
+        schedule_note: "客户插单后调整到夜班生产。",
+        change_reason: "客户紧急插单，调整机台和班次。",
+      },
+    });
+
+    const snapshot = service.getSnapshot("U-PROD");
+    const updatedProduction = snapshot.board.productions.find((item) => item.id === production.id) as Record<string, unknown>;
+    expect(updatedProduction).toMatchObject({
+      planned_date: delayedPlanDate,
+      machine: "CNC-09",
+      owner: "李工",
+      shift: "夜班",
+      schedule_note: "客户插单后调整到夜班生产。",
+      schedule_change_count: 1,
+      latest_schedule_change_reason: "客户紧急插单，调整机台和班次。",
+      delivery_risk_status: "delayed",
+    });
+
+    expect(snapshot.board.productionScheduleChanges[0]).toMatchObject({
+      production_order_id: production.id,
+      prod_no: production.prod_no,
+      old_planned_date: firstPlanDate,
+      new_planned_date: delayedPlanDate,
+      old_machine: "CNC-03",
+      new_machine: "CNC-09",
+      old_owner: "马工",
+      new_owner: "李工",
+      change_reason: "客户紧急插单，调整机台和班次。",
+      changed_by_name: "生产主管-马工",
+    });
+
+    expect(snapshot.board.productionDeliveryWarnings).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          production_order_id: production.id,
+          order_no: order.order_no,
+          warning_type: "scheduled_after_due",
+          warning_level: "high",
+          due_date: dueDate,
+          planned_date: delayedPlanDate,
+        }),
+      ]),
+    );
+    expect(snapshot.board.alertCenter).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          alert_type: "production_delivery_risk",
+          entity_id: production.id,
+          action_label: "调整排产",
         }),
       ]),
     );
