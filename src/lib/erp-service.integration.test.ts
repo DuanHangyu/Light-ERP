@@ -6447,6 +6447,145 @@ describe("ERP service production plan lock approval and change notifications", (
       }),
     ).toThrow("补退料单已复核");
   });
+
+  it("routes material adjustment review exceptions to owners and closes the exception loop", async () => {
+    const service = await loadService();
+    const scenario = createPlanChangeImpactScenario(service);
+    const warehouseImpact = scenario.impacts.find((item) => item.impact_type === "material_requisition") as Record<string, unknown>;
+
+    service.performAction({
+      actorId: "U-WH",
+      action: "resolveProductionPlanChangeImpact",
+      entityId: String(warehouseImpact.id),
+      payload: {
+        adjustment_type: "supplement",
+        suggested_qty: "2.5",
+        resolution_note: "仓库发现领料缺口，先生成补料建议。",
+      },
+    });
+    const suggestionSnapshot = service.getSnapshot("U-PROD") as unknown as {
+      board: { productionMaterialAdjustmentSuggestions: Array<Record<string, unknown>> };
+    };
+    const suggestion = suggestionSnapshot.board.productionMaterialAdjustmentSuggestions.find(
+      (item) => item.impact_id === warehouseImpact.id,
+    ) as Record<string, unknown>;
+    service.performAction({
+      actorId: "U-PROD",
+      action: "confirmMaterialAdjustmentSuggestion",
+      entityId: String(suggestion.id),
+      payload: { confirmation_note: "生产确认补料，转正式补退料单执行。" },
+    });
+    const orderSnapshot = service.getSnapshot("U-WH") as unknown as {
+      board: { productionMaterialAdjustmentOrders: Array<Record<string, unknown>> };
+    };
+    const order = orderSnapshot.board.productionMaterialAdjustmentOrders.find(
+      (item) => item.suggestion_id === suggestion.id,
+    ) as Record<string, unknown>;
+    service.performAction({
+      actorId: "U-WH",
+      action: "executeMaterialAdjustmentOrder",
+      entityId: String(order.id),
+      payload: {
+        material_id: "M-STEEL",
+        execution_date: "2026-07-04",
+        execution_note: "仓库完成补料执行，但成本复核发现差异。",
+      },
+    });
+
+    service.performAction({
+      actorId: "U-WH",
+      action: "reviewMaterialAdjustmentOrder",
+      entityId: String(order.id),
+      payload: {
+        review_result: "exception",
+        review_note: "补料执行批次成本与现场确认成本存在差异，转生产复盘。",
+        exception_reason_type: "cost_mismatch",
+        exception_description: "补料批次成本与生产日报记录不一致，需要生产确认是否调整工单成本。",
+        owner_role: "production",
+        due_date: "2026-07-07",
+        cost_adjustment_amount: "12.5",
+      },
+    });
+
+    const exceptionSnapshot = service.getSnapshot("U-PROD") as unknown as {
+      board: {
+        productionMaterialAdjustmentOrders: Array<Record<string, unknown>>;
+        productionMaterialAdjustmentOrderReviews: Array<Record<string, unknown>>;
+        productionMaterialAdjustmentReviewExceptions: Array<Record<string, unknown>>;
+      };
+      tasks: Array<Record<string, unknown>>;
+    };
+    const reviewedOrder = exceptionSnapshot.board.productionMaterialAdjustmentOrders.find((item) => item.id === order.id) as Record<string, unknown>;
+    const review = exceptionSnapshot.board.productionMaterialAdjustmentOrderReviews.find((item) => item.order_id === order.id) as Record<string, unknown>;
+    const exception = exceptionSnapshot.board.productionMaterialAdjustmentReviewExceptions.find((item) => item.order_id === order.id) as Record<string, unknown>;
+
+    expect(reviewedOrder).toMatchObject({
+      review_status: "reviewed",
+      review_result: "exception",
+      review_result_label: "复核异常",
+    });
+    expect(review).toMatchObject({
+      review_result: "exception",
+      review_result_label: "复核异常",
+    });
+    expect(exception).toMatchObject({
+      exception_no: expect.stringMatching(/^BTYC-/),
+      review_id: review.id,
+      order_id: order.id,
+      status: "open",
+      status_label: "待处理",
+      reason_type: "cost_mismatch",
+      reason_type_label: "成本差异",
+      owner_role: "production",
+      owner_role_label: "生产",
+      cost_adjustment_amount: 12.5,
+      created_by_name: "仓库管理员-吴勇",
+    });
+    expect(exceptionSnapshot.tasks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: `task-material-adjustment-review-exception-${exception.id}`,
+          action: "resolveMaterialAdjustmentReviewException",
+          primaryLabel: "关闭异常",
+        }),
+      ]),
+    );
+
+    service.performAction({
+      actorId: "U-PROD",
+      action: "resolveMaterialAdjustmentReviewException",
+      entityId: String(exception.id),
+      payload: {
+        resolution_type: "cost_adjustment",
+        final_cost_adjustment_amount: "10.5",
+        resolution_note: "生产复核日报和现场领用记录后，确认按 10.5 元调整工单补料成本。",
+      },
+    });
+
+    const closedSnapshot = service.getSnapshot("U-PROD") as unknown as {
+      board: { productionMaterialAdjustmentReviewExceptions: Array<Record<string, unknown>> };
+      tasks: Array<Record<string, unknown>>;
+    };
+    const closedException = closedSnapshot.board.productionMaterialAdjustmentReviewExceptions.find((item) => item.id === exception.id) as Record<string, unknown>;
+    expect(closedException).toMatchObject({
+      status: "closed",
+      status_label: "已关闭",
+      resolution_type: "cost_adjustment",
+      resolution_type_label: "成本调整",
+      final_cost_adjustment_amount: 10.5,
+      resolved_by_name: "生产主管-马工",
+      resolution_note: "生产复核日报和现场领用记录后，确认按 10.5 元调整工单补料成本。",
+    });
+    expect(closedSnapshot.tasks.some((task) => task.id === `task-material-adjustment-review-exception-${exception.id}`)).toBe(false);
+    expect(() =>
+      service.performAction({
+        actorId: "U-PROD",
+        action: "resolveMaterialAdjustmentReviewException",
+        entityId: String(exception.id),
+        payload: { resolution_type: "no_adjustment" },
+      }),
+    ).toThrow("补退料复核异常已关闭");
+  });
 });
 
 describe("ERP service formal report center", () => {
