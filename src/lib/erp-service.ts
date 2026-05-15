@@ -11328,6 +11328,7 @@ export async function buildExport(input: {
     | "purchase-receipt"
     | "material-issue"
     | "stocktake"
+    | "production-plan"
     | "sales-return"
     | "customer-refund"
     | "replacement-shipment"
@@ -11478,6 +11479,12 @@ export async function buildExport(input: {
   if (input.type === "stocktake") {
     sheets.push({ name: "stocktake", rows: stocktakeRows(database, input.entityId) });
     sheets.push({ name: "inventory_trace", rows: inventoryTraceRows(database, input.entityId) });
+  }
+
+  if (input.type === "production-plan") {
+    sheets.push({ name: "production_plan", rows: productionPlanRows(database, filters) });
+    sheets.push({ name: "schedule_calendar", rows: productionScheduleCalendarRows(database, filters) });
+    sheets.push({ name: "delivery_warnings", rows: productionDeliveryWarningExportRows(database, filters) });
   }
 
   if (input.type === "sales-return") {
@@ -12421,6 +12428,169 @@ function ledgerPayableRows(database: Database.Database, entityId?: string, filte
     WHERE ${conditions.join(" AND ")}
     ORDER BY p.created_at DESC
   `, params);
+}
+
+function productionPlanSourceRows(database: Database.Database, filters: ReportFilters = {}): Array<Record<string, unknown>> {
+  const conditions = ["po.status NOT IN ('voided', 'cancelled')"];
+  const params: unknown[] = [];
+  addDateFilter(conditions, params, "COALESCE(s.planned_date, o.due_date, po.created_at)", filters);
+  if (filters.customerId) {
+    conditions.push("o.customer_id = ?");
+    params.push(filters.customerId);
+  }
+  if (filters.orderId) {
+    conditions.push("o.id = ?");
+    params.push(filters.orderId);
+  }
+
+  const sourceRows = filteredRows(database, `
+    SELECT po.id,
+           po.prod_no,
+           po.status,
+           po.priority,
+           o.id AS order_id,
+           o.order_no,
+           o.customer_po_no,
+           o.qty AS order_qty,
+           o.due_date,
+           c.name AS customer_name,
+           p.name AS product_name,
+           p.spec AS product_spec,
+           p.unit,
+           s.planned_date,
+           s.machine,
+           s.owner,
+           s.shift,
+           s.schedule_note,
+           strftime('%Y-W%W', COALESCE(s.planned_date, o.due_date, po.created_at)) AS plan_week,
+           COALESCE((
+             SELECT COUNT(*)
+             FROM production_schedule_changes psc
+             WHERE psc.production_order_id = po.id
+           ), 0) AS schedule_change_count,
+           COALESCE((
+             SELECT psc.change_reason
+             FROM production_schedule_changes psc
+             WHERE psc.production_order_id = po.id
+             ORDER BY psc.changed_at DESC
+             LIMIT 1
+           ), '') AS latest_schedule_change_reason
+    FROM production_orders po
+    JOIN orders o ON o.id = po.order_id
+    JOIN customers c ON c.id = o.customer_id
+    JOIN products p ON p.id = o.product_id
+    LEFT JOIN schedules s ON s.production_order_id = po.id
+    WHERE ${conditions.join(" AND ")}
+    ORDER BY COALESCE(s.planned_date, o.due_date, po.created_at) ASC, s.machine ASC, po.prod_no ASC
+  `, params);
+
+  return sourceRows.map((row) => {
+    const risk = productionDeliveryRisk(row);
+    return {
+      ...row,
+      status_label: productionStatusLabel(String(row.status)),
+      priority_label: priorityLabel(String(row.priority ?? "normal")),
+      delivery_risk_status: risk.status,
+      delivery_risk_label: risk.label,
+    };
+  });
+}
+
+function productionPlanRows(database: Database.Database, filters: ReportFilters = {}) {
+  return productionPlanSourceRows(database, filters).map((row) => ({
+    计划日期: row.planned_date ?? "未排产",
+    周次: row.plan_week ?? "",
+    机台: row.machine ?? "",
+    班次: row.shift ?? "",
+    负责人: row.owner ?? "",
+    生产单号: row.prod_no,
+    客户订单: row.order_no,
+    客户名称: row.customer_name,
+    产品名称: row.product_name,
+    规格型号: row.product_spec ?? "",
+    计划数量: Number(row.order_qty ?? 0),
+    单位: row.unit ?? "",
+    交付期限: row.due_date ?? "",
+    优先级: row.priority_label,
+    状态: row.status_label,
+    交期风险: row.delivery_risk_label,
+    排产变更次数: Number(row.schedule_change_count ?? 0),
+    最近变更原因: row.latest_schedule_change_reason ?? "",
+    排产备注: row.schedule_note ?? "",
+  }));
+}
+
+function productionScheduleCalendarRows(database: Database.Database, filters: ReportFilters = {}) {
+  const grouped = new Map<
+    string,
+    {
+      计划日期: string;
+      机台: string;
+      任务数: number;
+      计划数量: number;
+      负责人: Set<string>;
+      生产单号: string[];
+      产品摘要: string[];
+      交期预警数: number;
+      负荷状态: string;
+    }
+  >();
+
+  productionPlanSourceRows(database, filters).forEach((row) => {
+    const plannedDate = String(row.planned_date ?? "未排产");
+    const machine = String(row.machine ?? "未指定机台");
+    const key = `${plannedDate}::${machine}`;
+    const current =
+      grouped.get(key) ??
+      ({
+        计划日期: plannedDate,
+        机台: machine,
+        任务数: 0,
+        计划数量: 0,
+        负责人: new Set<string>(),
+        生产单号: [],
+        产品摘要: [],
+        交期预警数: 0,
+        负荷状态: "空闲",
+      });
+    current.任务数 += 1;
+    current.计划数量 = roundQty(current.计划数量 + Number(row.order_qty ?? 0));
+    if (row.owner) current.负责人.add(String(row.owner));
+    current.生产单号.push(String(row.prod_no ?? ""));
+    current.产品摘要.push(`${row.product_name ?? "-"} ${roundQty(Number(row.order_qty ?? 0))}${row.unit ?? ""}`);
+    if (row.delivery_risk_status !== "normal") current.交期预警数 += 1;
+    current.负荷状态 = current.任务数 >= 4 ? "超负荷" : current.任务数 >= 2 ? "正常" : "空闲";
+    grouped.set(key, current);
+  });
+
+  return Array.from(grouped.values()).map((row) => ({
+    计划日期: row.计划日期,
+    机台: row.机台,
+    任务数: row.任务数,
+    计划数量: row.计划数量,
+    负责人: Array.from(row.负责人).join("、"),
+    负荷状态: row.负荷状态,
+    交期预警数: row.交期预警数,
+    生产单号: row.生产单号.filter(Boolean).join("、"),
+    产品摘要: row.产品摘要.join("；"),
+  }));
+}
+
+function productionDeliveryWarningExportRows(database: Database.Database, filters: ReportFilters = {}) {
+  return productionDeliveryWarningRows(productionPlanSourceRows(database, filters)).map((row) => ({
+    生产单号: row.prod_no,
+    客户订单: row.order_no,
+    客户名称: row.customer_name,
+    产品名称: row.product_name,
+    状态: row.status_label,
+    风险类型: row.warning_type_label,
+    风险等级: row.warning_level_label,
+    计划日期: row.planned_date || "未排产",
+    交付期限: row.due_date,
+    影响天数: row.delay_days,
+    机台: row.machine ?? "",
+    负责人: row.owner ?? "",
+  }));
 }
 
 function purchaseContractRows(database: Database.Database, entityId?: string) {

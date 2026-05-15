@@ -6,6 +6,7 @@ import {
   BellRing,
   Boxes,
   Calculator,
+  CalendarDays,
   CheckCircle2,
   ClipboardList,
   DatabaseBackup,
@@ -46,6 +47,7 @@ import {
   buildPurchaseArrivalDiscrepancyPrintPreview,
   buildCustomerRefundPrintPreview,
   buildPurchaseReceiptPrintPreview,
+  buildProductionPlanPrintPreview,
   buildReplacementShipmentPrintPreview,
   buildSalesReturnPrintPreview,
   buildStocktakePrintPreview,
@@ -3843,20 +3845,20 @@ function FormalPrintPreviewModal({
   if (!preview) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-slate-950/55 px-4 py-6">
-      <div className="w-full max-w-[calc(210mm+48px)]">
-        <div className="no-print mb-3 flex items-center justify-between rounded-lg border border-slate-200 bg-white px-4 py-3 shadow-xl">
-          <div>
+    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-auto bg-slate-950/55 px-4 py-6">
+      <div className="min-w-0 w-full max-w-[calc(210mm+48px)]">
+        <div className="no-print mb-3 flex items-center justify-between gap-3 rounded-lg border border-slate-200 bg-white px-4 py-3 shadow-xl">
+          <div className="min-w-0">
             <p className="text-sm font-semibold text-slate-950">{preview.header.title}打印预览</p>
             <p className="mt-1 text-xs text-slate-500">
               {preview.templateName} / {preview.header.documentNo} / A4 正式版式
             </p>
           </div>
-          <div className="flex gap-2">
+          <div className="flex shrink-0 gap-2">
             <button
               type="button"
               onClick={() => window.print()}
-              className="inline-flex h-9 items-center gap-2 rounded-md bg-blue-600 px-3 text-sm font-semibold text-white hover:bg-blue-700"
+              className="inline-flex h-9 items-center gap-2 whitespace-nowrap rounded-md bg-blue-600 px-3 text-sm font-semibold text-white hover:bg-blue-700"
             >
               <Printer className="h-4 w-4" />
               打印
@@ -3872,20 +3874,20 @@ function FormalPrintPreviewModal({
           </div>
         </div>
 
-        <section className="delivery-note-print-surface mx-auto min-h-[297mm] w-[210mm] max-w-full bg-white px-[16mm] py-[14mm] text-slate-950 shadow-2xl">
+        <section className="delivery-note-print-surface mx-auto box-border min-h-[297mm] w-[210mm] max-w-full bg-white px-[16mm] py-[14mm] text-slate-950 shadow-2xl">
           <header className="border-b-2 border-slate-950 pb-5">
-            <div className="flex items-start justify-between gap-6">
-              <div>
+            <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between sm:gap-6">
+              <div className="min-w-0">
                 <p className="text-[13px] font-semibold tracking-[0.18em] text-blue-700">{preview.eyebrow}</p>
                 <h1 className="mt-2 text-[24px] font-bold tracking-normal">{preview.header.companyName}</h1>
                 <p className="mt-2 text-[12px] text-slate-500">{preview.description}</p>
               </div>
-              <div className="shrink-0 rounded-sm border-2 border-blue-700 px-5 py-2 text-center text-blue-700">
+              <div className="w-fit shrink-0 rounded-sm border-2 border-blue-700 px-5 py-2 text-center text-blue-700">
                 <p className="text-[12px] font-semibold">{preview.header.statusText}</p>
                 <p className="mt-1 text-[20px] font-bold">{preview.header.title}</p>
               </div>
             </div>
-            <div className="mt-5 grid grid-cols-3 gap-3 text-[12px]">
+            <div className="mt-5 grid grid-cols-1 gap-3 text-[12px] sm:grid-cols-3">
               <PrintField label="单据编号" value={preview.header.documentNo} strong />
               <PrintField label="单据日期" value={preview.header.documentDate} strong />
               <PrintField label="打印日期" value={new Date().toISOString().slice(0, 10)} />
@@ -3916,43 +3918,45 @@ function FormalPrintPreviewModal({
           {preview.lineSections.map((section) => (
             <section key={section.title} className="mt-5">
               <PrintSectionTitle title={section.title} />
-              <table className="w-full border-collapse text-[12px]">
-                <thead>
-                  <tr className="bg-slate-100">
-                    {section.columns.map((column) => (
-                      <th
-                        key={column.key}
-                        className={`border border-slate-400 px-2 py-2 font-semibold ${printAlignClass(column.align)}`}
-                      >
-                        {column.label}
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {section.rows.map((line, index) => (
-                    <tr key={`${section.title}-${String(line.lineNo ?? index)}`}>
+              <div className="overflow-x-auto print:overflow-visible">
+                <table className="min-w-[640px] w-full border-collapse text-[12px] print:min-w-full">
+                  <thead>
+                    <tr className="bg-slate-100">
                       {section.columns.map((column) => (
-                        <td key={column.key} className={`border border-slate-300 px-2 py-3 ${printAlignClass(column.align)}`}>
-                          {String(line[column.key] ?? "")}
-                        </td>
-                      ))}
-                    </tr>
-                  ))}
-                  {Array.from({ length: Math.max((section.minRows ?? 0) - section.rows.length, 0) }).map((_, index) => (
-                    <tr key={`${section.title}-blank-${index}`}>
-                      {section.columns.map((column, columnIndex) => (
-                        <td
-                          key={`${section.title}-blank-${index}-${column.key}`}
-                          className={`border border-slate-300 px-2 py-3 ${printAlignClass(column.align)}`}
+                        <th
+                          key={column.key}
+                          className={`border border-slate-400 px-2 py-2 font-semibold ${printAlignClass(column.align)}`}
                         >
-                          {columnIndex === 0 ? <span className="text-slate-300">{section.rows.length + index + 1}</span> : <span>&nbsp;</span>}
-                        </td>
+                          {column.label}
+                        </th>
                       ))}
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody>
+                    {section.rows.map((line, index) => (
+                      <tr key={`${section.title}-${String(line.lineNo ?? index)}`}>
+                        {section.columns.map((column) => (
+                          <td key={column.key} className={`border border-slate-300 px-2 py-3 ${printAlignClass(column.align)}`}>
+                            {String(line[column.key] ?? "")}
+                          </td>
+                        ))}
+                      </tr>
+                    ))}
+                    {Array.from({ length: Math.max((section.minRows ?? 0) - section.rows.length, 0) }).map((_, index) => (
+                      <tr key={`${section.title}-blank-${index}`}>
+                        {section.columns.map((column, columnIndex) => (
+                          <td
+                            key={`${section.title}-blank-${index}-${column.key}`}
+                            className={`border border-slate-300 px-2 py-3 ${printAlignClass(column.align)}`}
+                          >
+                            {columnIndex === 0 ? <span className="text-slate-300">{section.rows.length + index + 1}</span> : <span>&nbsp;</span>}
+                          </td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             </section>
           ))}
 
@@ -4338,6 +4342,56 @@ function buildMachineLoadRows(productions: Row[]): Row[] {
     .sort((a, b) => String(a.planned_date).localeCompare(String(b.planned_date)) || String(a.machine).localeCompare(String(b.machine)));
 }
 
+function buildProductionCalendar(productions: Row[], fallbackMachines: string[]) {
+  const scheduled = productions
+    .filter((production) => production.planned_date)
+    .sort(
+      (a, b) =>
+        String(a.planned_date).localeCompare(String(b.planned_date)) ||
+        String(a.machine ?? "").localeCompare(String(b.machine ?? "")) ||
+        String(a.prod_no ?? "").localeCompare(String(b.prod_no ?? "")),
+    );
+  const dates = Array.from(new Set(scheduled.map((production) => String(production.planned_date).slice(0, 10))));
+  const machines = Array.from(
+    new Set([
+      ...scheduled.map((production) => String(production.machine ?? "").trim() || "未指定机台"),
+      ...fallbackMachines.filter(Boolean),
+    ]),
+  ).slice(0, 6);
+  const rows = dates.map((date) => {
+    const cells = machines.map((machine) => {
+      const cellProductions = scheduled.filter(
+        (production) =>
+          String(production.planned_date).slice(0, 10) === date &&
+          (String(production.machine ?? "").trim() || "未指定机台") === machine,
+      );
+      const taskCount = cellProductions.length;
+      const plannedQty = cellProductions.reduce((sum, production) => sum + Number(production.order_qty ?? 0), 0);
+      const riskCount = cellProductions.filter((production) => String(production.delivery_risk_status ?? "normal") !== "normal").length;
+      const owners = Array.from(new Set(cellProductions.map((production) => String(production.owner ?? "")).filter(Boolean))).join("、");
+      return {
+        id: `${date}-${machine}`,
+        date,
+        machine,
+        productions: cellProductions,
+        taskCount,
+        plannedQty,
+        riskCount,
+        owners,
+        loadStatusLabel: taskCount >= 4 ? "超负荷" : taskCount >= 2 ? "正常" : taskCount === 1 ? "空闲" : "暂无数据",
+      };
+    });
+    return {
+      date,
+      cells,
+      taskCount: cells.reduce((sum, cell) => sum + cell.taskCount, 0),
+      plannedQty: cells.reduce((sum, cell) => sum + cell.plannedQty, 0),
+      riskCount: cells.reduce((sum, cell) => sum + cell.riskCount, 0),
+    };
+  });
+  return { dates, machines, rows };
+}
+
 function ProductionModule({
   snapshot,
   currentUser,
@@ -4408,6 +4462,7 @@ function ProductionModule({
     work_hours: "8",
     abnormal_note: "",
   });
+  const [planPreview, setPlanPreview] = useState<FormalPrintDocument | null>(null);
   const [productionPreview, setProductionPreview] = useState<FormalPrintDocument | null>(null);
   const [requisitionPreview, setRequisitionPreview] = useState<FormalPrintDocument | null>(null);
   const [issuePreview, setIssuePreview] = useState<FormalPrintDocument | null>(null);
@@ -4423,8 +4478,15 @@ function ProductionModule({
     const machineMatch = planningMachineFilter === "all" || String(item.machine ?? "") === planningMachineFilter;
     return statusMatch && machineMatch;
   });
-  const machineLoadRows = buildMachineLoadRows(activeProductions);
+  const machineLoadRows = buildMachineLoadRows(planningRows);
   const deliveryWarnings = snapshot.board.productionDeliveryWarnings ?? [];
+  const planningIdSet = new Set(planningRows.map((item) => String(item.id)));
+  const visibleDeliveryWarnings = deliveryWarnings.filter((item) => planningIdSet.has(String(item.production_order_id)));
+  const productionCalendar = buildProductionCalendar(planningRows, machineOptions);
+  const productionPlanFilterLabel = [
+    planningStatusFilter === "all" ? "状态：全部" : `状态：${productionStatusLabel(planningStatusFilter)}`,
+    planningMachineFilter === "all" ? "机台：全部" : `机台：${planningMachineFilter}`,
+  ].join("；");
   const setInstructionField = (key: string, value: string) =>
     setInstructionForm((current) => ({ ...current, [key]: value }));
   const setScheduleField = (key: string, value: string) => setScheduleForm((current) => ({ ...current, [key]: value }));
@@ -4476,6 +4538,19 @@ function ProductionModule({
       payload: dailyReportForm,
     });
   };
+  const previewProductionPlan = () => {
+    setPlanPreview(
+      buildProductionPlanPrintPreview({
+        plan_no: `SCJH-${new Date().toISOString().slice(0, 10).replaceAll("-", "")}`,
+        generated_at: new Date().toISOString(),
+        generated_by_name: currentUser?.name ?? snapshot.currentUser.name,
+        filters_label: productionPlanFilterLabel,
+        rows: planningRows,
+        calendarRows: machineLoadRows,
+        warningRows: visibleDeliveryWarnings,
+      }),
+    );
+  };
 
   return (
     <div className="space-y-5">
@@ -4512,6 +4587,101 @@ function ProductionModule({
           <MiniMetric label="筛选结果" value={`${planningRows.length} 单`} />
           <MiniMetric label="平均进度" value={`${averageProductionProgress(planningRows)}%`} />
         </div>
+        <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-slate-100 pt-4">
+          <InlineActionButton label="打印预览" onClick={previewProductionPlan} />
+          <InlineActionButton
+            label="导出 XLSX"
+            onClick={() => downloadExport(snapshot.currentUser.id, "production-plan", undefined, "xlsx")}
+          />
+          <InlineActionButton
+            label="导出 CSV"
+            onClick={() => downloadExport(snapshot.currentUser.id, "production-plan", undefined, "csv")}
+          />
+          <span className="text-xs text-slate-500">当前范围：{productionPlanFilterLabel}</span>
+        </div>
+      </Panel>
+      <Panel
+        title="生产排程日历视图"
+        icon={CalendarDays}
+        action={`${productionCalendar.dates.length} 天 / ${productionCalendar.machines.length} 台机台`}
+      >
+        {productionCalendar.rows.length > 0 ? (
+          <div className="overflow-x-auto">
+            <div className="min-w-[980px] space-y-2">
+              <div
+                className="grid gap-2"
+                style={{ gridTemplateColumns: `136px repeat(${productionCalendar.machines.length}, minmax(210px, 1fr))` }}
+              >
+                <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-semibold text-slate-600">
+                  计划日期
+                </div>
+                {productionCalendar.machines.map((machine) => (
+                  <div
+                    key={machine}
+                    className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-semibold text-slate-700"
+                  >
+                    {machine}
+                  </div>
+                ))}
+              </div>
+              {productionCalendar.rows.map((day) => (
+                <div
+                  key={day.date}
+                  className="grid gap-2"
+                  style={{ gridTemplateColumns: `136px repeat(${productionCalendar.machines.length}, minmax(210px, 1fr))` }}
+                >
+                  <div className="rounded-md border border-slate-200 bg-white px-3 py-3">
+                    <p className="text-sm font-semibold text-slate-950">{day.date}</p>
+                    <p className="mt-1 text-xs text-slate-500">{day.taskCount} 单 / {formatQty(day.plannedQty)}</p>
+                    {day.riskCount > 0 ? <p className="mt-2 text-xs font-semibold text-rose-600">{day.riskCount} 条交期风险</p> : null}
+                  </div>
+                  {day.cells.map((cell) => (
+                    <div
+                      key={cell.id}
+                      className={`min-h-[132px] rounded-md border px-3 py-3 ${
+                        cell.taskCount > 0 ? "border-blue-100 bg-blue-50/40" : "border-slate-200 bg-white"
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="truncate text-xs font-semibold text-slate-600">{cell.owners || "未指定负责人"}</span>
+                        <StatusBadge
+                          value={cell.loadStatusLabel}
+                          tone={cell.riskCount > 0 ? "warning" : cell.taskCount > 0 ? "success" : undefined}
+                        />
+                      </div>
+                      <div className="mt-2 space-y-2">
+                        {cell.productions.length > 0 ? (
+                          cell.productions.map((production) => (
+                            <div key={String(production.id)} className="rounded-md border border-white bg-white px-2.5 py-2 shadow-sm">
+                              <div className="flex items-start justify-between gap-2">
+                                <p className="min-w-0 truncate text-xs font-semibold text-slate-950">{String(production.prod_no)}</p>
+                                <span className="shrink-0 text-[11px] text-slate-500">{String(production.shift ?? "-")}</span>
+                              </div>
+                              <p className="mt-1 truncate text-xs text-slate-600">{String(production.product_name ?? "-")}</p>
+                              <div className="mt-2 flex items-center justify-between gap-2 text-[11px] text-slate-500">
+                                <span>{formatQty(production.order_qty, production.unit)}</span>
+                                <span>交期 {shortDate(production.due_date)}</span>
+                              </div>
+                              {String(production.delivery_risk_status ?? "normal") !== "normal" ? (
+                                <p className="mt-1 text-[11px] font-semibold text-rose-600">{String(production.delivery_risk_label)}</p>
+                              ) : null}
+                            </div>
+                          ))
+                        ) : (
+                          <div className="grid min-h-20 place-items-center rounded-md border border-dashed border-slate-200 text-xs text-slate-400">
+                            暂无排产
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : (
+          <EmptyText text="暂无已排产生产单，完成排产后将按日期和机台自动生成日历视图。" />
+        )}
       </Panel>
       <div className="grid gap-5 xl:grid-cols-[1fr_380px]">
         <DataTable
@@ -5038,6 +5208,7 @@ function ProductionModule({
         ]}
         action={{ label: "出库单", onClick: () => downloadExport(snapshot.currentUser.id, "material-issue") }}
       />
+      <FormalPrintPreviewModal preview={planPreview} onClose={() => setPlanPreview(null)} />
       <FormalPrintPreviewModal preview={productionPreview} onClose={() => setProductionPreview(null)} />
       <FormalPrintPreviewModal preview={requisitionPreview} onClose={() => setRequisitionPreview(null)} />
       <FormalPrintPreviewModal preview={issuePreview} onClose={() => setIssuePreview(null)} />
@@ -10370,6 +10541,23 @@ function requisitionStatusLabel(status: string) {
       approved: "已批准",
       issued: "已发料",
       rejected: "已驳回",
+    }[status] ?? status
+  );
+}
+
+function productionStatusLabel(status: string) {
+  return (
+    {
+      instructed: "待排产",
+      material_requested: "待发料",
+      producing: "生产中",
+      inspection_requested: "待品控",
+      qa_failed: "检验未通过",
+      qa_approved: "待入库",
+      in_stock: "待发货",
+      partial_shipped: "部分发货",
+      shipped: "已发货",
+      reversed: "已冲销",
     }[status] ?? status
   );
 }

@@ -129,6 +129,119 @@ export function formalPrintFromDocument(preview: FormalDocumentPreview): FormalP
   });
 }
 
+export function buildProductionPlanPrintPreview(source: Source): FormalPrintDocument {
+  const planRows = (Array.isArray(source.rows) ? (source.rows as Source[]) : []).map((row, index) => ({
+    lineNo: index + 1,
+    plannedDate: dateText(row.planned_date),
+    prodNo: text(row.prod_no),
+    orderNo: text(row.order_no),
+    customerName: text(row.customer_name),
+    productName: text(row.product_name),
+    qty: `${qtyText(row.order_qty ?? row.qty)}${text(row.unit, "") ? ` ${text(row.unit, "")}` : ""}`,
+    machine: text(row.machine),
+    shift: text(row.shift, ""),
+    owner: text(row.owner),
+    dueDate: dateText(row.due_date),
+    status: text(row.status_label ?? row.status),
+    deliveryRisk: text(row.delivery_risk_label ?? row.warning_type_label ?? "正常"),
+  }));
+  const calendarRows = (Array.isArray(source.calendarRows) ? (source.calendarRows as Source[]) : []).map((row, index) => ({
+    lineNo: index + 1,
+    plannedDate: dateText(row.planned_date),
+    machine: text(row.machine),
+    taskCount: qtyText(row.order_count),
+    plannedQty: qtyText(row.planned_qty),
+    owners: text(row.owners),
+    loadStatus: text(row.load_status_label ?? row.load_status),
+    summary: text(row.production_summary ?? row.plan_key),
+  }));
+  const warningRows = Array.isArray(source.warningRows) ? (source.warningRows as Source[]) : [];
+  const warningCount = warningRows.length;
+  const machineCount = new Set(planRows.map((row) => row.machine).filter((value) => value && value !== "-")).size;
+
+  return baseDocument({
+    header: {
+      companyName: text(source.company_name, "本地化生产流转 ERP"),
+      title: "生产计划表",
+      documentNo: text(source.plan_no, `SCJH-${dateText(source.generated_at ?? new Date().toISOString()).replaceAll("-", "")}`),
+      documentDate: dateText(source.generated_at ?? new Date().toISOString()),
+      statusText: "正式排程",
+    },
+    eyebrow: "LOCAL ERP PRODUCTION SCHEDULE",
+    description: "系统根据生产指令、排产记录、机台负荷和交期预警生成，适用于生产执行、仓库备料、品控准备与管理确认",
+    fieldSections: [
+      {
+        title: "计划范围",
+        fields: [
+          { label: "计划范围", value: text(source.filters_label, "全部生产计划") },
+          { label: "计划单数", value: `${planRows.length} 单` },
+          { label: "涉及机台", value: `${machineCount} 台` },
+          { label: "交期预警", value: `${warningCount} 条` },
+        ],
+      },
+      {
+        title: "编制信息",
+        fields: [
+          { label: "编制时间", value: dateText(source.generated_at ?? new Date().toISOString()) },
+          { label: "编制人", value: text(source.generated_by_name ?? source.created_by_name, "系统自动生成") },
+          { label: "打印状态", value: "正式版式 / 可归档" },
+          { label: "数据来源", value: "生产指令、排产记录、领料状态、订单交期" },
+        ],
+      },
+    ],
+    lineSections: [
+      {
+        title: "生产计划明细",
+        columns: [
+          { key: "lineNo", label: "序号" },
+          { key: "plannedDate", label: "计划日期" },
+          { key: "prodNo", label: "生产单号" },
+          { key: "orderNo", label: "客户订单" },
+          { key: "customerName", label: "客户名称" },
+          { key: "productName", label: "产品名称" },
+          { key: "qty", label: "计划数量", align: "right" },
+          { key: "machine", label: "机台" },
+          { key: "shift", label: "班次" },
+          { key: "owner", label: "负责人" },
+          { key: "dueDate", label: "交付期限" },
+          { key: "status", label: "状态" },
+          { key: "deliveryRisk", label: "交期风险" },
+        ],
+        rows: planRows,
+        minRows: 6,
+      },
+      {
+        title: "排程日历汇总",
+        columns: [
+          { key: "lineNo", label: "序号" },
+          { key: "plannedDate", label: "计划日期" },
+          { key: "machine", label: "机台" },
+          { key: "taskCount", label: "任务数", align: "right" },
+          { key: "plannedQty", label: "计划量", align: "right" },
+          { key: "owners", label: "负责人" },
+          { key: "loadStatus", label: "负荷状态" },
+          { key: "summary", label: "排程摘要" },
+        ],
+        rows: calendarRows,
+        minRows: 4,
+      },
+    ],
+    notesTitle: "排产执行要求",
+    notes: [
+      "生产计划以系统最新排产记录为准；如需调整日期、机台、班次或负责人，必须通过排产变更留痕。",
+      "仓库按本计划提前核对领料单和库存批次；品控按计划安排请验资源。",
+      "存在交期预警的生产单应优先复核产能、物料和质量风险，并在系统内更新处理结果。",
+    ],
+    signatures: [
+      { label: "生产主管", hint: "确认排程" },
+      { label: "仓库确认", hint: "备料确认" },
+      { label: "品控确认", hint: "检验准备" },
+      { label: "管理确认", hint: "计划批准" },
+    ],
+    footerLeft: "第一联：生产执行联 / 第二联：仓库备料联 / 第三联：管理归档联",
+  });
+}
+
 export function formalPrintFromDeliveryNote(preview: DeliveryNotePreview): FormalPrintDocument {
   return baseDocument({
     header: preview.header,
