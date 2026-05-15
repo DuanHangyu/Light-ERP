@@ -5606,11 +5606,8 @@ describe("ERP service production plan lock approval and change notifications", (
       entityId: String(purchaseApproval?.id),
       payload: { approval_note: "生产计划相关备料采购，同意执行。" },
     });
-    const purchaseOrder = service
-      .getSnapshot("U-PUR")
-      .board.purchaseOrders.find((item) => item.status === "pending_receipt" && item.due_date === "2026-07-05") as
-      | Record<string, unknown>
-      | undefined;
+    const purchaseOrders = service.getSnapshot("U-PUR").board.purchaseOrders as Array<Record<string, unknown>>;
+    const purchaseOrder = purchaseOrders.find((item) => item.status === "pending_receipt" && item.due_date === "2026-07-05");
 
     service.performAction({
       actorId: "U-PROD",
@@ -5700,7 +5697,10 @@ describe("ERP service production plan lock approval and change notifications", (
       ]),
     );
 
-    const purchasingSnapshot = service.getSnapshot("U-PUR");
+    const purchasingSnapshot = service.getSnapshot("U-PUR") as unknown as {
+      board: { productionPlanChangeImpacts: Array<Record<string, unknown>> };
+      tasks: Array<Record<string, unknown>>;
+    };
     const purchaseImpact = purchasingSnapshot.board.productionPlanChangeImpacts.find(
       (item) => item.impact_type === "purchase_arrival",
     ) as Record<string, unknown>;
@@ -5722,7 +5722,11 @@ describe("ERP service production plan lock approval and change notifications", (
       payload: { resolution_note: "已联系供应商调整到货节奏，并同步仓库备料窗口。" },
     });
 
-    const resolved = service.getSnapshot("U-PUR").board.productionPlanChangeImpacts.find(
+    const resolvedSnapshot = service.getSnapshot("U-PUR") as unknown as {
+      board: { productionPlanChangeImpacts: Array<Record<string, unknown>> };
+      tasks: Array<Record<string, unknown>>;
+    };
+    const resolved = resolvedSnapshot.board.productionPlanChangeImpacts.find(
       (item) => item.id === purchaseImpact.id,
     ) as Record<string, unknown>;
     expect(resolved).toMatchObject({
@@ -5731,7 +5735,7 @@ describe("ERP service production plan lock approval and change notifications", (
       resolved_by_name: "采购员-孙倩",
       resolution_note: "已联系供应商调整到货节奏，并同步仓库备料窗口。",
     });
-    expect(service.getSnapshot("U-PUR").tasks.some((task) => task.id === `task-production-plan-impact-${purchaseImpact.id}`)).toBe(false);
+    expect(resolvedSnapshot.tasks.some((task) => task.id === `task-production-plan-impact-${purchaseImpact.id}`)).toBe(false);
   });
 });
 
