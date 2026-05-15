@@ -447,6 +447,63 @@ function applySchema(database: Database.Database) {
       changed_at TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS production_plan_versions (
+      id TEXT PRIMARY KEY,
+      plan_no TEXT NOT NULL,
+      version_no INTEGER NOT NULL,
+      status TEXT NOT NULL,
+      filter_summary TEXT NOT NULL DEFAULT '',
+      filters_json TEXT NOT NULL DEFAULT '{}',
+      note TEXT NOT NULL DEFAULT '',
+      production_count INTEGER NOT NULL DEFAULT 0,
+      machine_count INTEGER NOT NULL DEFAULT 0,
+      warning_count INTEGER NOT NULL DEFAULT 0,
+      approval_request_id TEXT REFERENCES approval_requests(id),
+      locked_by TEXT NOT NULL REFERENCES users(id),
+      locked_at TEXT NOT NULL,
+      published_by TEXT REFERENCES users(id),
+      published_at TEXT,
+      approval_note TEXT NOT NULL DEFAULT ''
+    );
+
+    CREATE TABLE IF NOT EXISTS production_plan_lines (
+      id TEXT PRIMARY KEY,
+      plan_id TEXT NOT NULL REFERENCES production_plan_versions(id),
+      production_order_id TEXT NOT NULL REFERENCES production_orders(id),
+      schedule_id TEXT REFERENCES schedules(id),
+      prod_no TEXT NOT NULL,
+      order_no TEXT NOT NULL,
+      customer_name TEXT NOT NULL DEFAULT '',
+      product_name TEXT NOT NULL DEFAULT '',
+      planned_date TEXT NOT NULL,
+      due_date TEXT NOT NULL DEFAULT '',
+      machine TEXT NOT NULL DEFAULT '',
+      owner TEXT NOT NULL DEFAULT '',
+      shift TEXT NOT NULL DEFAULT '',
+      order_qty REAL NOT NULL DEFAULT 0,
+      unit TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT '',
+      delivery_risk_status TEXT NOT NULL DEFAULT 'normal',
+      delivery_risk_label TEXT NOT NULL DEFAULT '正常',
+      schedule_note TEXT NOT NULL DEFAULT ''
+    );
+
+    CREATE TABLE IF NOT EXISTS production_plan_notifications (
+      id TEXT PRIMARY KEY,
+      notification_no TEXT NOT NULL,
+      plan_id TEXT NOT NULL REFERENCES production_plan_versions(id),
+      schedule_change_id TEXT NOT NULL REFERENCES production_schedule_changes(id),
+      production_order_id TEXT NOT NULL REFERENCES production_orders(id),
+      recipient_role TEXT NOT NULL,
+      title TEXT NOT NULL,
+      detail TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      created_at TEXT NOT NULL,
+      acknowledged_by TEXT REFERENCES users(id),
+      acknowledged_at TEXT,
+      acknowledge_note TEXT NOT NULL DEFAULT ''
+    );
+
     CREATE TABLE IF NOT EXISTS requisitions (
       id TEXT PRIMARY KEY,
       req_no TEXT NOT NULL,
@@ -2596,6 +2653,84 @@ function applyMigrations(database: Database.Database) {
             ON production_schedule_changes(production_order_id, changed_at);
           CREATE INDEX IF NOT EXISTS idx_schedule_changes_schedule
             ON production_schedule_changes(schedule_id);
+        `);
+      },
+    },
+    {
+      id: "045_production_plan_lock_publish_notifications",
+      description: "生产计划锁版、审批发布、变更通知待办",
+      up: () => {
+        database.exec(`
+          CREATE TABLE IF NOT EXISTS production_plan_versions (
+            id TEXT PRIMARY KEY,
+            plan_no TEXT NOT NULL,
+            version_no INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            filter_summary TEXT NOT NULL DEFAULT '',
+            filters_json TEXT NOT NULL DEFAULT '{}',
+            note TEXT NOT NULL DEFAULT '',
+            production_count INTEGER NOT NULL DEFAULT 0,
+            machine_count INTEGER NOT NULL DEFAULT 0,
+            warning_count INTEGER NOT NULL DEFAULT 0,
+            approval_request_id TEXT REFERENCES approval_requests(id),
+            locked_by TEXT NOT NULL REFERENCES users(id),
+            locked_at TEXT NOT NULL,
+            published_by TEXT REFERENCES users(id),
+            published_at TEXT,
+            approval_note TEXT NOT NULL DEFAULT ''
+          );
+          CREATE UNIQUE INDEX IF NOT EXISTS ux_production_plan_versions_no
+            ON production_plan_versions(plan_no);
+          CREATE INDEX IF NOT EXISTS idx_production_plan_versions_status
+            ON production_plan_versions(status, locked_at);
+
+          CREATE TABLE IF NOT EXISTS production_plan_lines (
+            id TEXT PRIMARY KEY,
+            plan_id TEXT NOT NULL REFERENCES production_plan_versions(id),
+            production_order_id TEXT NOT NULL REFERENCES production_orders(id),
+            schedule_id TEXT REFERENCES schedules(id),
+            prod_no TEXT NOT NULL,
+            order_no TEXT NOT NULL,
+            customer_name TEXT NOT NULL DEFAULT '',
+            product_name TEXT NOT NULL DEFAULT '',
+            planned_date TEXT NOT NULL,
+            due_date TEXT NOT NULL DEFAULT '',
+            machine TEXT NOT NULL DEFAULT '',
+            owner TEXT NOT NULL DEFAULT '',
+            shift TEXT NOT NULL DEFAULT '',
+            order_qty REAL NOT NULL DEFAULT 0,
+            unit TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT '',
+            delivery_risk_status TEXT NOT NULL DEFAULT 'normal',
+            delivery_risk_label TEXT NOT NULL DEFAULT '正常',
+            schedule_note TEXT NOT NULL DEFAULT ''
+          );
+          CREATE INDEX IF NOT EXISTS idx_production_plan_lines_plan
+            ON production_plan_lines(plan_id);
+          CREATE INDEX IF NOT EXISTS idx_production_plan_lines_production
+            ON production_plan_lines(production_order_id, plan_id);
+
+          CREATE TABLE IF NOT EXISTS production_plan_notifications (
+            id TEXT PRIMARY KEY,
+            notification_no TEXT NOT NULL,
+            plan_id TEXT NOT NULL REFERENCES production_plan_versions(id),
+            schedule_change_id TEXT NOT NULL REFERENCES production_schedule_changes(id),
+            production_order_id TEXT NOT NULL REFERENCES production_orders(id),
+            recipient_role TEXT NOT NULL,
+            title TEXT NOT NULL,
+            detail TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            created_at TEXT NOT NULL,
+            acknowledged_by TEXT REFERENCES users(id),
+            acknowledged_at TEXT,
+            acknowledge_note TEXT NOT NULL DEFAULT ''
+          );
+          CREATE UNIQUE INDEX IF NOT EXISTS ux_production_plan_notifications_no
+            ON production_plan_notifications(notification_no);
+          CREATE INDEX IF NOT EXISTS idx_production_plan_notifications_role_status
+            ON production_plan_notifications(recipient_role, status, created_at);
+          CREATE INDEX IF NOT EXISTS idx_production_plan_notifications_plan_change
+            ON production_plan_notifications(plan_id, schedule_change_id);
         `);
       },
     },

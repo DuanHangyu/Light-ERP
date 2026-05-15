@@ -108,6 +108,8 @@ const roleActionMap: Record<string, Role[]> = {
   createShipment: ["assistant"],
   scheduleAndGenerateRequisition: ["production", "admin"],
   updateProductionSchedule: ["production", "admin"],
+  lockProductionPlan: ["production", "admin"],
+  ackProductionPlanNotification: ["assistant", "warehouse", "quality", "production", "manager", "admin"],
   requestInspection: ["production"],
   approveMaterialRequisition: ["warehouse", "admin"],
   rejectMaterialRequisition: ["warehouse", "admin"],
@@ -189,6 +191,8 @@ const actionLabels: Record<string, string> = {
   createShipment: "生成发货单",
   scheduleAndGenerateRequisition: "排产并生成领料",
   updateProductionSchedule: "调整生产排产",
+  lockProductionPlan: "生产计划锁版",
+  ackProductionPlanNotification: "确认计划变更通知",
   requestInspection: "生产请验",
   approveMaterialRequisition: "领料审批",
   rejectMaterialRequisition: "驳回领料",
@@ -629,6 +633,28 @@ function productionStatusLabel(status: string) {
   );
 }
 
+function productionPlanStatusLabel(status: string) {
+  return (
+    {
+      pending_approval: "待审批发布",
+      published: "已发布",
+      rejected: "已驳回",
+      superseded: "已被新版替代",
+      voided: "已作废",
+    }[status] ?? status
+  );
+}
+
+function productionPlanNotificationStatusLabel(status: string) {
+  return (
+    {
+      pending: "待确认",
+      acknowledged: "已确认",
+      voided: "已关闭",
+    }[status] ?? status
+  );
+}
+
 function productionDailyReportStatusLabel(status: string) {
   return (
     {
@@ -708,6 +734,7 @@ function approvalSourceTypeLabel(sourceType: string) {
       purchase_requisition: "采购申请",
       purchase_order: "采购订单",
       purchase_arrival_discrepancy: "采购到货差异",
+      production_plan: "生产计划发布",
       supplier_admission_rule_change: "供应商准入规则变更",
       stocktake: "库存盘点",
       requisition: "领料单",
@@ -723,6 +750,7 @@ function approvalSourceTypeValue(value: string) {
       "purchase_requisition",
       "purchase_order",
       "purchase_arrival_discrepancy",
+      "production_plan",
       "supplier_admission_rule_change",
       "stocktake",
       "requisition",
@@ -1169,6 +1197,7 @@ function approvalRiskLevel(sourceType: string, amount: number, operatingParamete
     sourceType === "stocktake" ||
     sourceType === "requisition" ||
     sourceType === "purchase_requisition" ||
+    sourceType === "production_plan" ||
     sourceType === "supplier_admission_rule_change" ||
     (sourceType === "purchase_order" && amount >= purchaseThreshold) ||
     amount >= 1000
@@ -1192,6 +1221,7 @@ function approvalCenterRows(input: {
       const ageDays = calculateAgeDays({ fromDate: String(approval.created_at) });
       const amount = Number(approval.amount ?? 0);
       const isPurchase = approval.entity_type === "purchase_order";
+      const isProductionPlan = approval.entity_type === "production_plan";
       const isSupplierRuleChange = approval.entity_type === "supplier_admission_rule_change";
       const isSupplierAnnualReview = approval.entity_type === "supplier_annual_review";
       const meetsPurchaseThreshold = !isPurchase || amount >= input.operatingParameters.purchaseApprovalThreshold;
@@ -1201,12 +1231,20 @@ function approvalCenterRows(input: {
         source_type: "approval_request",
         source_type_label: isSupplierAnnualReview
           ? "供应商年度复评"
-          : isSupplierRuleChange
-            ? "供应商准入规则变更"
-            : isPurchase
-              ? "采购审批"
-              : String(approval.type ?? "办公 OA"),
-        module_label: isSupplierAnnualReview || isPurchase ? "采购仓储" : isSupplierRuleChange ? "系统管理" : "办公 OA",
+          : isProductionPlan
+            ? "生产计划发布"
+            : isSupplierRuleChange
+              ? "供应商准入规则变更"
+              : isPurchase
+                ? "采购审批"
+                : String(approval.type ?? "办公 OA"),
+        module_label: isProductionPlan
+          ? "生产执行"
+          : isSupplierAnnualReview || isPurchase
+            ? "采购仓储"
+            : isSupplierRuleChange
+              ? "系统管理"
+              : "办公 OA",
         entity_id: approval.id,
         business_entity_type: approval.entity_type ?? "approval",
         business_entity_id: approval.entity_id ?? approval.id,
@@ -1229,11 +1267,13 @@ function approvalCenterRows(input: {
         risk_level: approvalRiskLevel(
           isSupplierAnnualReview
             ? "supplier_annual_review"
-            : isSupplierRuleChange
-              ? "supplier_admission_rule_change"
-              : isPurchase
-                ? "purchase_order"
-                : "approval_request",
+            : isProductionPlan
+              ? "production_plan"
+              : isSupplierRuleChange
+                ? "supplier_admission_rule_change"
+                : isPurchase
+                  ? "purchase_order"
+                  : "approval_request",
           amount,
           input.operatingParameters,
         ),
@@ -1883,6 +1923,60 @@ export function getSnapshot(actorId = "U-SALES") {
     ORDER BY psc.changed_at DESC
   `).all() as Array<Record<string, unknown>>;
   const productionDeliveryWarnings = productionDeliveryWarningRows(productions);
+
+  const productionPlanVersions = database.prepare(`
+    SELECT ppv.*,
+           locker.name AS locked_by_name,
+           publisher.name AS published_by_name,
+           ar.request_no AS approval_request_no,
+           ar.status AS approval_status,
+           ar.decision_note AS approval_decision_note,
+           COALESCE((SELECT COUNT(*) FROM production_plan_lines ppl WHERE ppl.plan_id = ppv.id), 0) AS line_count
+    FROM production_plan_versions ppv
+    JOIN users locker ON locker.id = ppv.locked_by
+    LEFT JOIN users publisher ON publisher.id = ppv.published_by
+    LEFT JOIN approval_requests ar ON ar.id = ppv.approval_request_id
+    ORDER BY ppv.locked_at DESC
+  `).all().map((row) => {
+    const item = row as Record<string, unknown>;
+    return {
+      ...item,
+      status_label: productionPlanStatusLabel(String(item.status)),
+      approval_status_label: item.approval_status ? approvalRequestStatusLabel(String(item.approval_status)) : "",
+    };
+  });
+
+  const productionPlanLines = database.prepare(`
+    SELECT ppl.*, ppv.plan_no, ppv.version_no, ppv.status AS plan_status
+    FROM production_plan_lines ppl
+    JOIN production_plan_versions ppv ON ppv.id = ppl.plan_id
+    ORDER BY ppv.locked_at DESC, ppl.planned_date ASC, ppl.machine ASC, ppl.prod_no ASC
+  `).all() as Array<Record<string, unknown>>;
+
+  const productionPlanNotifications = database.prepare(`
+    SELECT ppn.*, ppv.plan_no, ppv.version_no,
+           po.prod_no, o.order_no, c.name AS customer_name, p.name AS product_name,
+           psc.old_planned_date, psc.new_planned_date, psc.old_machine, psc.new_machine,
+           psc.change_reason, psc.changed_at, changer.name AS changed_by_name,
+           acknowledger.name AS acknowledged_by_name
+    FROM production_plan_notifications ppn
+    JOIN production_plan_versions ppv ON ppv.id = ppn.plan_id
+    JOIN production_orders po ON po.id = ppn.production_order_id
+    JOIN orders o ON o.id = po.order_id
+    JOIN customers c ON c.id = o.customer_id
+    JOIN products p ON p.id = o.product_id
+    JOIN production_schedule_changes psc ON psc.id = ppn.schedule_change_id
+    LEFT JOIN users changer ON changer.id = psc.changed_by
+    LEFT JOIN users acknowledger ON acknowledger.id = ppn.acknowledged_by
+    ORDER BY ppn.created_at DESC
+  `).all().map((row) => {
+    const item = row as Record<string, unknown>;
+    return {
+      ...item,
+      status_label: productionPlanNotificationStatusLabel(String(item.status)),
+      recipient_role_label: roleLabel(String(item.recipient_role)),
+    };
+  });
 
   const requisitions = database.prepare(`
     SELECT r.*, po.prod_no, po.priority, o.order_no, o.qty AS order_qty,
@@ -3127,6 +3221,7 @@ export function getSnapshot(actorId = "U-SALES") {
     technicalDispositions,
     materialIqcInspections,
     purchaseOrders,
+    productionPlanNotifications,
     purchaseArrivalDiscrepancies,
     mrpRequirementRuns,
     payables,
@@ -3219,6 +3314,9 @@ export function getSnapshot(actorId = "U-SALES") {
       })),
       productionScheduleChanges,
       productionDeliveryWarnings,
+      productionPlanVersions,
+      productionPlanLines,
+      productionPlanNotifications,
       requisitions: requisitions.map((item) => ({
         ...item,
         lines: JSON.parse(String(item.lines)) as unknown[],
@@ -3711,6 +3809,8 @@ function actionModuleLabel(action: string) {
       "createProductionInstruction",
       "scheduleAndGenerateRequisition",
       "updateProductionSchedule",
+      "lockProductionPlan",
+      "ackProductionPlanNotification",
       "approveMaterialRequisition",
       "issueMaterials",
       "requestInspection",
@@ -3786,6 +3886,7 @@ function actionRiskLevel(action: string) {
       "recordPayablePayment",
       "recordReceivableReceipt",
       "reverseBusinessDocument",
+      "lockProductionPlan",
       "recordSalesReturn",
       "recordCustomerRefund",
       "createReplacementShipment",
@@ -3811,6 +3912,7 @@ function actionRiskLevel(action: string) {
       "approveStocktake",
       "rejectStocktake",
       "rejectMaterialRequisition",
+      "ackProductionPlanNotification",
       "approveApproval",
       "rejectApproval",
       "upsertApprovalRule",
@@ -4486,6 +4588,7 @@ function buildTasks(
     technicalDispositions: Array<Record<string, unknown>>;
     materialIqcInspections: Array<Record<string, unknown>>;
     purchaseOrders: Array<Record<string, unknown>>;
+    productionPlanNotifications: Array<Record<string, unknown>>;
     purchaseArrivalDiscrepancies: Array<Record<string, unknown>>;
     mrpRequirementRuns?: Array<Record<string, unknown>>;
     payables: Array<Record<string, unknown>>;
@@ -4617,11 +4720,31 @@ function buildTasks(
     ...supplierCertificateTasks,
     ...supplierAnnualReviewTasks,
   ];
+  const productionPlanNotificationTasks = data.productionPlanNotifications
+    .filter(
+      (item) =>
+        String(item.status) === "pending" &&
+        (String(item.recipient_role) === user.role || user.role === "admin" || (user.role === "manager" && String(item.recipient_role) === "manager")),
+    )
+    .slice(0, 6)
+    .map((item) => ({
+      id: `task-production-plan-notification-${item.id}`,
+      title: `生产计划变更 ${item.prod_no}`,
+      detail: `${item.plan_no} / ${item.product_name} / ${item.old_planned_date || "未排产"} -> ${item.new_planned_date}`,
+      entityType: "production_plan_notification",
+      entityId: String(item.id),
+      action: "ackProductionPlanNotification",
+      tone: "amber" as const,
+      primaryLabel: "确认变更",
+      payload: {
+        acknowledge_note: "已同步生产计划变更。",
+      },
+    }));
+  const commonTasks = [...remediationTasks, ...supplierGovernanceTasks, ...productionPlanNotificationTasks];
 
   if (user.role === "sales") {
     return [
-      ...remediationTasks,
-      ...supplierGovernanceTasks,
+      ...commonTasks,
       ...data.quotes
         .filter((quote) => quote.status === "draft")
         .map((quote) => ({
@@ -4651,8 +4774,7 @@ function buildTasks(
 
   if (user.role === "assistant") {
     return [
-      ...remediationTasks,
-      ...supplierGovernanceTasks,
+      ...commonTasks,
       ...data.orders
         .filter((order) => order.status === "submitted")
         .map((order) => ({
@@ -4694,8 +4816,7 @@ function buildTasks(
 
   if (user.role === "production") {
     return [
-      ...remediationTasks,
-      ...supplierGovernanceTasks,
+      ...commonTasks,
       ...data.productions
         .filter((production) => production.status === "instructed")
         .map((production) => ({
@@ -4742,8 +4863,7 @@ function buildTasks(
         .map((item) => String(item.inspection_id)),
     );
     return [
-      ...remediationTasks,
-      ...supplierGovernanceTasks,
+      ...commonTasks,
       ...data.inspections
       .filter((inspection) => inspection.result === "failed" && !handledInspectionIds.has(String(inspection.id)))
       .map((inspection) => ({
@@ -4761,8 +4881,7 @@ function buildTasks(
 
   if (user.role === "warehouse") {
     return [
-      ...remediationTasks,
-      ...supplierGovernanceTasks,
+      ...commonTasks,
       ...data.requisitions
         .filter((req) => req.status === "pending_approval")
         .map((req) => ({
@@ -4819,8 +4938,7 @@ function buildTasks(
 
   if (user.role === "quality") {
     return [
-      ...remediationTasks,
-      ...supplierGovernanceTasks,
+      ...commonTasks,
       ...((data.materialIqcInspections ?? []) as Array<Record<string, unknown>>)
         .filter((iqc) => iqc.status === "pending")
         .map((iqc) => ({
@@ -4853,8 +4971,7 @@ function buildTasks(
 
   if (user.role === "admin") {
     return [
-      ...remediationTasks,
-      ...supplierGovernanceTasks,
+      ...commonTasks,
       {
         id: "task-admin-backup",
         title: "系统冷备份",
@@ -4888,8 +5005,7 @@ function buildTasks(
 
   if (user.role === "purchasing") {
     return [
-      ...remediationTasks,
-      ...supplierGovernanceTasks,
+      ...commonTasks,
       {
         id: "task-purchase-approval",
         title: "发起采购特采审批",
@@ -4999,8 +5115,7 @@ function buildTasks(
 
   if (user.role === "finance") {
     return [
-      ...remediationTasks,
-      ...supplierGovernanceTasks,
+      ...commonTasks,
       ...data.receivables
         .filter((receivable) => receivable.status !== "paid")
         .slice(0, 2)
@@ -5051,8 +5166,7 @@ function buildTasks(
   }
 
   return [
-    ...remediationTasks,
-    ...supplierGovernanceTasks,
+    ...commonTasks,
     ...data.stocktakes
       .filter((stocktake) => stocktake.status === "pending_approval")
       .slice(0, 3)
@@ -5142,6 +5256,12 @@ export function performAction(input: ActionInput) {
         break;
       case "updateProductionSchedule":
         updateProductionSchedule(database, input.actorId, mustEntity(input.entityId), input.payload);
+        break;
+      case "lockProductionPlan":
+        lockProductionPlan(database, input.actorId, input.payload);
+        break;
+      case "ackProductionPlanNotification":
+        acknowledgeProductionPlanNotification(database, input.actorId, mustEntity(input.entityId), input.payload);
         break;
       case "approveMaterialRequisition":
         approveMaterialRequisition(database, input.actorId, mustEntity(input.entityId), input.payload);
@@ -6116,7 +6236,222 @@ function updateProductionSchedule(
     WHERE id = ?
   `).run(plannedDate, machine, owner, shift, scheduleNote, schedule.id);
 
+  createProductionPlanChangeNotifications(database, actorId, changeId);
   audit(database, actorId, "updateProductionSchedule", "production_order", productionId, `调整生产排产 ${schedule.prod_no}：${changeReason}`);
+}
+
+function productionPlanFiltersFromPayload(rawPayload?: Record<string, unknown>) {
+  const payload = rawPayload && typeof rawPayload === "object" ? rawPayload : {};
+  return normalizeReportFilters({
+    dateFrom: payloadText(payload, "date_from", "计划开始日期", false) || payloadText(payload, "dateFrom", "计划开始日期", false),
+    dateTo: payloadText(payload, "date_to", "计划结束日期", false) || payloadText(payload, "dateTo", "计划结束日期", false),
+    customerId: payloadText(payload, "customer_id", "客户", false) || payloadText(payload, "customerId", "客户", false),
+    orderId: payloadText(payload, "order_id", "订单", false) || payloadText(payload, "orderId", "订单", false),
+  });
+}
+
+function lockProductionPlan(database: Database.Database, actorId: string, rawPayload?: Record<string, unknown>) {
+  const payload = rawPayload && typeof rawPayload === "object" ? rawPayload : {};
+  const pending = database
+    .prepare("SELECT plan_no FROM production_plan_versions WHERE status = 'pending_approval' ORDER BY locked_at DESC LIMIT 1")
+    .get() as { plan_no?: string } | undefined;
+  if (pending) throw new Error(`已有生产计划锁版待审批：${pending.plan_no}。`);
+
+  const filters = productionPlanFiltersFromPayload(payload);
+  const note = payloadText(payload, "note", "锁版说明", false) || "生产计划锁版，提交管理层审批发布。";
+  const sourceRows = productionPlanSourceRows(database, filters).filter((row) => row.planned_date);
+  if (sourceRows.length === 0) throw new Error("当前筛选范围没有已排产生产单，不能锁版发布。");
+
+  const planId = uid("PPV");
+  const approvalId = uid("OA");
+  const planNo = serial(database, "production_plan_versions", "SCJH");
+  const approvalNo = serial(database, "approval_requests", "SP");
+  const versionNo =
+    Number((database.prepare("SELECT COALESCE(MAX(version_no), 0) + 1 AS next_no FROM production_plan_versions").get() as { next_no: number }).next_no ?? 1);
+  const lockedAt = now();
+  const machineCount = new Set(sourceRows.map((row) => String(row.machine ?? "")).filter(Boolean)).size;
+  const warningCount = sourceRows.filter((row) => String(row.delivery_risk_status ?? "normal") !== "normal").length;
+  const filterSummary = reportFilterSummary(database, filters);
+  const approvalRule = matchApprovalRule(database, "production_plan", 0);
+
+  database.prepare(`
+    INSERT INTO approval_requests (
+      id, request_no, type, title, applicant_id, status, amount,
+      reason, rule_id, approver_role, sla_hours, entity_type, entity_id,
+      created_at, decided_by, decided_at, decision_note
+    )
+    VALUES (?, ?, '生产计划发布', ?, ?, 'pending', 0, ?, ?, ?, ?, 'production_plan', ?, ?, NULL, NULL, NULL)
+  `).run(
+    approvalId,
+    approvalNo,
+    `生产计划 ${planNo} 锁版发布审批`,
+    actorId,
+    `${note}；范围：${filterSummary}；计划单数：${sourceRows.length}。`,
+    approvalRule?.id ?? null,
+    approvalRule?.approver_role ?? "manager",
+    approvalRule?.sla_hours ?? 24,
+    planId,
+    lockedAt,
+  );
+
+  database.prepare(`
+    INSERT INTO production_plan_versions (
+      id, plan_no, version_no, status, filter_summary, filters_json, note,
+      production_count, machine_count, warning_count, approval_request_id,
+      locked_by, locked_at, published_by, published_at, approval_note
+    )
+    VALUES (?, ?, ?, 'pending_approval', ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, '')
+  `).run(
+    planId,
+    planNo,
+    versionNo,
+    filterSummary,
+    JSON.stringify(filters),
+    note,
+    sourceRows.length,
+    machineCount,
+    warningCount,
+    approvalId,
+    actorId,
+    lockedAt,
+  );
+
+  const insertLine = database.prepare(`
+    INSERT INTO production_plan_lines (
+      id, plan_id, production_order_id, schedule_id, prod_no, order_no,
+      customer_name, product_name, planned_date, due_date, machine, owner, shift,
+      order_qty, unit, status, delivery_risk_status, delivery_risk_label, schedule_note
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+  sourceRows.forEach((row) => {
+    insertLine.run(
+      uid("PPL"),
+      planId,
+      row.id,
+      row.schedule_id ?? null,
+      row.prod_no,
+      row.order_no,
+      row.customer_name ?? "",
+      row.product_name ?? "",
+      row.planned_date,
+      row.due_date ?? "",
+      row.machine ?? "",
+      row.owner ?? "",
+      row.shift ?? "",
+      Number(row.order_qty ?? 0),
+      row.unit ?? "",
+      row.status ?? "",
+      row.delivery_risk_status ?? "normal",
+      row.delivery_risk_label ?? "正常",
+      row.schedule_note ?? "",
+    );
+  });
+
+  audit(database, actorId, "lockProductionPlan", "production_plan", planId, `生产计划 ${planNo} 锁版并提交审批 ${approvalNo}`);
+}
+
+function decideProductionPlanApproval(
+  database: Database.Database,
+  actorId: string,
+  planId: string,
+  status: "approved" | "rejected",
+  note: string,
+  decidedAt: string,
+) {
+  const plan = database.prepare("SELECT * FROM production_plan_versions WHERE id = ?").get(planId) as
+    | { id: string; plan_no: string; status: string }
+    | undefined;
+  if (!plan || plan.status !== "pending_approval") return;
+  if (status === "approved") {
+    database.prepare("UPDATE production_plan_versions SET status = 'superseded' WHERE status = 'published' AND id <> ?").run(plan.id);
+    database.prepare(`
+      UPDATE production_plan_versions
+      SET status = 'published', published_by = ?, published_at = ?, approval_note = ?
+      WHERE id = ?
+    `).run(actorId, decidedAt, note, plan.id);
+  } else {
+    database.prepare(`
+      UPDATE production_plan_versions
+      SET status = 'rejected', approval_note = ?
+      WHERE id = ?
+    `).run(note, plan.id);
+  }
+  audit(
+    database,
+    actorId,
+    status === "approved" ? "publishProductionPlan" : "rejectProductionPlan",
+    "production_plan",
+    plan.id,
+    `${status === "approved" ? "发布" : "驳回"}生产计划 ${plan.plan_no}`,
+  );
+}
+
+function createProductionPlanChangeNotifications(database: Database.Database, actorId: string, scheduleChangeId: string) {
+  const change = database.prepare(`
+    SELECT psc.*, po.prod_no, o.order_no, c.name AS customer_name, p.name AS product_name
+    FROM production_schedule_changes psc
+    JOIN production_orders po ON po.id = psc.production_order_id
+    JOIN orders o ON o.id = po.order_id
+    JOIN customers c ON c.id = o.customer_id
+    JOIN products p ON p.id = o.product_id
+    WHERE psc.id = ?
+  `).get(scheduleChangeId) as Record<string, unknown> | undefined;
+  if (!change) return;
+
+  const plan = database.prepare(`
+    SELECT ppv.*
+    FROM production_plan_versions ppv
+    JOIN production_plan_lines ppl ON ppl.plan_id = ppv.id
+    WHERE ppv.status = 'published'
+      AND ppl.production_order_id = ?
+    ORDER BY ppv.published_at DESC, ppv.locked_at DESC
+    LIMIT 1
+  `).get(change.production_order_id) as Record<string, unknown> | undefined;
+  if (!plan) return;
+
+  const actor = getUser(database, actorId);
+  const recipients: Role[] = ["assistant", "warehouse", "quality", "manager"];
+  const createdAt = now();
+  const title = `生产计划变更 ${change.prod_no}`;
+  const detail = `${plan.plan_no} 已发布后发生排产变更：${change.old_planned_date || "未排产"} / ${change.old_machine || "未指定机台"} -> ${change.new_planned_date} / ${change.new_machine}；原因：${change.change_reason}；变更人：${actor.name}。`;
+  const insert = database.prepare(`
+    INSERT INTO production_plan_notifications (
+      id, notification_no, plan_id, schedule_change_id, production_order_id,
+      recipient_role, title, detail, status, created_at,
+      acknowledged_by, acknowledged_at, acknowledge_note
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, NULL, NULL, '')
+  `);
+  recipients.forEach((role) => {
+    insert.run(uid("PPN"), serial(database, "production_plan_notifications", "TZ"), plan.id, scheduleChangeId, change.production_order_id, role, title, detail, createdAt);
+  });
+}
+
+function acknowledgeProductionPlanNotification(
+  database: Database.Database,
+  actorId: string,
+  notificationId: string,
+  rawPayload?: Record<string, unknown>,
+) {
+  const notification = database.prepare("SELECT * FROM production_plan_notifications WHERE id = ?").get(notificationId) as
+    | { id: string; notification_no: string; recipient_role: Role; status: string }
+    | undefined;
+  if (!notification) throw new Error("生产计划变更通知不存在。");
+  if (notification.status !== "pending") throw new Error("生产计划变更通知已处理。");
+  const actor = getUser(database, actorId);
+  if (actor.role !== notification.recipient_role && actor.role !== "admin" && actor.role !== "manager") {
+    throw new Error(`${actor.role_label} 不是该生产计划变更通知的责任角色。`);
+  }
+  const payload = rawPayload && typeof rawPayload === "object" ? rawPayload : {};
+  const note = payloadText(payload, "acknowledge_note", "确认说明", false) || "已确认生产计划变更。";
+  const acknowledgedAt = now();
+  database.prepare(`
+    UPDATE production_plan_notifications
+    SET status = 'acknowledged', acknowledged_by = ?, acknowledged_at = ?, acknowledge_note = ?
+    WHERE id = ?
+  `).run(actorId, acknowledgedAt, note, notification.id);
+  audit(database, actorId, "ackProductionPlanNotification", "production_plan_notification", notification.id, `确认生产计划变更通知 ${notification.notification_no}`);
 }
 
 function approveMaterialRequisition(
@@ -9807,6 +10142,9 @@ function decideApproval(
       );
     }
   }
+  if (approval.entity_type === "production_plan" && approval.entity_id) {
+    decideProductionPlanApproval(database, actorId, approval.entity_id, status, note, decidedAt);
+  }
   if (approval.entity_type === "supplier_admission_rule_change" && approval.entity_id) {
     decideSupplierAdmissionRuleChange(database, actorId, approval.entity_id, status, note, decidedAt);
   }
@@ -12457,6 +12795,7 @@ function productionPlanSourceRows(database: Database.Database, filters: ReportFi
            p.name AS product_name,
            p.spec AS product_spec,
            p.unit,
+           s.id AS schedule_id,
            s.planned_date,
            s.machine,
            s.owner,

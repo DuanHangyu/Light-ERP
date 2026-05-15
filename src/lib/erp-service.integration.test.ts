@@ -5456,7 +5456,7 @@ describe("ERP service production plan lock approval and change notifications", (
       status: "pending_approval",
       status_label: "待审批发布",
       line_count: expect.any(Number),
-      locked_by_name: "生产操作员-马工",
+      locked_by_name: "生产主管-马工",
       approval_request_no: expect.stringMatching(/^SP-/),
     });
     expect(Number(plan.line_count)).toBeGreaterThan(0);

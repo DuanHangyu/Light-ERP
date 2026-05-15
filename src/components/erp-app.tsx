@@ -176,6 +176,9 @@ type Snapshot = {
     productions: Row[];
     productionScheduleChanges: Row[];
     productionDeliveryWarnings: Row[];
+    productionPlanVersions: Row[];
+    productionPlanLines: Row[];
+    productionPlanNotifications: Row[];
     requisitions: Row[];
     materialIssues: Row[];
     inspections: Row[];
@@ -4462,6 +4465,11 @@ function ProductionModule({
     work_hours: "8",
     abnormal_note: "",
   });
+  const [planLockForm, setPlanLockForm] = useState<Record<string, string>>({
+    date_from: new Date().toISOString().slice(0, 10),
+    date_to: new Date(Date.now() + 1000 * 60 * 60 * 24 * 14).toISOString().slice(0, 10),
+    note: "生产计划锁版，提交管理层审批后发布执行。",
+  });
   const [planPreview, setPlanPreview] = useState<FormalPrintDocument | null>(null);
   const [productionPreview, setProductionPreview] = useState<FormalPrintDocument | null>(null);
   const [requisitionPreview, setRequisitionPreview] = useState<FormalPrintDocument | null>(null);
@@ -4494,6 +4502,8 @@ function ProductionModule({
     setRescheduleForm((current) => ({ ...current, [key]: value }));
   const setDailyReportField = (key: string, value: string) =>
     setDailyReportForm((current) => ({ ...current, [key]: value }));
+  const setPlanLockField = (key: string, value: string) =>
+    setPlanLockForm((current) => ({ ...current, [key]: value }));
   const selectRescheduleProduction = (value: string) => {
     const next = scheduleChangeCandidates.find((item) => String(item.id) === value);
     setRescheduleForm({
@@ -4550,6 +4560,19 @@ function ProductionModule({
         warningRows: visibleDeliveryWarnings,
       }),
     );
+  };
+  const submitPlanLock = async () => {
+    await runAction({
+      action: "lockProductionPlan",
+      payload: planLockForm,
+    });
+  };
+  const acknowledgePlanNotification = async (notification: Row) => {
+    await runAction({
+      action: "ackProductionPlanNotification",
+      entityId: String(notification.id),
+      payload: { acknowledge_note: `${currentUser?.role_label ?? "当前岗位"}已确认生产计划变更。` },
+    });
   };
 
   return (
@@ -4683,6 +4706,90 @@ function ProductionModule({
           <EmptyText text="暂无已排产生产单，完成排产后将按日期和机台自动生成日历视图。" />
         )}
       </Panel>
+      <Panel title="生产计划锁版 / 审批发布" icon={FileCheck2} action={canSchedule ? "锁版后进入审批中心" : "只读"}>
+        {canSchedule ? (
+          <div className="grid gap-3 xl:grid-cols-[160px_160px_1fr_auto]">
+            <MasterInput
+              label="计划开始"
+              type="date"
+              value={planLockForm.date_from}
+              onChange={(value) => setPlanLockField("date_from", value)}
+            />
+            <MasterInput
+              label="计划结束"
+              type="date"
+              value={planLockForm.date_to}
+              onChange={(value) => setPlanLockField("date_to", value)}
+            />
+            <MasterInput label="锁版说明" value={planLockForm.note} onChange={(value) => setPlanLockField("note", value)} />
+            <div className="flex items-end">
+              <MasterSubmitButton
+                busy={busy === "lockProductionPlan-system-primary"}
+                label="锁版并提交审批"
+                onClick={submitPlanLock}
+              />
+            </div>
+          </div>
+        ) : (
+          <EmptyText text="请切换生产主管或管理员进行计划锁版；管理层在审批中心完成发布。" />
+        )}
+      </Panel>
+      <div className="grid gap-5 xl:grid-cols-[1fr_420px]">
+        <DataTable
+          title="生产计划发布版本"
+          icon={FileCheck2}
+          rows={snapshot.board.productionPlanVersions}
+          empty="暂无生产计划锁版记录"
+          columns={[
+            { key: "plan_no", label: "计划编号" },
+            { key: "version_no", label: "版本" },
+            { key: "status_label", label: "状态", render: (value) => <StatusBadge value={String(value)} /> },
+            { key: "line_count", label: "计划单数" },
+            { key: "machine_count", label: "机台" },
+            { key: "warning_count", label: "预警" },
+            { key: "approval_request_no", label: "审批单" },
+            { key: "locked_by_name", label: "锁版人" },
+            { key: "locked_at", label: "锁版时间", render: shortDate },
+            { key: "published_by_name", label: "发布人" },
+            { key: "published_at", label: "发布时间", render: shortDate },
+            { key: "filter_summary", label: "范围" },
+            { key: "approval_note", label: "审批意见" },
+          ]}
+        />
+        <DataTable
+          title="计划变更通知待办"
+          icon={BellRing}
+          rows={snapshot.board.productionPlanNotifications}
+          empty="暂无发布后计划变更通知"
+          columns={[
+            { key: "notification_no", label: "通知单" },
+            { key: "recipient_role_label", label: "责任岗位" },
+            { key: "prod_no", label: "生产单" },
+            { key: "plan_no", label: "计划版本" },
+            { key: "status_label", label: "状态", render: (value) => <StatusBadge value={String(value)} /> },
+            { key: "new_planned_date", label: "新日期", render: shortDate },
+            { key: "new_machine", label: "新机台" },
+            {
+              key: "ack",
+              label: "确认",
+              render: (_value, row) => {
+                const canAck =
+                  String(row.status) === "pending" &&
+                  (currentUser?.role === row.recipient_role || currentUser?.role === "admin" || (currentUser?.role === "manager" && row.recipient_role === "manager"));
+                return canAck ? (
+                  <InlineActionButton
+                    label="确认"
+                    busy={busy === `ackProductionPlanNotification-${String(row.id)}-primary`}
+                    onClick={() => void acknowledgePlanNotification(row)}
+                  />
+                ) : (
+                  <span className="text-xs text-slate-400">-</span>
+                );
+              },
+            },
+          ]}
+        />
+      </div>
       <div className="grid gap-5 xl:grid-cols-[1fr_380px]">
         <DataTable
           title="生产计划台账"
