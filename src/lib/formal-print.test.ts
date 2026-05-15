@@ -5,6 +5,7 @@ import {
   buildPurchaseArrivalNoticePrintPreview,
   buildPurchaseContractPrintPreview,
   buildPurchaseReceiptPrintPreview,
+  buildProductionPlanPrintPreview,
   buildWarehouseSignoffPrintPreview,
   buildCustomerRefundPrintPreview,
   buildReplacementShipmentPrintPreview,
@@ -86,6 +87,70 @@ describe("unified formal print templates", () => {
       issuedMaterial: "M-ALT-STEEL / 40Cr 替代圆钢",
       mode: "指定批次",
     });
+  });
+
+  it("builds a formal production plan print preview with schedule and calendar sections", () => {
+    const print = buildProductionPlanPrintPreview({
+      plan_no: "SCJH-20260702-001",
+      generated_at: "2026-07-02T08:00:00.000Z",
+      generated_by_name: "生产主管-马工",
+      filters_label: "计划日期：2026-07-02 至 2026-07-06；机台：CNC-02",
+      rows: [
+        {
+          prod_no: "SC-20260702-001",
+          order_no: "DD-20260701-001",
+          customer_name: "上海星河装备有限公司",
+          product_name: "定制化齿轮箱壳体",
+          order_qty: 12,
+          unit: "件",
+          planned_date: "2026-07-03",
+          due_date: "2026-07-06",
+          machine: "CNC-02",
+          shift: "白班",
+          owner: "马工",
+          status_label: "生产中",
+          delivery_risk_label: "正常",
+        },
+      ],
+      calendarRows: [
+        {
+          plan_key: "2026-07-03 / CNC-02",
+          planned_date: "2026-07-03",
+          machine: "CNC-02",
+          order_count: 1,
+          planned_qty: 12,
+          owners: "马工",
+          load_status_label: "空闲",
+        },
+      ],
+      warningRows: [],
+    });
+
+    expect(print.header.title).toBe("生产计划表");
+    expect(print.header.documentNo).toBe("SCJH-20260702-001");
+    expect(print.fieldSections[0].fields.find((field) => field.label === "计划范围")?.value).toContain("CNC-02");
+    expect(print.lineSections.map((section) => section.title)).toEqual(["生产计划明细", "排程日历汇总"]);
+    expect(print.lineSections[0].columns.map((column) => column.label)).toEqual([
+      "序号",
+      "计划日期",
+      "生产单号",
+      "客户订单",
+      "客户名称",
+      "产品名称",
+      "计划数量",
+      "机台",
+      "班次",
+      "负责人",
+      "交付期限",
+      "状态",
+      "交期风险",
+    ]);
+    expect(print.lineSections[0].rows[0]).toMatchObject({
+      prodNo: "SC-20260702-001",
+      machine: "CNC-02",
+      deliveryRisk: "正常",
+    });
+    expect(print.signatures.map((item) => item.label)).toEqual(["生产主管", "仓库确认", "品控确认", "管理确认"]);
   });
 
   it("builds purchase receipt and stocktake previews with standard signatures", () => {

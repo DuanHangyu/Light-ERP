@@ -5608,4 +5608,40 @@ describe("ERP service formal report center", () => {
       filter_summary: expect.stringContaining("客户：上海星河装备有限公司"),
     });
   });
+
+  it("exports production plan ledger calendar and delivery warnings as a formal planning workbook", async () => {
+    const service = await loadService();
+    const { production } = createProducingOrder(service, "10");
+
+    service.performAction({
+      actorId: "U-PROD",
+      action: "updateProductionSchedule",
+      entityId: String(production.id),
+      payload: {
+        planned_date: "2026-07-03",
+        machine: "CNC-02",
+        owner: "马工",
+        shift: "白班",
+        schedule_note: "客户交期优先，纳入周生产计划。",
+        change_reason: "测试正式生产计划导出。",
+      },
+    });
+
+    const result = await service.buildExport({
+      actorId: "U-PROD",
+      type: "production-plan",
+      format: "xlsx",
+      filters: { dateFrom: "2026-07-01", dateTo: "2026-07-10" },
+    });
+    const xml = xlsxXml(result.buffer);
+
+    expect(result.fileName).toContain("production-plan");
+    expect(xml).toContain('name="production_plan"');
+    expect(xml).toContain('name="schedule_calendar"');
+    expect(xml).toContain('name="delivery_warnings"');
+    expect(xml).toContain("SC-");
+    expect(xml).toContain("CNC-02");
+    expect(xml).toContain("马工");
+    expect(xml).toContain("计划日期");
+  });
 });
