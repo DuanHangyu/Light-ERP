@@ -201,6 +201,13 @@ type Snapshot = {
       dispositionTypes?: Row[];
       openExceptions?: Row[];
     };
+    costAnomalyAnalytics: {
+      totals?: Row;
+      byReason?: Row[];
+      byMaterial?: Row[];
+      byResponsibility?: Row[];
+      detail?: Row[];
+    };
     materials: Row[];
     batches: Row[];
     inventoryAging: Row[];
@@ -9344,6 +9351,12 @@ const reportCards = [
     cadence: "实时",
     detail: "按正式补料、退料执行明细统计生产成本影响、库存价值变动、批次来源和仓库复核状态。",
   },
+  {
+    title: "成本异常分析报表",
+    type: "cost-anomaly-analysis",
+    cadence: "实时",
+    detail: "按成本调整、审批驳回、红冲成功和禁止直接红冲统计异常原因、物料分布与责任岗位。",
+  },
 ] satisfies Array<{ title: string; type: ReportPreviewType; cadence: string; detail: string }>;
 
 function ReportsModule({
@@ -9578,6 +9591,21 @@ function ReportsModule({
           ]}
         />
         <DataTable
+          title="成本异常原因分布"
+          icon={ReceiptText}
+          rows={snapshot.board.costAnomalyAnalytics?.byReason ?? []}
+          empty="暂无成本异常记录"
+          columns={[
+            { key: "reason_type_label", label: "异常原因", render: (value) => <StatusBadge value={String(value)} /> },
+            { key: "count", label: "次数" },
+            { key: "total_adjustment_amount", label: "异常金额", render: formatCurrency },
+            { key: "rejected_count", label: "审批驳回" },
+            { key: "reversed_count", label: "已红冲" },
+            { key: "red_offset_blocked_count", label: "禁止红冲" },
+          ]}
+          action={{ label: "成本异常报表", onClick: () => downloadReport("cost-anomaly-analysis") }}
+        />
+        <DataTable
           title="库存积压明细"
           icon={Warehouse}
           rows={snapshot.board.inventoryAging}
@@ -9657,6 +9685,15 @@ function reportPreviewRows(snapshot: Snapshot, filters: ReportFilterState) {
     }
     return dateInRange(row.executed_at ?? row.created_at, filters);
   });
+  const costAnomalyDetails = (snapshot.board.costAnomalyAnalytics?.detail ?? []).filter((row) => {
+    if (filters.customerId && String(row.customer_id) !== filters.customerId) return false;
+    if (filters.orderId && String(row.order_id) !== filters.orderId) return false;
+    if (filters.materialId && String(row.material_id) !== filters.materialId) return false;
+    return dateInRange(row.created_at, filters);
+  });
+  const costAnomalyReasons = groupCostAnomalies(costAnomalyDetails, "reason_type", "reason_type_label");
+  const costAnomalyMaterials = groupCostAnomalies(costAnomalyDetails, "material_id", "material_name");
+  const costAnomalyResponsibilities = groupCostAnomalies(costAnomalyDetails, "owner_role", "owner_role_label");
   return {
     receivables,
     payables,
@@ -9668,6 +9705,10 @@ function reportPreviewRows(snapshot: Snapshot, filters: ReportFilterState) {
     supplierDiscrepancyDetails,
     supplierPerformance,
     materialAdjustments,
+    costAnomalyDetails,
+    costAnomalyReasons,
+    costAnomalyMaterials,
+    costAnomalyResponsibilities,
   };
 }
 
@@ -9697,6 +9738,9 @@ function reportPreviewSummary(snapshot: Snapshot, filters: ReportFilterState) {
   const supplierDiscrepancyResolvedCount = rows.supplierDiscrepancyDetails.filter((row) => String(row.status) === "resolved").length;
   const supplierRiskCount = rows.supplierPerformance.filter((row) => String(row.risk_level) === "high").length;
   const materialAdjustmentPendingReviewCount = rows.materialAdjustments.filter((row) => String(row.review_status) === "pending_review").length;
+  const costAnomalyRejectedCount = rows.costAnomalyDetails.filter((row) => String(row.status) === "rejected").length;
+  const costAnomalyReversedCount = rows.costAnomalyDetails.filter((row) => String(row.status) === "reversed").length;
+  const costAnomalyRedOffsetBlockedCount = rows.costAnomalyDetails.filter((row) => Number(row.red_offset_blocked_flag ?? 0) === 1).length;
   return {
     orderAmount: sumRows(orders, "total_amount"),
     purchaseAmount: sumRows(purchaseOrders, "total_amount"),
@@ -9726,6 +9770,12 @@ function reportPreviewSummary(snapshot: Snapshot, filters: ReportFilterState) {
     materialAdjustmentPendingReviewCount,
     materialAdjustmentCostImpactAmount: sumRows(rows.materialAdjustments, "cost_impact_amount"),
     materialAdjustmentInventoryDelta: sumRows(rows.materialAdjustments, "inventory_value_delta"),
+    costAnomalyTotalCount: rows.costAnomalyDetails.length,
+    costAnomalyPendingApprovalCount: rows.costAnomalyDetails.filter((row) => String(row.status) === "pending_approval").length,
+    costAnomalyRejectedCount,
+    costAnomalyReversedCount,
+    costAnomalyRedOffsetBlockedCount,
+    costAnomalyTotalAmount: rows.costAnomalyDetails.reduce((sum, row) => sum + Math.abs(Number(row.adjustment_amount ?? 0)), 0),
   };
 }
 
@@ -9800,6 +9850,33 @@ function groupSupplierDiscrepancies(rows: Row[]) {
     grouped.set(supplierId, current);
   });
   return Array.from(grouped.values()).sort((a, b) => Number(b.discrepancy_count ?? 0) - Number(a.discrepancy_count ?? 0));
+}
+
+function groupCostAnomalies(rows: Row[], key: string, labelKey: string) {
+  const grouped = new Map<string, Row>();
+  rows.forEach((row) => {
+    const groupKey = String(row[key] ?? row[labelKey] ?? "未分类");
+    const current =
+      grouped.get(groupKey) ??
+      ({
+        [key]: row[key] ?? groupKey,
+        [labelKey]: row[labelKey] ?? groupKey,
+        count: 0,
+        total_adjustment_amount: 0,
+        pending_approval_count: 0,
+        rejected_count: 0,
+        reversed_count: 0,
+        red_offset_blocked_count: 0,
+      } satisfies Row);
+    current.count = Number(current.count ?? 0) + 1;
+    current.total_adjustment_amount = Number(current.total_adjustment_amount ?? 0) + Math.abs(Number(row.adjustment_amount ?? 0));
+    if (String(row.status) === "pending_approval") current.pending_approval_count = Number(current.pending_approval_count ?? 0) + 1;
+    if (String(row.status) === "rejected") current.rejected_count = Number(current.rejected_count ?? 0) + 1;
+    if (String(row.status) === "reversed") current.reversed_count = Number(current.reversed_count ?? 0) + 1;
+    if (Number(row.red_offset_blocked_flag ?? 0) === 1) current.red_offset_blocked_count = Number(current.red_offset_blocked_count ?? 0) + 1;
+    grouped.set(groupKey, current);
+  });
+  return Array.from(grouped.values()).sort((a, b) => Number(b.count ?? 0) - Number(a.count ?? 0));
 }
 
 function ReportPreviewModal({ preview, onClose }: { preview: ReportPreview | null; onClose: () => void }) {
@@ -11091,6 +11168,7 @@ function reportTypeLabel(value: string) {
       supplier_performance: "供应商绩效评分报表",
       supplier_discrepancy: "供应商差异统计报表",
       material_adjustment_cost_impact: "补退料成本影响报表",
+      cost_anomaly_analysis: "成本异常分析报表",
       quality_exception: "质量异常分析报表",
     }[value] ?? value
   );
@@ -11109,6 +11187,7 @@ function reportExportLabel(value: string) {
       "supplier-performance": "供应商绩效评分报表",
       "supplier-discrepancy": "供应商差异统计报表",
       "material-adjustment-cost-impact": "补退料成本影响报表",
+      "cost-anomaly-analysis": "成本异常分析报表",
       "quality-exception": "质量异常分析报表",
     }[value] ?? value
   );

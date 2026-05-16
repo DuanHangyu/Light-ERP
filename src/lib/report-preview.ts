@@ -10,6 +10,7 @@ export type ReportPreviewType =
   | "supplier-performance"
   | "supplier-discrepancy"
   | "material-adjustment-cost-impact"
+  | "cost-anomaly-analysis"
   | "quality-exception";
 
 export type ReportPreview = {
@@ -72,6 +73,12 @@ type ReportPreviewInput = {
     materialAdjustmentPendingReviewCount?: number;
     materialAdjustmentCostImpactAmount?: number;
     materialAdjustmentInventoryDelta?: number;
+    costAnomalyTotalCount?: number;
+    costAnomalyPendingApprovalCount?: number;
+    costAnomalyRejectedCount?: number;
+    costAnomalyReversedCount?: number;
+    costAnomalyRedOffsetBlockedCount?: number;
+    costAnomalyTotalAmount?: number;
   };
   rows: {
     receivables?: Row[];
@@ -84,6 +91,10 @@ type ReportPreviewInput = {
     supplierDiscrepancies?: Row[];
     supplierDiscrepancyDetails?: Row[];
     materialAdjustments?: Row[];
+    costAnomalyDetails?: Row[];
+    costAnomalyReasons?: Row[];
+    costAnomalyMaterials?: Row[];
+    costAnomalyResponsibilities?: Row[];
   };
 };
 
@@ -128,6 +139,7 @@ function reportTitle(type: ReportPreviewType) {
       "supplier-performance": "供应商绩效评分报表",
       "supplier-discrepancy": "供应商差异统计报表",
       "material-adjustment-cost-impact": "补退料成本影响报表",
+      "cost-anomaly-analysis": "成本异常分析报表",
       "quality-exception": "质量异常分析报表",
     }[type] ?? type
   );
@@ -220,6 +232,26 @@ function materialAdjustmentKpis(input: ReportPreviewInput) {
     { label: "待复核单数", value: text(pendingReview, "0") },
     { label: "成本影响", value: moneyText(costImpact) },
     { label: "库存价值变动", value: moneyText(inventoryDelta) },
+  ];
+}
+
+function costAnomalyKpis(input: ReportPreviewInput) {
+  const rows = input.rows.costAnomalyDetails ?? [];
+  const totalCount = input.summary.costAnomalyTotalCount ?? rows.length;
+  const rejectedCount =
+    input.summary.costAnomalyRejectedCount ?? rows.filter((row) => String(row.status ?? "") === "rejected").length;
+  const reversedCount =
+    input.summary.costAnomalyReversedCount ?? rows.filter((row) => String(row.status ?? "") === "reversed").length;
+  const blockedCount =
+    input.summary.costAnomalyRedOffsetBlockedCount ?? rows.filter((row) => Number(row.red_offset_blocked_flag ?? 0) === 1).length;
+  const totalAmount =
+    input.summary.costAnomalyTotalAmount ?? rows.reduce((sum, row) => sum + Math.abs(Number(row.adjustment_amount ?? 0)), 0);
+  return [
+    { label: "成本异常", value: text(totalCount, "0") },
+    { label: "审批驳回", value: text(rejectedCount, "0") },
+    { label: "红冲成功", value: text(reversedCount, "0") },
+    { label: "禁止红冲", value: text(blockedCount, "0") },
+    { label: "异常金额", value: moneyText(totalAmount) },
   ];
 }
 
@@ -360,6 +392,37 @@ function materialAdjustmentRows(rows: Row[]) {
     reviewResult: text(row.review_result_label ?? row.review_result, ""),
     reviewedBy: text(row.reviewed_by_name, ""),
     executedAt: dateText(row.executed_at),
+  }));
+}
+
+function costAnomalyRows(rows: Row[]) {
+  return rows.map((row) => ({
+    adjustmentNo: text(row.adjustment_no),
+    prodNo: text(row.prod_no),
+    orderNo: text(row.order_no),
+    customerName: text(row.customer_name),
+    productName: text(row.product_name),
+    materialName: text(row.material_name),
+    reasonType: text(row.reason_type_label),
+    anomalyStatus: text(row.anomaly_status_label),
+    adjustmentAmount: moneyText(row.adjustment_amount),
+    ruleName: text(row.rule_name),
+    redOffsetControl: text(row.red_offset_control_status),
+    reversalNo: text(row.reversal_no, ""),
+    ownerRole: text(row.owner_role_label, ""),
+    createdAt: dateText(row.created_at),
+  }));
+}
+
+function costAnomalyGroupRows(rows: Row[], labelKey: string) {
+  return rows.map((row) => ({
+    label: text(row[labelKey]),
+    count: text(row.count ?? 0, "0"),
+    totalAmount: moneyText(row.total_adjustment_amount),
+    pendingApprovalCount: text(row.pending_approval_count ?? 0, "0"),
+    rejectedCount: text(row.rejected_count ?? 0, "0"),
+    reversedCount: text(row.reversed_count ?? 0, "0"),
+    blockedCount: text(row.red_offset_blocked_count ?? 0, "0"),
   }));
 }
 
@@ -517,6 +580,33 @@ function materialAdjustmentColumns() {
   ];
 }
 
+function costAnomalyColumns() {
+  return [
+    { key: "adjustmentNo", label: "调整单" },
+    { key: "prodNo", label: "生产单" },
+    { key: "orderNo", label: "销售订单" },
+    { key: "customerName", label: "客户" },
+    { key: "materialName", label: "物料" },
+    { key: "reasonType", label: "原因" },
+    { key: "anomalyStatus", label: "异常状态" },
+    { key: "adjustmentAmount", label: "调整金额" },
+    { key: "ruleName", label: "审批规则" },
+    { key: "redOffsetControl", label: "红冲控制" },
+  ];
+}
+
+function costAnomalyGroupColumns() {
+  return [
+    { key: "label", label: "分类" },
+    { key: "count", label: "次数" },
+    { key: "totalAmount", label: "异常金额" },
+    { key: "pendingApprovalCount", label: "待审批" },
+    { key: "rejectedCount", label: "驳回" },
+    { key: "reversedCount", label: "红冲" },
+    { key: "blockedCount", label: "禁止红冲" },
+  ];
+}
+
 function previewNotes(type: ReportPreviewType) {
   const base = [
     "本报表由系统根据当前本地数据库自动生成，适用于内部经营复盘、对账确认和纸质归档。",
@@ -562,6 +652,13 @@ function previewNotes(type: ReportPreviewType) {
       "待复核单据应由仓库核对执行批次、库存反向流水、移动均价和生产工单成本归集后再归档。",
     ];
   }
+  if (type === "cost-anomaly-analysis") {
+    return [
+      ...base,
+      "成本异常分析以工单成本调整流水、审批单、补退料复核异常和红冲单为依据，统计审批驳回、红冲成功和禁止直接红冲的受控单据。",
+      "报表按异常原因、物料和责任岗位汇总，可用于管理层复盘成本波动、审批规则有效性和红冲风险。",
+    ];
+  }
   return [...base, "经营类报表用于管理层查看订单、采购、库存、应收应付、回款和质量收率的综合情况。"];
 }
 
@@ -578,6 +675,10 @@ export function buildReportPreview(input: ReportPreviewInput): ReportPreview {
   const supplierDiscrepancies = supplierDiscrepancySummaryRows(input.rows.supplierDiscrepancies ?? []);
   const supplierDiscrepancyDetails = supplierDiscrepancyDetailRows(input.rows.supplierDiscrepancyDetails ?? []);
   const materialAdjustments = materialAdjustmentRows(input.rows.materialAdjustments ?? []);
+  const costAnomalyDetails = costAnomalyRows(input.rows.costAnomalyDetails ?? []);
+  const costAnomalyReasons = costAnomalyGroupRows(input.rows.costAnomalyReasons ?? [], "reason_type_label");
+  const costAnomalyMaterials = costAnomalyGroupRows(input.rows.costAnomalyMaterials ?? [], "material_name");
+  const costAnomalyResponsibilities = costAnomalyGroupRows(input.rows.costAnomalyResponsibilities ?? [], "owner_role_label");
   const sections: ReportPreview["sections"] = [];
 
   if (input.type === "sales-statement") {
@@ -597,6 +698,11 @@ export function buildReportPreview(input: ReportPreviewInput): ReportPreview {
     sections.push({ title: "供应商绩效评分", columns: supplierPerformanceColumns(), rows: supplierPerformance });
   } else if (input.type === "material-adjustment-cost-impact") {
     sections.push({ title: "补退料成本影响明细", columns: materialAdjustmentColumns(), rows: materialAdjustments });
+  } else if (input.type === "cost-anomaly-analysis") {
+    sections.push({ title: "异常原因分布", columns: costAnomalyGroupColumns(), rows: costAnomalyReasons });
+    sections.push({ title: "物料分布", columns: costAnomalyGroupColumns(), rows: costAnomalyMaterials });
+    sections.push({ title: "责任岗位分布", columns: costAnomalyGroupColumns(), rows: costAnomalyResponsibilities });
+    sections.push({ title: "成本异常明细", columns: costAnomalyColumns(), rows: costAnomalyDetails });
   } else {
     sections.push({ title: "应收账款摘要", columns: salesColumns(), rows: receivables.slice(0, 8) });
     sections.push({ title: "应付账款摘要", columns: purchaseColumns(), rows: payables.slice(0, 8) });
@@ -619,8 +725,10 @@ export function buildReportPreview(input: ReportPreviewInput): ReportPreview {
         ? supplierDiscrepancyKpis(input)
         : input.type === "supplier-performance"
           ? supplierPerformanceKpis(input)
-          : input.type === "material-adjustment-cost-impact"
-            ? materialAdjustmentKpis(input)
+        : input.type === "material-adjustment-cost-impact"
+          ? materialAdjustmentKpis(input)
+          : input.type === "cost-anomaly-analysis"
+            ? costAnomalyKpis(input)
             : commonKpis(input),
     sections,
     notes: previewNotes(input.type),

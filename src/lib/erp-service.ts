@@ -74,6 +74,7 @@ type FormalReportExportType =
   | "supplier-performance"
   | "supplier-discrepancy"
   | "material-adjustment-cost-impact"
+  | "cost-anomaly-analysis"
   | "quality-exception";
 
 export type ReportFilters = {
@@ -2749,6 +2750,7 @@ export function getSnapshot(actorId = "U-SALES") {
       approval_status_label: item.approval_status ? approvalRequestStatusLabel(String(item.approval_status)) : "",
     };
   });
+  const costAnomalyAnalytics = costAnomalyAnalyticsRows(database);
 
   const finishedShipmentAllocations = database.prepare(`
     SELECT fsa.*, s.shipment_no, o.order_no, c.name AS customer_name,
@@ -3887,6 +3889,7 @@ export function getSnapshot(actorId = "U-SALES") {
       productionDailyReports,
       technicalDispositions,
       qualityExceptionAnalytics,
+      costAnomalyAnalytics,
       materials,
       batches,
       inventoryAging,
@@ -13833,6 +13836,7 @@ export async function buildExport(input: {
     | "supplier-discrepancy"
     | "supplier-performance"
     | "material-adjustment-cost-impact"
+    | "cost-anomaly-analysis"
     | "quality-exception"
     | "business-weekly"
     | "business-monthly"
@@ -14045,6 +14049,15 @@ export async function buildExport(input: {
 
   if (input.type === "material-adjustment-cost-impact") {
     sheets.push({ name: "material_adjustment_cost_impact", rows: materialAdjustmentCostImpactRows(database, input.entityId, filters) });
+  }
+
+  if (input.type === "cost-anomaly-analysis") {
+    const analytics = costAnomalyAnalyticsRows(database, filters);
+    sheets.push({ name: "cost_anomaly_summary", rows: costAnomalySummaryRows(database, filters) });
+    sheets.push({ name: "cost_anomaly_detail", rows: analytics.detail });
+    sheets.push({ name: "cost_anomaly_reason", rows: analytics.byReason });
+    sheets.push({ name: "cost_anomaly_material", rows: analytics.byMaterial });
+    sheets.push({ name: "cost_anomaly_responsibility", rows: analytics.byResponsibility });
   }
 
   if (input.type.startsWith("master-template-")) {
@@ -14704,6 +14717,7 @@ function isFormalReportExportType(type: string): type is FormalReportExportType 
     "supplier-performance",
     "supplier-discrepancy",
     "material-adjustment-cost-impact",
+    "cost-anomaly-analysis",
     "quality-exception",
   ].includes(type);
 }
@@ -14720,6 +14734,7 @@ function formalReportTitle(type: FormalReportExportType) {
     "supplier-performance": "供应商绩效评分报表",
     "supplier-discrepancy": "供应商差异统计报表",
     "material-adjustment-cost-impact": "补退料成本影响报表",
+    "cost-anomaly-analysis": "成本异常分析报表",
     "quality-exception": "质量异常分析报表",
   };
   return titles[type];
@@ -14737,6 +14752,7 @@ function reportSnapshotType(type: FormalReportExportType) {
     "supplier-performance": "supplier_performance",
     "supplier-discrepancy": "supplier_discrepancy",
     "material-adjustment-cost-impact": "material_adjustment_cost_impact",
+    "cost-anomaly-analysis": "cost_anomaly_analysis",
     "quality-exception": "quality_exception",
   };
   return snapshotTypes[type];
@@ -14781,6 +14797,11 @@ function formalReportCoverRows(database: Database.Database, type: FormalReportEx
     { field: "待复核补退料", value: Number(metrics.material_adjustment_pending_review_count ?? 0) },
     { field: "补退料成本影响", value: Number(metrics.material_adjustment_cost_impact_amount ?? 0) },
     { field: "库存价值变动", value: Number(metrics.material_adjustment_inventory_delta ?? 0) },
+    { field: "成本异常总数", value: Number(metrics.cost_anomaly_total_count ?? 0) },
+    { field: "成本审批驳回", value: Number(metrics.cost_anomaly_rejected_count ?? 0) },
+    { field: "成本红冲成功", value: Number(metrics.cost_anomaly_reversed_count ?? 0) },
+    { field: "禁止直接红冲", value: Number(metrics.cost_anomaly_red_offset_blocked_count ?? 0) },
+    { field: "成本异常金额", value: Number(metrics.cost_anomaly_total_amount ?? 0) },
   ];
 }
 
@@ -14796,6 +14817,7 @@ function formalReportDescription(type: FormalReportExportType) {
     "supplier-performance": "按采购订单、到货准时、IQC合格、到货差异、应付逾期综合评估供应商绩效评分。",
     "supplier-discrepancy": "按到货差异单统计供应商差异频次、数量差异、价格差异、影响金额和处理完成率。",
     "material-adjustment-cost-impact": "按正式补料、退料执行明细统计生产成本影响、库存价值变动、批次来源和仓库复核状态。",
+    "cost-anomaly-analysis": "按工单成本调整、审批驳回、红冲成功和红冲受控规则统计成本异常原因、物料分布和责任岗位。",
     "quality-exception": "按不合格请验、技术处置、复检记录和关闭状态统计质量异常、原因分布与处置效率。",
   };
   return descriptions[type];
@@ -14843,6 +14865,8 @@ function reportSnapshotMetrics(database: Database.Database, type: FormalReportEx
   const supplierDiscrepancySummary = supplierDiscrepancySummaryRows(database, filters);
   const supplierPerformance = supplierPerformanceRows(database, filters);
   const materialAdjustmentCostRows = materialAdjustmentCostImpactRows(database, undefined, filters);
+  const costAnomaly = costAnomalyAnalyticsRows(database, filters);
+  const costAnomalyTotals = costAnomaly.totals as Record<string, unknown>;
   const qualityClosedCount = qualityRows.filter((item) => String(item.closure_status) === "已关闭").length;
   const qualityReinspectionCount = qualityRows.reduce((sum, item) => sum + Number(item.reinspection_count ?? 0), 0);
   const supplierDiscrepancyResolvedCount = supplierDiscrepancyRows.filter((item) => String(item.status_label) === "差异已处理").length;
@@ -14895,6 +14919,14 @@ function reportSnapshotMetrics(database: Database.Database, type: FormalReportEx
     material_adjustment_inventory_delta: roundMoney(
       materialAdjustmentCostRows.reduce((sum, item) => sum + Number(item.inventory_value_delta ?? 0), 0),
     ),
+    cost_anomaly_total_count: Number(costAnomalyTotals.total_count ?? 0),
+    cost_anomaly_pending_approval_count: Number(costAnomalyTotals.pending_approval_count ?? 0),
+    cost_anomaly_rejected_count: Number(costAnomalyTotals.rejected_count ?? 0),
+    cost_anomaly_reversed_count: Number(costAnomalyTotals.reversed_count ?? 0),
+    cost_anomaly_red_offset_blocked_count: Number(costAnomalyTotals.red_offset_blocked_count ?? 0),
+    cost_anomaly_total_amount: Number(costAnomalyTotals.total_adjustment_amount ?? 0),
+    cost_anomaly_rejected_amount: Number(costAnomalyTotals.rejected_amount ?? 0),
+    cost_anomaly_reversed_amount: Number(costAnomalyTotals.reversed_amount ?? 0),
   };
 }
 
@@ -15555,6 +15587,187 @@ function materialAdjustmentCostImpactRows(database: Database.Database, entityId?
     WHERE ${conditions.join(" AND ")}
     ORDER BY COALESCE(pmao.executed_at, pmao.created_at) DESC, pmaol.rowid ASC
   `, params);
+}
+
+function costAnomalyDetailRows(database: Database.Database, filters: ReportFilters = {}): Array<Record<string, unknown>> {
+  const conditions = ["1 = 1"];
+  const params: unknown[] = [];
+  addDateFilter(conditions, params, "pca.created_at", filters);
+  if (filters.customerId) {
+    conditions.push("o.customer_id = ?");
+    params.push(filters.customerId);
+  }
+  if (filters.orderId) {
+    conditions.push("o.id = ?");
+    params.push(filters.orderId);
+  }
+  if (filters.materialId) {
+    conditions.push("pmaol.material_id = ?");
+    params.push(filters.materialId);
+  }
+
+  const detailRows = filteredRows(database, `
+    SELECT '成本异常分析报表' AS template_title,
+           '本地化生产流转 ERP' AS company,
+           pca.id,
+           pca.adjustment_no,
+           pca.production_order_id,
+           po.prod_no,
+           o.id AS order_id,
+           o.order_no,
+           c.name AS customer_name,
+           p.name AS product_name,
+           pca.cost_summary_id,
+           pcs.cost_no,
+           exception.exception_no,
+           exception.reason_type,
+           pmao.order_no AS material_adjustment_order_no,
+           pmao.adjustment_type,
+           pmaol.material_id,
+           m.material_code,
+           m.name AS material_name,
+           m.unit AS material_unit,
+           review.review_no,
+           pca.adjustment_amount,
+           pca.previous_total_cost,
+           pca.new_total_cost,
+           pca.previous_unit_cost,
+           pca.new_unit_cost,
+           pca.status,
+           pca.adjustment_note,
+           pca.reversal_reason,
+           creator.name AS created_by_name,
+           applier.name AS applied_by_name,
+           reverser.name AS reversed_by_name,
+           pca.created_at,
+           pca.applied_at,
+           pca.reversed_at,
+           ar.request_no AS approval_request_no,
+           ar.status AS approval_status,
+           ar.decision_note AS approval_note,
+           rule.rule_name,
+           rule.risk_level,
+           COALESCE(rule.allow_reversal, 1) AS allow_reversal,
+           rule.reversal_approver_role,
+           dr.reversal_no,
+           dr.reason AS document_reversal_reason,
+           exception.owner_role
+    FROM production_cost_adjustments pca
+    JOIN production_orders po ON po.id = pca.production_order_id
+    JOIN orders o ON o.id = pca.order_id
+    JOIN customers c ON c.id = o.customer_id
+    JOIN products p ON p.id = o.product_id
+    LEFT JOIN production_cost_summaries pcs ON pcs.id = pca.cost_summary_id
+    LEFT JOIN production_material_adjustment_review_exceptions exception ON exception.id = pca.exception_id
+    LEFT JOIN production_material_adjustment_orders pmao ON pmao.id = exception.order_id
+    LEFT JOIN production_material_adjustment_order_lines pmaol ON pmaol.order_id = pmao.id
+    LEFT JOIN materials m ON m.id = pmaol.material_id
+    LEFT JOIN production_material_adjustment_order_reviews review ON review.order_id = pmao.id
+    LEFT JOIN approval_requests ar ON ar.id = pca.approval_request_id
+    LEFT JOIN approval_rules rule ON rule.id = ar.rule_id
+    LEFT JOIN document_reversals dr ON dr.id = pca.reversal_id
+    JOIN users creator ON creator.id = pca.created_by
+    LEFT JOIN users applier ON applier.id = pca.applied_by
+    LEFT JOIN users reverser ON reverser.id = pca.reversed_by
+    WHERE ${conditions.join(" AND ")}
+    ORDER BY pca.created_at DESC
+  `, params);
+
+  return detailRows.map((row): Record<string, unknown> => {
+    const status = String(row.status ?? "");
+    const allowReversal = Number(row.allow_reversal ?? 1) === 1;
+    const blocked = status === "applied" && !allowReversal;
+    const anomalyStatusLabel =
+      status === "rejected"
+        ? "审批驳回"
+        : status === "reversed"
+          ? "已红冲"
+          : status === "pending_approval"
+            ? "待审批"
+            : status === "pending_summary"
+              ? "待成本归集"
+              : blocked
+                ? "红冲受控"
+                : productionCostAdjustmentStatusLabel(status);
+    return {
+      ...row,
+      status_label: productionCostAdjustmentStatusLabel(status),
+      anomaly_status_label: anomalyStatusLabel,
+      reason_type_label: materialAdjustmentExceptionReasonLabel(String(row.reason_type ?? "other")),
+      adjustment_type_label: approvalRuleAdjustmentTypeLabel(String(row.adjustment_type ?? "")),
+      approval_status_label: row.approval_status ? approvalRequestStatusLabel(String(row.approval_status)) : "",
+      risk_level_label: approvalRiskLevelLabel(String(row.risk_level ?? "normal")),
+      red_offset_control_status: allowReversal ? "允许红冲" : "禁止直接红冲",
+      red_offset_blocked_flag: blocked ? 1 : 0,
+      reversal_approver_role_label: row.reversal_approver_role ? roleLabel(String(row.reversal_approver_role)) : "",
+      owner_role_label: row.owner_role ? roleLabel(String(row.owner_role)) : "",
+    };
+  });
+}
+
+function groupCostAnomalyRows(rows: Array<Record<string, unknown>>, key: string, labelKey: string) {
+  const grouped = new Map<string, Record<string, unknown>>();
+  rows.forEach((row) => {
+    const groupKey = String(row[key] ?? row[labelKey] ?? "未分类");
+    const current =
+      grouped.get(groupKey) ??
+      ({
+        [key]: row[key] ?? groupKey,
+        [labelKey]: row[labelKey] ?? groupKey,
+        count: 0,
+        total_adjustment_amount: 0,
+        pending_approval_count: 0,
+        rejected_count: 0,
+        reversed_count: 0,
+        red_offset_blocked_count: 0,
+      } satisfies Record<string, unknown>);
+    current.count = Number(current.count ?? 0) + 1;
+    current.total_adjustment_amount = roundMoney(Number(current.total_adjustment_amount ?? 0) + Math.abs(Number(row.adjustment_amount ?? 0)));
+    if (String(row.status) === "pending_approval") current.pending_approval_count = Number(current.pending_approval_count ?? 0) + 1;
+    if (String(row.status) === "rejected") current.rejected_count = Number(current.rejected_count ?? 0) + 1;
+    if (String(row.status) === "reversed") current.reversed_count = Number(current.reversed_count ?? 0) + 1;
+    if (Number(row.red_offset_blocked_flag ?? 0) === 1) current.red_offset_blocked_count = Number(current.red_offset_blocked_count ?? 0) + 1;
+    grouped.set(groupKey, current);
+  });
+  return Array.from(grouped.values()).sort((a, b) => Number(b.count ?? 0) - Number(a.count ?? 0));
+}
+
+function costAnomalyAnalyticsRows(database: Database.Database, filters: ReportFilters = {}) {
+  const detail = costAnomalyDetailRows(database, filters);
+  const totals = {
+    total_count: detail.length,
+    pending_approval_count: detail.filter((row) => String(row.status) === "pending_approval").length,
+    rejected_count: detail.filter((row) => String(row.status) === "rejected").length,
+    applied_count: detail.filter((row) => String(row.status) === "applied").length,
+    reversed_count: detail.filter((row) => String(row.status) === "reversed").length,
+    red_offset_blocked_count: detail.filter((row) => Number(row.red_offset_blocked_flag ?? 0) === 1).length,
+    total_adjustment_amount: roundMoney(detail.reduce((sum, row) => sum + Math.abs(Number(row.adjustment_amount ?? 0)), 0)),
+    rejected_amount: roundMoney(
+      detail.filter((row) => String(row.status) === "rejected").reduce((sum, row) => sum + Math.abs(Number(row.adjustment_amount ?? 0)), 0),
+    ),
+    reversed_amount: roundMoney(
+      detail.filter((row) => String(row.status) === "reversed").reduce((sum, row) => sum + Math.abs(Number(row.adjustment_amount ?? 0)), 0),
+    ),
+  };
+  return {
+    totals,
+    byReason: groupCostAnomalyRows(detail, "reason_type", "reason_type_label"),
+    byMaterial: groupCostAnomalyRows(detail, "material_id", "material_name"),
+    byResponsibility: groupCostAnomalyRows(detail, "owner_role", "owner_role_label"),
+    detail,
+  };
+}
+
+function costAnomalySummaryRows(database: Database.Database, filters: ReportFilters = {}) {
+  const analytics = costAnomalyAnalyticsRows(database, filters);
+  return [
+    {
+      report_name: "成本异常分析报表",
+      generated_at: now(),
+      filter_summary: reportFilterSummary(database, filters),
+      ...(analytics.totals as Record<string, unknown>),
+    },
+  ];
 }
 
 function materialAdjustmentOrderRows(database: Database.Database, entityId?: string, filters: ReportFilters = {}) {
