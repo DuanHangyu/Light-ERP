@@ -53,6 +53,19 @@ export type UserRow = {
   title: string;
 };
 
+const allRoles: Role[] = [
+  "sales",
+  "assistant",
+  "production",
+  "warehouse",
+  "purchasing",
+  "quality",
+  "technical",
+  "manager",
+  "finance",
+  "admin",
+];
+
 type ActionInput = {
   actorId: string;
   action: string;
@@ -186,8 +199,10 @@ const roleActionMap: Record<string, Role[]> = {
   createBomVersion: ["admin", "production"],
   deactivateBom: ["admin", "production"],
   changeOwnPassword: ["sales", "assistant", "production", "warehouse", "purchasing", "quality", "technical", "manager", "finance", "admin"],
+  upsertUser: ["admin"],
   resetUserPassword: ["admin"],
   updateUserStatus: ["admin"],
+  upsertRolePermission: ["admin"],
   resetDemo: ["admin"],
   reverseBusinessDocument: ["manager", "admin"],
   recordSalesReturn: ["assistant", "warehouse", "admin"],
@@ -267,9 +282,21 @@ const actionLabels: Record<string, string> = {
   createStocktake: "录入库存盘点",
   approveStocktake: "审批盘点调整",
   rejectStocktake: "驳回盘点调整",
+  upsertCustomer: "维护客户主档",
+  deactivateCustomer: "停用客户主档",
+  upsertSupplier: "维护供应商主档",
+  deactivateSupplier: "停用供应商主档",
+  upsertMaterial: "维护物料主档",
+  deactivateMaterial: "停用物料主档",
+  upsertProduct: "维护产品主档",
+  deactivateProduct: "停用产品主档",
+  createBomVersion: "新建 BOM 版本",
+  deactivateBom: "停用 BOM",
   changeOwnPassword: "修改本人密码",
+  upsertUser: "维护用户账号",
   resetUserPassword: "重置用户密码",
   updateUserStatus: "启停用户",
+  upsertRolePermission: "配置角色权限",
   resetDemo: "重置演示数据",
   reverseBusinessDocument: "冲销业务单据",
   recordSalesReturn: "登记销售退货",
@@ -326,6 +353,54 @@ function getUser(database: Database.Database, actorId: string) {
 function requireRole(database: Database.Database, actorId: string, allowed: Role[]) {
   const user = getUser(database, actorId);
   if (!allowed.includes(user.role)) {
+    throw new Error(`${user.role_label} 无权执行该操作。`);
+  }
+  return user;
+}
+
+function ensureRolePermissionDefaults(database: Database.Database) {
+  const timestamp = now();
+  const upsert = database.prepare(`
+    INSERT INTO role_permissions (
+      id, role, action, action_label, module_label, risk_level,
+      enabled, description, created_at, updated_by, updated_at
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, NULL, ?)
+    ON CONFLICT(role, action) DO UPDATE SET
+      action_label = excluded.action_label,
+      module_label = excluded.module_label,
+      risk_level = excluded.risk_level
+  `);
+
+  Object.entries(roleActionMap).forEach(([action, defaultRoles]) => {
+    allRoles.forEach((role) => {
+      upsert.run(
+        `${role}:${action}`,
+        role,
+        action,
+        actionLabels[action] ?? action,
+        actionModuleLabel(action),
+        actionRiskLevel(action),
+        defaultRoles.includes(role) ? 1 : 0,
+        timestamp,
+        timestamp,
+      );
+    });
+  });
+}
+
+function roleHasPermission(database: Database.Database, role: Role, action: string) {
+  ensureRolePermissionDefaults(database);
+  const row = database
+    .prepare("SELECT enabled FROM role_permissions WHERE role = ? AND action = ?")
+    .get(role, action) as { enabled: number } | undefined;
+  if (!row) return Boolean(roleActionMap[action]?.includes(role));
+  return Number(row.enabled) > 0;
+}
+
+function requireActionPermission(database: Database.Database, actorId: string, action: string) {
+  const user = getUser(database, actorId);
+  if (!roleHasPermission(database, user.role, action)) {
     throw new Error(`${user.role_label} 无权执行该操作。`);
   }
   return user;
@@ -2211,6 +2286,7 @@ function alertCenterRows(input: {
 
 export function getSnapshot(actorId = "U-SALES") {
   const database = getDb();
+  ensureRolePermissionDefaults(database);
   const users = database
     .prepare(`
       SELECT id, username, name, role, role_label, status, title, last_login_at, password_changed_at
@@ -4135,9 +4211,9 @@ export function getSnapshot(actorId = "U-SALES") {
     },
     storage,
     security: {
-      currentPermissions: permissionsForRole(currentUser.role),
-      rolePermissions: rolePermissionRows(),
-      permissionMatrix: rolePermissionMatrixRows(),
+      currentPermissions: permissionsForRole(database, currentUser.role),
+      rolePermissions: rolePermissionRows(database),
+      permissionMatrix: rolePermissionMatrixRows(database),
     },
     safeActor,
   };
@@ -4426,28 +4502,36 @@ function buildProcessFlowSummary(processFlow: Array<Record<string, unknown>>) {
   };
 }
 
-function permissionsForRole(role: Role) {
-  return Object.entries(roleActionMap)
-    .filter(([, roles]) => roles.includes(role))
-    .map(([action]) => action)
-    .sort();
+function permissionsForRole(database: Database.Database, role: Role) {
+  ensureRolePermissionDefaults(database);
+  return (database.prepare(`
+    SELECT action
+    FROM role_permissions
+    WHERE role = ? AND enabled = 1
+    ORDER BY action ASC
+  `).all(role) as Array<{ action: string }>).map((row) => row.action);
 }
 
-function rolePermissionRows() {
-  return Object.entries(roleActionMap).flatMap(([action, roles]) =>
-    roles.map((role) => ({
-      role,
-      role_label: roleLabel(role),
-      action,
-      action_label: actionLabels[action] ?? action,
-      module_label: actionModuleLabel(action),
-      risk_level: actionRiskLevel(action),
-    })),
-  );
+function rolePermissionRows(database: Database.Database): Array<Record<string, unknown>> {
+  ensureRolePermissionDefaults(database);
+  return (database.prepare(`
+    SELECT rp.*,
+           updater.name AS updated_by_name
+    FROM role_permissions rp
+    LEFT JOIN users updater ON updater.id = rp.updated_by
+    ORDER BY rp.role ASC, rp.module_label ASC, rp.action_label ASC
+  `).all() as Array<Record<string, unknown>>).map((row) => {
+    const item = row as Record<string, unknown>;
+    return {
+      ...item,
+      role_label: roleLabel(String(item.role)),
+      enabled_label: Number(item.enabled ?? 0) > 0 ? "启用" : "停用",
+    };
+  });
 }
 
-function rolePermissionMatrixRows() {
-  const rows = rolePermissionRows();
+function rolePermissionMatrixRows(database: Database.Database) {
+  const rows = rolePermissionRows(database);
   const grouped = new Map<string, Record<string, unknown>>();
   rows.forEach((row) => {
     const key = `${row.role}:${row.module_label}`;
@@ -4458,16 +4542,23 @@ function rolePermissionMatrixRows() {
         role_label: row.role_label,
         module_label: row.module_label,
         action_count: 0,
+        enabled_count: 0,
+        disabled_count: 0,
         high_risk_count: 0,
         medium_risk_count: 0,
         low_risk_count: 0,
         actions: "",
       } satisfies Record<string, unknown>);
     current.action_count = Number(current.action_count ?? 0) + 1;
-    if (row.risk_level === "高") current.high_risk_count = Number(current.high_risk_count ?? 0) + 1;
-    if (row.risk_level === "中") current.medium_risk_count = Number(current.medium_risk_count ?? 0) + 1;
-    if (row.risk_level === "低") current.low_risk_count = Number(current.low_risk_count ?? 0) + 1;
-    current.actions = [String(current.actions || ""), row.action_label].filter(Boolean).join("、");
+    if (Number(row.enabled ?? 0) > 0) {
+      current.enabled_count = Number(current.enabled_count ?? 0) + 1;
+      if (row.risk_level === "高") current.high_risk_count = Number(current.high_risk_count ?? 0) + 1;
+      if (row.risk_level === "中") current.medium_risk_count = Number(current.medium_risk_count ?? 0) + 1;
+      if (row.risk_level === "低") current.low_risk_count = Number(current.low_risk_count ?? 0) + 1;
+      current.actions = [String(current.actions || ""), row.action_label].filter(Boolean).join("、");
+    } else {
+      current.disabled_count = Number(current.disabled_count ?? 0) + 1;
+    }
     grouped.set(key, current);
   });
   return Array.from(grouped.values()).sort((a, b) => {
@@ -4559,8 +4650,10 @@ function actionModuleLabel(action: string) {
   if (
     [
       "changeOwnPassword",
+      "upsertUser",
       "resetUserPassword",
       "updateUserStatus",
+      "upsertRolePermission",
       "resetDemo",
       "upsertCustomer",
       "deactivateCustomer",
@@ -4581,6 +4674,8 @@ function actionRiskLevel(action: string) {
       "resetDemo",
       "resetUserPassword",
       "updateUserStatus",
+      "upsertUser",
+      "upsertRolePermission",
       "receivePurchaseOrder",
       "completeMaterialIqcInspection",
       "createTechnicalDisposition",
@@ -6386,7 +6481,7 @@ function buildTasks(
 export function performAction(input: ActionInput) {
   const database = getDb();
   if (!roleActionMap[input.action]) throw new Error("未知操作。");
-  requireRole(database, input.actorId, roleActionMap[input.action]);
+  requireActionPermission(database, input.actorId, input.action);
 
   if (input.action === "resetDemo") {
     resetDemoDatabase();
@@ -6626,11 +6721,17 @@ export function performAction(input: ActionInput) {
       case "changeOwnPassword":
         changeOwnPassword(database, input.actorId, input.payload);
         break;
+      case "upsertUser":
+        upsertUser(database, input.actorId, input.entityId, input.payload);
+        break;
       case "resetUserPassword":
         resetUserPassword(database, input.actorId, mustEntity(input.entityId), input.payload);
         break;
       case "updateUserStatus":
         updateUserStatus(database, input.actorId, mustEntity(input.entityId), input.payload);
+        break;
+      case "upsertRolePermission":
+        upsertRolePermission(database, input.actorId, input.payload);
         break;
       case "upsertCustomer":
         upsertCustomer(database, input.actorId, input.entityId, input.payload);
@@ -12828,7 +12929,7 @@ function deactivateApprovalRule(database: Database.Database, actorId: string, ru
 }
 
 function roleValue(value: string) {
-  if (["sales", "assistant", "production", "warehouse", "purchasing", "quality", "manager", "finance", "admin"].includes(value)) {
+  if (allRoles.includes(value as Role)) {
     return value as Role;
   }
   throw new Error("角色不正确。");
@@ -14465,6 +14566,71 @@ function changeOwnPassword(database: Database.Database, actorId: string, rawPayl
   audit(database, actorId, "changeOwnPassword", "user", user.id, "用户修改本人密码");
 }
 
+function upsertUser(
+  database: Database.Database,
+  actorId: string,
+  userId: string | undefined,
+  rawPayload?: Record<string, unknown>,
+) {
+  const payload = payloadObject(rawPayload);
+  const username = payloadText(payload, "username", "登录账号").toLowerCase();
+  if (!/^[a-z0-9._-]{3,32}$/.test(username)) {
+    throw new Error("登录账号需为 3-32 位小写字母、数字、点、横线或下划线。");
+  }
+  const name = payloadText(payload, "name", "姓名");
+  const role = roleValue(payloadText(payload, "role", "角色"));
+  const status = payloadStatus(payload);
+  const title = payloadText(payload, "title", "岗位说明", false) || roleLabel(role);
+  const password = payloadText(payload, "new_password", "初始密码", false);
+  const timestamp = now();
+
+  const duplicate = database
+    .prepare("SELECT id FROM users WHERE lower(username) = lower(?) AND id <> ?")
+    .get(username, userId ?? "") as { id: string } | undefined;
+  if (duplicate) throw new Error("登录账号已存在。");
+
+  if (userId) {
+    const existing = database.prepare("SELECT * FROM users WHERE id = ?").get(userId) as UserRow | undefined;
+    if (!existing) throw new Error("用户不存在。");
+    if (actorId === userId && (status !== "active" || role !== "admin")) {
+      throw new Error("不能停用当前登录账号或移除当前管理员角色。");
+    }
+
+    database.prepare(`
+      UPDATE users
+      SET username = ?, name = ?, role = ?, role_label = ?, status = ?, title = ?
+      WHERE id = ?
+    `).run(username, name, role, roleLabel(role), status, title, userId);
+
+    if (password) {
+      if (password.length < 6) throw new Error("初始密码至少需要 6 位。");
+      database.prepare("UPDATE users SET password_hash = ?, password = '', password_changed_at = ? WHERE id = ?").run(
+        hashPassword(password),
+        timestamp,
+        userId,
+      );
+      database.prepare("UPDATE user_sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL").run(timestamp, userId);
+    }
+    if (status === "inactive") {
+      database.prepare("UPDATE user_sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL").run(timestamp, userId);
+    }
+    audit(database, actorId, "upsertUser", "user", userId, `更新用户 ${name} / ${roleLabel(role)} / ${status === "active" ? "启用" : "停用"}`);
+    return;
+  }
+
+  const newPassword = password || "Welcome@2026";
+  if (newPassword.length < 6) throw new Error("初始密码至少需要 6 位。");
+  const id = uid("USR");
+  database.prepare(`
+    INSERT INTO users (
+      id, username, name, role, role_label, password, password_hash,
+      status, password_changed_at, title
+    )
+    VALUES (?, ?, ?, ?, ?, '', ?, ?, ?, ?)
+  `).run(id, username, name, role, roleLabel(role), hashPassword(newPassword), status, timestamp, title);
+  audit(database, actorId, "upsertUser", "user", id, `新增用户 ${name} / ${roleLabel(role)} / ${status === "active" ? "启用" : "停用"}`);
+}
+
 function resetUserPassword(
   database: Database.Database,
   actorId: string,
@@ -14505,6 +14671,39 @@ function updateUserStatus(
     database.prepare("UPDATE user_sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL").run(timestamp, user.id);
   }
   audit(database, actorId, "updateUserStatus", "user", user.id, `${status === "active" ? "启用" : "停用"}用户 ${user.name}`);
+}
+
+const protectedAdminPermissionActions = new Set(["upsertUser", "upsertRolePermission", "resetUserPassword", "updateUserStatus"]);
+
+function upsertRolePermission(database: Database.Database, actorId: string, rawPayload?: Record<string, unknown>) {
+  const payload = payloadObject(rawPayload);
+  const role = roleValue(payloadText(payload, "role", "角色"));
+  const action = payloadText(payload, "action", "权限动作");
+  if (!roleActionMap[action]) throw new Error("权限动作不存在。");
+  const enabled = booleanPayload(payload, "enabled", true) ? 1 : 0;
+  if (role === "admin" && protectedAdminPermissionActions.has(action) && !enabled) {
+    throw new Error("系统管理员核心权限不能关闭。");
+  }
+
+  ensureRolePermissionDefaults(database);
+  const reason = payloadText(payload, "reason", "调整原因", false);
+  const timestamp = now();
+  database.prepare(`
+    UPDATE role_permissions
+    SET enabled = ?,
+        description = ?,
+        updated_by = ?,
+        updated_at = ?
+    WHERE role = ? AND action = ?
+  `).run(enabled, reason, actorId, timestamp, role, action);
+  audit(
+    database,
+    actorId,
+    "upsertRolePermission",
+    "role_permission",
+    `${role}:${action}`,
+    `${enabled ? "启用" : "停用"}${roleLabel(role)}权限 ${actionLabels[action] ?? action}${reason ? `：${reason}` : ""}`,
+  );
 }
 
 function createFormulaCalculation(database: Database.Database, actorId: string) {

@@ -48,6 +48,21 @@ function applySchema(database: Database.Database) {
       revoked_at TEXT
     );
 
+    CREATE TABLE IF NOT EXISTS role_permissions (
+      id TEXT PRIMARY KEY,
+      role TEXT NOT NULL,
+      action TEXT NOT NULL,
+      action_label TEXT NOT NULL,
+      module_label TEXT NOT NULL,
+      risk_level TEXT NOT NULL,
+      enabled INTEGER NOT NULL DEFAULT 1,
+      description TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      updated_by TEXT REFERENCES users(id),
+      updated_at TEXT NOT NULL,
+      UNIQUE(role, action)
+    );
+
     CREATE TABLE IF NOT EXISTS customers (
       id TEXT PRIMARY KEY,
       customer_code TEXT,
@@ -3404,6 +3419,32 @@ function applyMigrations(database: Database.Database) {
         seedDefaultAlertSubscriptions(database);
       },
     },
+    {
+      id: "058_formal_role_permission_matrix",
+      description: "正式角色权限矩阵、启停状态和权限审计基础字段",
+      up: () => {
+        database.exec(`
+          CREATE TABLE IF NOT EXISTS role_permissions (
+            id TEXT PRIMARY KEY,
+            role TEXT NOT NULL,
+            action TEXT NOT NULL,
+            action_label TEXT NOT NULL,
+            module_label TEXT NOT NULL,
+            risk_level TEXT NOT NULL,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            description TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_by TEXT REFERENCES users(id),
+            updated_at TEXT NOT NULL,
+            UNIQUE(role, action)
+          );
+          CREATE INDEX IF NOT EXISTS idx_role_permissions_role_enabled
+            ON role_permissions(role, enabled);
+          CREATE INDEX IF NOT EXISTS idx_role_permissions_action
+            ON role_permissions(action, enabled);
+        `);
+      },
+    },
   ];
 
   const applied = database
@@ -3765,6 +3806,7 @@ export function resetDemoDatabase() {
     DELETE FROM suppliers;
     DELETE FROM materials;
     DELETE FROM customers;
+    DELETE FROM role_permissions;
     DELETE FROM user_sessions;
     DELETE FROM users;
   `);

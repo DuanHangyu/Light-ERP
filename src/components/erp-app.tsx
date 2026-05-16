@@ -445,6 +445,19 @@ const navItems = [
   { key: "system", label: "系统管理", title: "系统管理", subtitle: "账号登录、角色权限、密码与审计", icon: ShieldCheck },
 ] satisfies Array<{ key: ModuleKey; label: string; title: string; subtitle: string; icon: typeof ClipboardList }>;
 
+const roleOptions = [
+  { value: "sales", label: "销售员" },
+  { value: "assistant", label: "商务内勤" },
+  { value: "production", label: "生产主管" },
+  { value: "warehouse", label: "仓库管理员" },
+  { value: "purchasing", label: "采购员" },
+  { value: "quality", label: "品控员" },
+  { value: "technical", label: "技术部" },
+  { value: "manager", label: "管理层" },
+  { value: "finance", label: "财务专员" },
+  { value: "admin", label: "系统管理员" },
+];
+
 const toneClass: Record<Task["tone"], string> = {
   amber: "border-l-amber-500 bg-amber-50/70",
   green: "border-l-emerald-500 bg-emerald-50/70",
@@ -1429,6 +1442,24 @@ function SystemModule({
     current_password: "",
     new_password: "Welcome@2026",
   });
+  const [userForm, setUserForm] = useState({
+    user_id: "",
+    username: "",
+    name: "",
+    role: "sales",
+    title: "",
+    status: "active",
+    new_password: "Welcome@2026",
+  });
+  const firstPermission = snapshot.security.rolePermissions.find(
+    (item) => item.role === "purchasing" && item.action === "createPurchaseOrder",
+  ) ?? snapshot.security.rolePermissions[0];
+  const [permissionForm, setPermissionForm] = useState({
+    role: String(firstPermission?.role ?? "sales"),
+    action: String(firstPermission?.action ?? "createQuote"),
+    enabled: String(Number(firstPermission?.enabled ?? 1) > 0 ? "true" : "false"),
+    reason: "按岗位职责调整正式权限矩阵，并同步进入审计日志。",
+  });
   const firstSetting = snapshot.board.systemSettings[0];
   const [settingForm, setSettingForm] = useState({
     setting_key: String(firstSetting?.setting_key ?? "backup_frequency"),
@@ -1461,6 +1492,81 @@ function SystemModule({
   const [auditKeyword, setAuditKeyword] = useState("");
   const updatePasswordField = (key: string, value: string) =>
     setPasswordForm((current) => ({ ...current, [key]: value }));
+  const updateUserField = (key: string, value: string) =>
+    setUserForm((current) => ({ ...current, [key]: value }));
+  const selectManagedUser = (userId: string) => {
+    if (!userId) {
+      setUserForm({
+        user_id: "",
+        username: "",
+        name: "",
+        role: "sales",
+        title: "",
+        status: "active",
+        new_password: "Welcome@2026",
+      });
+      return;
+    }
+    const user = snapshot.users.find((item) => item.id === userId);
+    if (!user) return;
+    setUserForm({
+      user_id: user.id,
+      username: user.username,
+      name: user.name,
+      role: user.role,
+      title: user.title,
+      status: user.status,
+      new_password: "",
+    });
+  };
+  const saveUser = () =>
+    runAction({
+      action: "upsertUser",
+      entityId: userForm.user_id || undefined,
+      payload: {
+        username: userForm.username,
+        name: userForm.name,
+        role: userForm.role,
+        title: userForm.title,
+        status: userForm.status,
+        new_password: userForm.new_password,
+      },
+    });
+  const permissionRowsForRole = snapshot.security.rolePermissions.filter((item) => String(item.role) === permissionForm.role);
+  const selectedPermission = snapshot.security.rolePermissions.find(
+    (item) => String(item.role) === permissionForm.role && String(item.action) === permissionForm.action,
+  );
+  const updatePermissionField = (key: string, value: string) =>
+    setPermissionForm((current) => ({ ...current, [key]: value }));
+  const selectPermissionRole = (role: string) => {
+    const nextPermission = snapshot.security.rolePermissions.find((item) => String(item.role) === role);
+    setPermissionForm((current) => ({
+      ...current,
+      role,
+      action: String(nextPermission?.action ?? current.action),
+      enabled: String(Number(nextPermission?.enabled ?? 1) > 0 ? "true" : "false"),
+    }));
+  };
+  const selectPermissionAction = (action: string) => {
+    const permission = snapshot.security.rolePermissions.find(
+      (item) => String(item.role) === permissionForm.role && String(item.action) === action,
+    );
+    setPermissionForm((current) => ({
+      ...current,
+      action,
+      enabled: String(Number(permission?.enabled ?? 1) > 0 ? "true" : "false"),
+    }));
+  };
+  const savePermission = () =>
+    runAction({
+      action: "upsertRolePermission",
+      payload: {
+        role: permissionForm.role,
+        action: permissionForm.action,
+        enabled: permissionForm.enabled,
+        reason: permissionForm.reason,
+      },
+    });
   const updateSettingField = (key: string, value: string) =>
     setSettingForm((current) => ({ ...current, [key]: value }));
   const selectSetting = (settingKey: string) => {
@@ -2188,6 +2294,173 @@ function SystemModule({
           { key: "created_at", label: "红冲时间", render: shortDate },
         ]}
       />
+      <div className="grid gap-4 xl:grid-cols-2">
+        <Panel title="正式账号维护" icon={ShieldCheck} action={isAdmin ? "管理员可编辑" : "只读"}>
+          <div className="grid gap-3 md:grid-cols-2">
+            <label className="text-xs font-semibold text-slate-500">
+              选择账号
+              <select
+                value={userForm.user_id}
+                onChange={(event) => selectManagedUser(event.target.value)}
+                className="mt-1 h-9 w-full rounded-md border border-slate-200 bg-white px-3 text-sm text-slate-800"
+              >
+                <option value="">新增正式账号</option>
+                {snapshot.users.map((user) => (
+                  <option key={user.id} value={user.id}>
+                    {user.name} / {user.role_label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="text-xs font-semibold text-slate-500">
+              登录账号
+              <input
+                value={userForm.username}
+                onChange={(event) => updateUserField("username", event.target.value)}
+                disabled={!isAdmin}
+                className="mt-1 h-9 w-full rounded-md border border-slate-200 px-3 text-sm text-slate-800 disabled:bg-slate-50"
+                placeholder="例如 planner"
+              />
+            </label>
+            <label className="text-xs font-semibold text-slate-500">
+              姓名
+              <input
+                value={userForm.name}
+                onChange={(event) => updateUserField("name", event.target.value)}
+                disabled={!isAdmin}
+                className="mt-1 h-9 w-full rounded-md border border-slate-200 px-3 text-sm text-slate-800 disabled:bg-slate-50"
+                placeholder="真实姓名"
+              />
+            </label>
+            <label className="text-xs font-semibold text-slate-500">
+              角色
+              <select
+                value={userForm.role}
+                onChange={(event) => updateUserField("role", event.target.value)}
+                disabled={!isAdmin}
+                className="mt-1 h-9 w-full rounded-md border border-slate-200 bg-white px-3 text-sm text-slate-800 disabled:bg-slate-50"
+              >
+                {roleOptions.map((role) => (
+                  <option key={role.value} value={role.value}>
+                    {role.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="text-xs font-semibold text-slate-500">
+              岗位说明
+              <input
+                value={userForm.title}
+                onChange={(event) => updateUserField("title", event.target.value)}
+                disabled={!isAdmin}
+                className="mt-1 h-9 w-full rounded-md border border-slate-200 px-3 text-sm text-slate-800 disabled:bg-slate-50"
+                placeholder="岗位职责"
+              />
+            </label>
+            <label className="text-xs font-semibold text-slate-500">
+              状态
+              <select
+                value={userForm.status}
+                onChange={(event) => updateUserField("status", event.target.value)}
+                disabled={!isAdmin}
+                className="mt-1 h-9 w-full rounded-md border border-slate-200 bg-white px-3 text-sm text-slate-800 disabled:bg-slate-50"
+              >
+                <option value="active">启用</option>
+                <option value="inactive">停用</option>
+              </select>
+            </label>
+            <label className="text-xs font-semibold text-slate-500 md:col-span-2">
+              初始/重置密码
+              <input
+                value={userForm.new_password}
+                onChange={(event) => updateUserField("new_password", event.target.value)}
+                disabled={!isAdmin}
+                className="mt-1 h-9 w-full rounded-md border border-slate-200 px-3 text-sm text-slate-800 disabled:bg-slate-50"
+                placeholder="编辑已有账号时留空则不改密码"
+              />
+            </label>
+          </div>
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            <InlineActionButton
+              label={userForm.user_id ? "保存账号" : "新增账号"}
+              busy={busy === `upsertUser-${userForm.user_id || "system"}-primary`}
+              disabled={!isAdmin}
+              onClick={() => void saveUser()}
+            />
+            <InlineActionButton label="清空表单" disabled={!isAdmin} onClick={() => selectManagedUser("")} />
+            <span className="text-xs text-slate-500">新增账号默认写入密码哈希；停用账号会撤销有效会话。</span>
+          </div>
+        </Panel>
+        <Panel title="角色权限矩阵配置" icon={FileCheck2} action={isAdmin ? "实时生效" : "只读"}>
+          <div className="grid gap-3 md:grid-cols-2">
+            <label className="text-xs font-semibold text-slate-500">
+              角色
+              <select
+                value={permissionForm.role}
+                onChange={(event) => selectPermissionRole(event.target.value)}
+                disabled={!isAdmin}
+                className="mt-1 h-9 w-full rounded-md border border-slate-200 bg-white px-3 text-sm text-slate-800 disabled:bg-slate-50"
+              >
+                {roleOptions.map((role) => (
+                  <option key={role.value} value={role.value}>
+                    {role.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="text-xs font-semibold text-slate-500">
+              权限动作
+              <select
+                value={permissionForm.action}
+                onChange={(event) => selectPermissionAction(event.target.value)}
+                disabled={!isAdmin}
+                className="mt-1 h-9 w-full rounded-md border border-slate-200 bg-white px-3 text-sm text-slate-800 disabled:bg-slate-50"
+              >
+                {permissionRowsForRole.map((permission) => (
+                  <option key={`${String(permission.role)}-${String(permission.action)}`} value={String(permission.action)}>
+                    {String(permission.module_label)} / {String(permission.action_label)}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="text-xs font-semibold text-slate-500">
+              是否启用
+              <select
+                value={permissionForm.enabled}
+                onChange={(event) => updatePermissionField("enabled", event.target.value)}
+                disabled={!isAdmin}
+                className="mt-1 h-9 w-full rounded-md border border-slate-200 bg-white px-3 text-sm text-slate-800 disabled:bg-slate-50"
+              >
+                <option value="true">启用</option>
+                <option value="false">停用</option>
+              </select>
+            </label>
+            <div className="rounded-md bg-slate-50 px-3 py-2 text-xs leading-6 text-slate-600">
+              当前：{String(selectedPermission?.module_label ?? "-")} / {String(selectedPermission?.risk_level ?? "-")}风险 /{" "}
+              {String(selectedPermission?.enabled_label ?? "-")}
+            </div>
+            <label className="text-xs font-semibold text-slate-500 md:col-span-2">
+              调整原因
+              <input
+                value={permissionForm.reason}
+                onChange={(event) => updatePermissionField("reason", event.target.value)}
+                disabled={!isAdmin}
+                className="mt-1 h-9 w-full rounded-md border border-slate-200 px-3 text-sm text-slate-800 disabled:bg-slate-50"
+                placeholder="用于审计追踪"
+              />
+            </label>
+          </div>
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            <InlineActionButton
+              label="保存权限"
+              busy={busy === "upsertRolePermission-system-primary"}
+              disabled={!isAdmin}
+              onClick={() => void savePermission()}
+            />
+            <span className="text-xs text-slate-500">权限保存后立即影响服务端操作校验和当前角色待办入口。</span>
+          </div>
+        </Panel>
+      </div>
       <DataTable
         title="用户账号"
         icon={ShieldCheck}
@@ -2206,6 +2479,7 @@ function SystemModule({
             render: (_value, row) =>
               isAdmin && row.id !== snapshot.currentUser.id ? (
                 <div className="flex gap-2">
+                  <InlineActionButton label="编辑" onClick={() => selectManagedUser(String(row.id))} />
                   <InlineActionButton
                     label="重置密码"
                     busy={busy === `resetUserPassword-${String(row.id)}-primary`}
@@ -2263,7 +2537,9 @@ function SystemModule({
         columns={[
           { key: "role_label", label: "角色" },
           { key: "module_label", label: "模块" },
-          { key: "action_count", label: "权限数" },
+          { key: "action_count", label: "权限项" },
+          { key: "enabled_count", label: "启用" },
+          { key: "disabled_count", label: "停用" },
           { key: "high_risk_count", label: "高风险" },
           { key: "medium_risk_count", label: "中风险" },
           { key: "low_risk_count", label: "低风险" },
@@ -2279,7 +2555,34 @@ function SystemModule({
           { key: "module_label", label: "模块" },
           { key: "action_label", label: "权限动作" },
           { key: "action", label: "权限编码" },
+          { key: "enabled_label", label: "状态", render: (value) => <StatusBadge value={String(value)} /> },
           { key: "risk_level", label: "风险等级", render: (value) => <StatusBadge value={String(value)} /> },
+          { key: "updated_by_name", label: "最近调整人" },
+          { key: "updated_at", label: "调整时间", render: shortDate },
+          {
+            key: "permission_ops",
+            label: "操作",
+            render: (_value, row) =>
+              isAdmin ? (
+                <InlineActionButton
+                  label={Number(row.enabled ?? 0) > 0 ? "停用" : "启用"}
+                  busy={busy === "upsertRolePermission-system-primary"}
+                  onClick={() =>
+                    runAction({
+                      action: "upsertRolePermission",
+                      payload: {
+                        role: row.role,
+                        action: row.action,
+                        enabled: Number(row.enabled ?? 0) > 0 ? "false" : "true",
+                        reason: "在权限矩阵明细中快速调整岗位权限。",
+                      },
+                    })
+                  }
+                />
+              ) : (
+                <span className="text-xs text-slate-400">-</span>
+              ),
+          },
         ]}
       />
       <DataTable
