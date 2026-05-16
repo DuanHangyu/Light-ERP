@@ -7430,6 +7430,177 @@ describe("ERP service formal report center", () => {
     });
   });
 
+  it("drills cost anomalies into production approval reversal records and closes remediation", async () => {
+    const service = await loadService();
+    const { scenario, exception } = createMaterialAdjustmentReviewException(service, { costAdjustmentAmount: "650" });
+
+    receiveFinishedGoodsForCostAdjustment(service, String(scenario.production.id), "成本异常下钻测试入库。");
+    service.performAction({
+      actorId: "U-PROD",
+      action: "resolveMaterialAdjustmentReviewException",
+      entityId: String(exception.id),
+      payload: {
+        resolution_type: "cost_adjustment",
+        final_cost_adjustment_amount: "650",
+        resolution_note: "高金额补料异常进入成本异常下钻、审批和红冲链路。",
+      },
+    });
+
+    let snapshot = service.getSnapshot("U-MGR") as unknown as {
+      tasks: Array<Record<string, unknown>>;
+      board: {
+        approvalRequests: Array<Record<string, unknown>>;
+        costAnomalyDrilldowns: Array<Record<string, unknown>>;
+        costAnomalyRemediations: Array<Record<string, unknown>>;
+        costAnomalyRemediationReviews: Array<Record<string, unknown>>;
+        productionCostAdjustments: Array<Record<string, unknown>>;
+        costAnomalyAnalytics: Record<string, unknown>;
+      };
+    };
+    const adjustment = snapshot.board.productionCostAdjustments.find((item) => item.exception_id === exception.id) as Record<string, unknown>;
+    const approval = snapshot.board.approvalRequests.find(
+      (item) => item.entity_type === "production_cost_adjustment" && item.entity_id === adjustment.id,
+    ) as Record<string, unknown>;
+
+    service.performAction({
+      actorId: "U-MGR",
+      action: "approveApproval",
+      entityId: String(approval.id),
+      payload: { approval_note: "管理层确认成本异常依据充分，同意入账。" },
+    });
+    service.performAction({
+      actorId: "U-MGR",
+      action: "reverseBusinessDocument",
+      entityId: String(adjustment.id),
+      payload: {
+        document_type: "production_cost_adjustment",
+        reason: "下钻测试：成本异常依据重复，执行红冲回滚。",
+      },
+    });
+    service.performAction({
+      actorId: "U-MGR",
+      action: "createCostAnomalyRemediation",
+      entityId: String(adjustment.id),
+      payload: {
+        severity: "high",
+        owner_id: "U-PROD",
+        due_date: "2026-07-12",
+        root_cause: "补料申请与生产日报成本口径未同步，导致高金额成本调整后又红冲。",
+        corrective_action: "生产复核补退料依据、日报成本和仓库执行流水，补齐复核记录。",
+        preventive_action: "后续成本调整入账前必须同时核对补退料复核单、日报和审批附件。",
+      },
+    });
+
+    snapshot = service.getSnapshot("U-PROD") as typeof snapshot;
+    const remediation = snapshot.board.costAnomalyRemediations.find((item) => item.adjustment_id === adjustment.id) as Record<string, unknown>;
+    expect(remediation).toMatchObject({
+      remediation_no: expect.stringMatching(/^CBZG-/),
+      adjustment_id: adjustment.id,
+      adjustment_no: adjustment.adjustment_no,
+      prod_no: expect.any(String),
+      status: "pending",
+      status_label: "待整改",
+      owner_name: "生产主管-马工",
+      root_cause: expect.stringContaining("补料申请"),
+      corrective_action: expect.stringContaining("生产复核"),
+      preventive_action: expect.stringContaining("入账前"),
+    });
+    const drilldown = snapshot.board.costAnomalyDrilldowns.find((item) => item.adjustment_id === adjustment.id) as Record<string, unknown>;
+    expect(drilldown).toMatchObject({
+      adjustment_id: adjustment.id,
+      prod_no: expect.any(String),
+      production_drilldown_label: expect.stringContaining("生产工单"),
+      approval_request_no: approval.request_no,
+      approval_status_label: "已同意",
+      reversal_no: expect.stringMatching(/^CX-/),
+      reversal_status_label: "已冲销",
+      remediation_no: remediation.remediation_no,
+      remediation_status_label: "待整改",
+      drilldown_stage_label: "已生成整改",
+    });
+    expect(snapshot.tasks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          title: expect.stringContaining("成本异常整改"),
+          action: "markCostAnomalyRemediationReady",
+          entityId: remediation.id,
+        }),
+      ]),
+    );
+
+    service.performAction({
+      actorId: "U-PROD",
+      action: "markCostAnomalyRemediationReady",
+      entityId: String(remediation.id),
+      payload: { result_note: "已补齐成本依据并完成生产复盘，提交管理层复核。" },
+    });
+    snapshot = service.getSnapshot("U-MGR") as typeof snapshot;
+    expect(snapshot.board.costAnomalyRemediations.find((item) => item.id === remediation.id)).toMatchObject({
+      status: "ready_for_review",
+      status_label: "待复核",
+      submitted_by_name: "生产主管-马工",
+    });
+    expect(snapshot.tasks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          title: expect.stringContaining("复核成本异常整改"),
+          action: "closeCostAnomalyRemediation",
+          entityId: remediation.id,
+        }),
+      ]),
+    );
+
+    service.performAction({
+      actorId: "U-MGR",
+      action: "rejectCostAnomalyRemediationReview",
+      entityId: String(remediation.id),
+      payload: { review_note: "复核附件不足，请补充仓库执行流水截图和审批依据。" },
+    });
+    snapshot = service.getSnapshot("U-PROD") as typeof snapshot;
+    expect(snapshot.board.costAnomalyRemediations.find((item) => item.id === remediation.id)).toMatchObject({
+      status: "rejected",
+      status_label: "复核驳回",
+      latest_review_note: expect.stringContaining("复核附件不足"),
+    });
+
+    service.performAction({
+      actorId: "U-PROD",
+      action: "markCostAnomalyRemediationReady",
+      entityId: String(remediation.id),
+      payload: { result_note: "已补充仓库执行流水截图、审批依据和责任复盘记录。" },
+    });
+    service.performAction({
+      actorId: "U-MGR",
+      action: "closeCostAnomalyRemediation",
+      entityId: String(remediation.id),
+      payload: { result_note: "整改资料完整，成本异常闭环。" },
+    });
+
+    snapshot = service.getSnapshot("U-MGR") as typeof snapshot;
+    expect(snapshot.board.costAnomalyRemediations.find((item) => item.id === remediation.id)).toMatchObject({
+      status: "closed",
+      status_label: "已关闭",
+      closed_by_name: "管理层-王总",
+      result_note: "整改资料完整，成本异常闭环。",
+    });
+    expect(snapshot.board.costAnomalyRemediationReviews).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ remediation_id: remediation.id, decision: "submitted", decision_label: "提交复核" }),
+        expect.objectContaining({ remediation_id: remediation.id, decision: "rejected", decision_label: "复核驳回" }),
+        expect.objectContaining({ remediation_id: remediation.id, decision: "approved", decision_label: "复核通过" }),
+      ]),
+    );
+    expect(snapshot.board.costAnomalyDrilldowns.find((item) => item.adjustment_id === adjustment.id)).toMatchObject({
+      remediation_status_label: "已关闭",
+      drilldown_stage_label: "整改闭环",
+    });
+    expect(snapshot.board.costAnomalyAnalytics.totals).toMatchObject({
+      remediation_count: 1,
+      remediation_closed_count: 1,
+      remediation_open_count: 0,
+    });
+  });
+
   it("applies formal report query filters to reconciliation and inventory exports", async () => {
     const service = await loadService();
 
