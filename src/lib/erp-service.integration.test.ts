@@ -6971,6 +6971,150 @@ describe("ERP service production plan lock approval and change notifications", (
       }),
     ).toThrow("该单据已冲销");
   });
+
+  it("matches detailed material and scenario rules for production cost adjustment approvals", async () => {
+    const service = await loadService();
+
+    service.performAction({
+      actorId: "U-ADMIN",
+      action: "upsertApprovalRule",
+      payload: {
+        rule_name: "主材补料高额成本调整财务审批",
+        source_type: "production_cost_adjustment",
+        min_amount: "300",
+        max_amount: "1000",
+        approver_role: "finance",
+        sla_hours: "8",
+        condition_scope: "material_and_adjustment_type",
+        material_id: "M-STEEL",
+        adjustment_type: "supplement",
+        risk_level: "high",
+        allow_reversal: "false",
+        reversal_approver_role: "manager",
+        description: "42CrMo 主材补料形成的高额成本调整，必须由财务复核；入账后不允许直接红冲。",
+      },
+    });
+
+    const ruleSnapshot = service.getSnapshot("U-ADMIN") as unknown as {
+      board: { approvalRules: Array<Record<string, unknown>> };
+    };
+    const rule = ruleSnapshot.board.approvalRules.find((item) => item.rule_name === "主材补料高额成本调整财务审批");
+    expect(rule).toMatchObject({
+      source_type: "production_cost_adjustment",
+      source_type_label: "工单成本调整",
+      min_amount: 300,
+      max_amount: 1000,
+      approver_role: "finance",
+      approver_role_label: "财务专员",
+      condition_scope: "material_and_adjustment_type",
+      material_id: "M-STEEL",
+      material_name: "42CrMo 圆钢",
+      adjustment_type: "supplement",
+      adjustment_type_label: "补料",
+      condition_summary: "42CrMo 圆钢 / 补料",
+      risk_level: "high",
+      risk_level_label: "高风险",
+      allow_reversal: 0,
+      reversal_approver_role: "manager",
+      reversal_approver_role_label: "管理层",
+      reversal_rule_summary: "禁止直接红冲，需管理层复核",
+    });
+
+    const { scenario, exception } = createMaterialAdjustmentReviewException(service, { costAdjustmentAmount: "800" });
+    service.performAction({ actorId: "U-PROD", action: "requestInspection", entityId: String(scenario.production.id) });
+    const inspection = service.getSnapshot("U-QA").board.inspections.find(
+      (item) => item.production_order_id === scenario.production.id,
+    ) as Record<string, unknown>;
+    service.performAction({
+      actorId: "U-QA",
+      action: "completeInspection",
+      entityId: String(inspection.id),
+      payload: {
+        result: "qualified",
+        actual_qty: "9.5",
+        measured_data: "主材补料成本调整规则匹配测试，检验合格。",
+      },
+    });
+    service.performAction({
+      actorId: "U-WH",
+      action: "receiveFinishedGoods",
+      entityId: String(scenario.production.id),
+      payload: { inbound_date: "2026-07-05", inbound_note: "触发主材补料成本调整审批规则。" },
+    });
+    service.performAction({
+      actorId: "U-PROD",
+      action: "resolveMaterialAdjustmentReviewException",
+      entityId: String(exception.id),
+      payload: {
+        resolution_type: "cost_adjustment",
+        final_cost_adjustment_amount: "800",
+        resolution_note: "主材补料异常按规则提交财务审批。",
+      },
+    });
+
+    const pendingSnapshot = service.getSnapshot("U-FIN") as unknown as {
+      board: {
+        approvalRequests: Array<Record<string, unknown>>;
+        approvalCenter: Array<Record<string, unknown>>;
+        productionCostAdjustments: Array<Record<string, unknown>>;
+      };
+    };
+    const adjustment = pendingSnapshot.board.productionCostAdjustments.find((item) => item.exception_id === exception.id) as Record<string, unknown>;
+    const approval = pendingSnapshot.board.approvalRequests.find(
+      (item) => item.entity_type === "production_cost_adjustment" && item.entity_id === adjustment.id,
+    ) as Record<string, unknown>;
+    const centerRow = pendingSnapshot.board.approvalCenter.find((item) => item.entity_id === approval.id) as Record<string, unknown>;
+
+    expect(approval).toMatchObject({
+      rule_id: rule?.id,
+      rule_name: "主材补料高额成本调整财务审批",
+      approver_role: "finance",
+      sla_hours: 8,
+      status: "pending",
+    });
+    expect(centerRow).toMatchObject({
+      rule_name: "主材补料高额成本调整财务审批",
+      approver_role: "finance",
+      approver_role_label: "财务专员",
+      risk_level: "high",
+      sla_hours: 8,
+      approve_action: "approveApproval",
+    });
+    expect(() =>
+      service.performAction({
+        actorId: "U-MGR",
+        action: "approveApproval",
+        entityId: String(approval.id),
+        payload: { approval_note: "管理层尝试代批。" },
+      }),
+    ).toThrow("不是该审批规则指定的审批角色");
+
+    service.performAction({
+      actorId: "U-FIN",
+      action: "approveApproval",
+      entityId: String(approval.id),
+      payload: { approval_note: "财务复核主材补料成本调整依据充分，同意入账。" },
+    });
+    const approvedAdjustment = (service.getSnapshot("U-FIN") as unknown as {
+      board: { productionCostAdjustments: Array<Record<string, unknown>> };
+    }).board.productionCostAdjustments.find((item) => item.id === adjustment.id) as Record<string, unknown>;
+    expect(approvedAdjustment).toMatchObject({
+      status: "applied",
+      approval_status: "approved",
+      applied_by_name: "财务专员-周敏",
+    });
+    expect(() =>
+      service.performAction({
+        actorId: "U-MGR",
+        action: "reverseBusinessDocument",
+        entityId: String(approvedAdjustment.id),
+        payload: {
+          document_type: "production_cost_adjustment",
+          reason: "规则禁止直接红冲时的拦截测试。",
+        },
+      }),
+    ).toThrow("当前成本调整审批规则不允许直接红冲");
+  });
 });
 
 describe("ERP service formal report center", () => {
