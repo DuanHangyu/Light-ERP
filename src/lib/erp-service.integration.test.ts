@@ -1060,6 +1060,33 @@ function createMaterialAdjustmentReviewException(
   return { scenario, warehouseImpact, suggestion, adjustmentOrder: order, exception };
 }
 
+function receiveFinishedGoodsForCostAdjustment(
+  service: Awaited<ReturnType<typeof loadService>>,
+  productionId: string,
+  note = "成本异常分析测试入库。",
+) {
+  service.performAction({ actorId: "U-PROD", action: "requestInspection", entityId: productionId });
+  const inspection = service.getSnapshot("U-QA").board.inspections.find(
+    (item) => item.production_order_id === productionId,
+  ) as Record<string, unknown>;
+  service.performAction({
+    actorId: "U-QA",
+    action: "completeInspection",
+    entityId: String(inspection.id),
+    payload: {
+      result: "qualified",
+      actual_qty: "9.5",
+      measured_data: "成本异常分析测试，检验合格。",
+    },
+  });
+  service.performAction({
+    actorId: "U-WH",
+    action: "receiveFinishedGoods",
+    entityId: productionId,
+    payload: { inbound_date: "2026-07-05", inbound_note: note },
+  });
+}
+
 describe("ERP service document attachment archive", () => {
   it("stores evidence files on the local data disk, records metadata, and includes them in cold backups", async () => {
     const service = await loadService();
@@ -7225,6 +7252,181 @@ describe("ERP service formal report center", () => {
       report_title: "质量异常分析报表",
       quality_failed_count: 1,
       quality_closure_rate: 0,
+    });
+  });
+
+  it("exports a cost anomaly analysis report with approval rejection and red-offset metrics", async () => {
+    const service = await loadService();
+
+    service.performAction({
+      actorId: "U-ADMIN",
+      action: "upsertApprovalRule",
+      payload: {
+        rule_name: "主材补料高额成本调整财务审批",
+        source_type: "production_cost_adjustment",
+        min_amount: "300",
+        max_amount: "1000",
+        approver_role: "finance",
+        sla_hours: "8",
+        condition_scope: "material_and_adjustment_type",
+        material_id: "M-STEEL",
+        adjustment_type: "supplement",
+        risk_level: "high",
+        allow_reversal: "false",
+        reversal_approver_role: "manager",
+        description: "主材补料高额成本调整必须财务审批，且禁止直接红冲。",
+      },
+    });
+
+    const blocked = createMaterialAdjustmentReviewException(service, { costAdjustmentAmount: "800" });
+    receiveFinishedGoodsForCostAdjustment(service, String(blocked.scenario.production.id), "触发禁止直接红冲的成本调整。");
+    service.performAction({
+      actorId: "U-PROD",
+      action: "resolveMaterialAdjustmentReviewException",
+      entityId: String(blocked.exception.id),
+      payload: {
+        resolution_type: "cost_adjustment",
+        final_cost_adjustment_amount: "800",
+        resolution_note: "主材补料成本异常，提交财务审批。",
+      },
+    });
+    let snapshot = service.getSnapshot("U-FIN") as unknown as {
+      board: { approvalRequests: Array<Record<string, unknown>>; productionCostAdjustments: Array<Record<string, unknown>> };
+    };
+    let adjustment = snapshot.board.productionCostAdjustments.find((item) => item.exception_id === blocked.exception.id) as Record<string, unknown>;
+    let approval = snapshot.board.approvalRequests.find(
+      (item) => item.entity_type === "production_cost_adjustment" && item.entity_id === adjustment.id,
+    ) as Record<string, unknown>;
+    service.performAction({
+      actorId: "U-FIN",
+      action: "approveApproval",
+      entityId: String(approval.id),
+      payload: { approval_note: "财务确认主材补料成本异常，允许入账。" },
+    });
+    adjustment = (service.getSnapshot("U-FIN") as unknown as {
+      board: { productionCostAdjustments: Array<Record<string, unknown>> };
+    }).board.productionCostAdjustments.find((item) => item.exception_id === blocked.exception.id) as Record<string, unknown>;
+    expect(() =>
+      service.performAction({
+        actorId: "U-MGR",
+        action: "reverseBusinessDocument",
+        entityId: String(adjustment.id),
+        payload: {
+          document_type: "production_cost_adjustment",
+          reason: "成本异常分析测试：规则禁止直接红冲。",
+        },
+      }),
+    ).toThrow("当前成本调整审批规则不允许直接红冲");
+
+    const rejected = createMaterialAdjustmentReviewException(service, { costAdjustmentAmount: "700" });
+    receiveFinishedGoodsForCostAdjustment(service, String(rejected.scenario.production.id), "触发审批驳回的成本调整。");
+    service.performAction({
+      actorId: "U-PROD",
+      action: "resolveMaterialAdjustmentReviewException",
+      entityId: String(rejected.exception.id),
+      payload: {
+        resolution_type: "cost_adjustment",
+        final_cost_adjustment_amount: "700",
+        resolution_note: "主材补料成本异常，待财务复核。",
+      },
+    });
+    snapshot = service.getSnapshot("U-FIN") as unknown as {
+      board: { approvalRequests: Array<Record<string, unknown>>; productionCostAdjustments: Array<Record<string, unknown>> };
+    };
+    adjustment = snapshot.board.productionCostAdjustments.find((item) => item.exception_id === rejected.exception.id) as Record<string, unknown>;
+    approval = snapshot.board.approvalRequests.find(
+      (item) => item.entity_type === "production_cost_adjustment" && item.entity_id === adjustment.id,
+    ) as Record<string, unknown>;
+    service.performAction({
+      actorId: "U-FIN",
+      action: "rejectApproval",
+      entityId: String(approval.id),
+      payload: { approval_note: "附件依据不足，驳回成本调整。" },
+    });
+
+    const reversed = createMaterialAdjustmentReviewException(service, { costAdjustmentAmount: "10.5" });
+    receiveFinishedGoodsForCostAdjustment(service, String(reversed.scenario.production.id), "触发红冲成功的成本调整。");
+    service.performAction({
+      actorId: "U-PROD",
+      action: "resolveMaterialAdjustmentReviewException",
+      entityId: String(reversed.exception.id),
+      payload: {
+        resolution_type: "cost_adjustment",
+        final_cost_adjustment_amount: "10.5",
+        resolution_note: "小额补料成本异常，生产确认后直接入账。",
+      },
+    });
+    const reversibleAdjustment = (service.getSnapshot("U-MGR") as unknown as {
+      board: { productionCostAdjustments: Array<Record<string, unknown>> };
+    }).board.productionCostAdjustments.find((item) => item.exception_id === reversed.exception.id) as Record<string, unknown>;
+    service.performAction({
+      actorId: "U-MGR",
+      action: "reverseBusinessDocument",
+      entityId: String(reversibleAdjustment.id),
+      payload: {
+        document_type: "production_cost_adjustment",
+        reason: "成本异常分析测试：小额成本调整依据重复，红冲回滚。",
+      },
+    });
+
+    const result = await service.buildExport({
+      actorId: "U-MGR",
+      type: "cost-anomaly-analysis" as any,
+      format: "xlsx",
+    });
+    const xml = xlsxXml(result.buffer);
+
+    expect(result.fileName).toContain("cost-anomaly-analysis");
+    expect(xml).toContain('name="cost_anomaly_summary"');
+    expect(xml).toContain('name="cost_anomaly_detail"');
+    expect(xml).toContain('name="cost_anomaly_reason"');
+    expect(xml).toContain('name="cost_anomaly_material"');
+    expect(xml).toContain("成本异常分析报表");
+    expect(xml).toContain("审批驳回");
+    expect(xml).toContain("已红冲");
+    expect(xml).toContain("禁止直接红冲");
+    expect(xml).toContain("主材补料高额成本调整财务审批");
+
+    const managerSnapshot = service.getSnapshot("U-MGR") as unknown as {
+      board: {
+        costAnomalyAnalytics: Record<string, unknown>;
+        reportSnapshots: Array<Record<string, unknown>>;
+      };
+    };
+    const analytics = managerSnapshot.board.costAnomalyAnalytics;
+    expect(analytics.totals).toMatchObject({
+      total_count: 3,
+      rejected_count: 1,
+      reversed_count: 1,
+      red_offset_blocked_count: 1,
+      total_adjustment_amount: 1510.5,
+    });
+    expect(analytics.byReason).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          reason_type_label: "成本差异",
+          count: 3,
+          rejected_count: 1,
+          reversed_count: 1,
+        }),
+      ]),
+    );
+    expect(analytics.byMaterial).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          material_id: "M-STEEL",
+          material_name: "42CrMo 圆钢",
+          count: 3,
+        }),
+      ]),
+    );
+    expect(managerSnapshot.board.reportSnapshots[0]).toMatchObject({
+      type: "cost_anomaly_analysis",
+      report_title: "成本异常分析报表",
+      cost_anomaly_total_count: 3,
+      cost_anomaly_rejected_count: 1,
+      cost_anomaly_reversed_count: 1,
+      cost_anomaly_red_offset_blocked_count: 1,
     });
   });
 
