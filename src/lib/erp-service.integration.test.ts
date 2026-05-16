@@ -7601,6 +7601,210 @@ describe("ERP service formal report center", () => {
     });
   });
 
+  it("configures cost anomaly warning rules and automatically creates remediation tasks", async () => {
+    const service = await loadService();
+
+    let snapshot = service.getSnapshot("U-ADMIN") as unknown as {
+      board: {
+        costAnomalyWarningRules: Array<Record<string, unknown>>;
+        costAnomalyWarningEvents: Array<Record<string, unknown>>;
+        costAnomalyRemediations: Array<Record<string, unknown>>;
+        productionCostAdjustments: Array<Record<string, unknown>>;
+      };
+    };
+    expect(snapshot.board.costAnomalyWarningRules).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          rule_code: "COST-AMOUNT-HIGH",
+          metric_key: "single_adjustment_amount",
+          metric_label: "单笔调整金额",
+          status_label: "停用",
+        }),
+        expect.objectContaining({
+          rule_code: "COST-MATERIAL-FREQUENT",
+          metric_key: "material_anomaly_count",
+          window_days: 30,
+        }),
+        expect.objectContaining({
+          rule_code: "COST-WORKORDER-REVERSAL",
+          metric_key: "work_order_reversal_count",
+        }),
+      ]),
+    );
+
+    const amountRule = snapshot.board.costAnomalyWarningRules.find((item) => item.rule_code === "COST-AMOUNT-HIGH") as Record<string, unknown>;
+    const materialRule = snapshot.board.costAnomalyWarningRules.find((item) => item.rule_code === "COST-MATERIAL-FREQUENT") as Record<string, unknown>;
+    const reversalRule = snapshot.board.costAnomalyWarningRules.find((item) => item.rule_code === "COST-WORKORDER-REVERSAL") as Record<string, unknown>;
+
+    service.performAction({
+      actorId: "U-ADMIN",
+      action: "upsertCostAnomalyWarningRule",
+      entityId: String(amountRule.id),
+      payload: {
+        rule_code: "COST-AMOUNT-HIGH",
+        rule_name: "单笔成本异常超额预警",
+        metric_key: "single_adjustment_amount",
+        operator: "gte",
+        threshold_value: "300",
+        window_days: "0",
+        severity: "high",
+        owner_id: "U-PROD",
+        auto_create_remediation: "true",
+        priority: "90",
+        status: "active",
+        description: "单笔工单成本调整金额达到 300 元时自动生成整改任务。",
+      },
+    });
+
+    const high = createMaterialAdjustmentReviewException(service, { costAdjustmentAmount: "650" });
+    receiveFinishedGoodsForCostAdjustment(service, String(high.scenario.production.id), "成本预警规则金额阈值测试。");
+    service.performAction({
+      actorId: "U-PROD",
+      action: "resolveMaterialAdjustmentReviewException",
+      entityId: String(high.exception.id),
+      payload: {
+        resolution_type: "cost_adjustment",
+        final_cost_adjustment_amount: "650",
+        resolution_note: "单笔成本异常金额达到预警阈值。",
+      },
+    });
+
+    snapshot = service.getSnapshot("U-MGR") as typeof snapshot;
+    const highAdjustment = snapshot.board.productionCostAdjustments.find((item) => item.exception_id === high.exception.id) as Record<string, unknown>;
+    expect(snapshot.board.costAnomalyWarningEvents).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          rule_code: "COST-AMOUNT-HIGH",
+          metric_key: "single_adjustment_amount",
+          actual_value: 650,
+          adjustment_id: highAdjustment.id,
+          event_status_label: "已生成整改",
+          remediation_no: expect.stringMatching(/^CBZG-/),
+        }),
+      ]),
+    );
+    expect(snapshot.board.costAnomalyRemediations).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          adjustment_id: highAdjustment.id,
+          status: "pending",
+          severity: "high",
+          owner_name: "生产主管-马工",
+          root_cause: expect.stringContaining("单笔成本异常超额预警"),
+          corrective_action: expect.stringContaining("复核生产工单"),
+        }),
+      ]),
+    );
+
+    service.performAction({
+      actorId: "U-ADMIN",
+      action: "upsertCostAnomalyWarningRule",
+      entityId: String(materialRule.id),
+      payload: {
+        rule_code: "COST-MATERIAL-FREQUENT",
+        rule_name: "同物料连续成本异常预警",
+        metric_key: "material_anomaly_count",
+        operator: "gte",
+        threshold_value: "2",
+        window_days: "30",
+        severity: "medium",
+        owner_id: "U-PROD",
+        auto_create_remediation: "true",
+        priority: "80",
+        status: "active",
+        description: "同一物料 30 天内连续发生成本异常时自动生成整改任务。",
+      },
+    });
+    const frequent = createMaterialAdjustmentReviewException(service, { costAdjustmentAmount: "12.5" });
+    receiveFinishedGoodsForCostAdjustment(service, String(frequent.scenario.production.id), "成本预警规则物料连续异常测试。");
+    service.performAction({
+      actorId: "U-PROD",
+      action: "resolveMaterialAdjustmentReviewException",
+      entityId: String(frequent.exception.id),
+      payload: {
+        resolution_type: "cost_adjustment",
+        final_cost_adjustment_amount: "12.5",
+        resolution_note: "同物料成本异常次数达到预警阈值。",
+      },
+    });
+    snapshot = service.getSnapshot("U-MGR") as typeof snapshot;
+    expect(snapshot.board.costAnomalyWarningEvents).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          rule_code: "COST-MATERIAL-FREQUENT",
+          metric_key: "material_anomaly_count",
+          material_id: "M-STEEL",
+          actual_value: expect.any(Number),
+          event_status_label: "已生成整改",
+        }),
+      ]),
+    );
+
+    service.performAction({
+      actorId: "U-ADMIN",
+      action: "upsertCostAnomalyWarningRule",
+      entityId: String(reversalRule.id),
+      payload: {
+        rule_code: "COST-WORKORDER-REVERSAL",
+        rule_name: "同工单多次红冲预警",
+        metric_key: "work_order_reversal_count",
+        operator: "gte",
+        threshold_value: "1",
+        window_days: "90",
+        severity: "critical",
+        owner_id: "U-PROD",
+        auto_create_remediation: "true",
+        priority: "100",
+        status: "active",
+        description: "同一生产工单发生成本红冲时自动生成整改任务，正式上线后可调整为多次红冲阈值。",
+      },
+    });
+    const reversible = createMaterialAdjustmentReviewException(service, { costAdjustmentAmount: "8.5" });
+    receiveFinishedGoodsForCostAdjustment(service, String(reversible.scenario.production.id), "成本预警规则红冲测试。");
+    service.performAction({
+      actorId: "U-PROD",
+      action: "resolveMaterialAdjustmentReviewException",
+      entityId: String(reversible.exception.id),
+      payload: {
+        resolution_type: "cost_adjustment",
+        final_cost_adjustment_amount: "8.5",
+        resolution_note: "小额成本异常先入账，后续通过红冲触发预警。",
+      },
+    });
+    const reversibleAdjustment = (service.getSnapshot("U-MGR") as typeof snapshot).board.productionCostAdjustments.find(
+      (item) => item.exception_id === reversible.exception.id,
+    ) as Record<string, unknown>;
+    service.performAction({
+      actorId: "U-MGR",
+      action: "reverseBusinessDocument",
+      entityId: String(reversibleAdjustment.id),
+      payload: {
+        document_type: "production_cost_adjustment",
+        reason: "成本异常预警规则测试：红冲触发工单整改。",
+      },
+    });
+
+    snapshot = service.getSnapshot("U-ADMIN") as typeof snapshot;
+    expect(snapshot.board.costAnomalyWarningRules.find((item) => item.rule_code === "COST-WORKORDER-REVERSAL")).toMatchObject({
+      status: "active",
+      status_label: "启用",
+      metric_label: "同工单红冲次数",
+      auto_create_remediation_label: "自动生成整改",
+    });
+    expect(snapshot.board.costAnomalyWarningEvents).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          rule_code: "COST-WORKORDER-REVERSAL",
+          metric_key: "work_order_reversal_count",
+          adjustment_id: reversibleAdjustment.id,
+          production_order_id: reversible.scenario.production.id,
+          actual_value: 1,
+          event_status_label: "已生成整改",
+        }),
+      ]),
+    );
+  });
+
   it("applies formal report query filters to reconciliation and inventory exports", async () => {
     const service = await loadService();
 
