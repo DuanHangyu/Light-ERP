@@ -78,6 +78,8 @@ type ReportPreviewInput = {
     costAnomalyRejectedCount?: number;
     costAnomalyReversedCount?: number;
     costAnomalyRedOffsetBlockedCount?: number;
+    costAnomalyRemediationOpenCount?: number;
+    costAnomalyRemediationClosedCount?: number;
     costAnomalyTotalAmount?: number;
   };
   rows: {
@@ -244,6 +246,9 @@ function costAnomalyKpis(input: ReportPreviewInput) {
     input.summary.costAnomalyReversedCount ?? rows.filter((row) => String(row.status ?? "") === "reversed").length;
   const blockedCount =
     input.summary.costAnomalyRedOffsetBlockedCount ?? rows.filter((row) => Number(row.red_offset_blocked_flag ?? 0) === 1).length;
+  const openRemediationCount =
+    input.summary.costAnomalyRemediationOpenCount ??
+    rows.filter((row) => row.remediation_id && String(row.remediation_status ?? "") !== "closed").length;
   const totalAmount =
     input.summary.costAnomalyTotalAmount ?? rows.reduce((sum, row) => sum + Math.abs(Number(row.adjustment_amount ?? 0)), 0);
   return [
@@ -251,6 +256,7 @@ function costAnomalyKpis(input: ReportPreviewInput) {
     { label: "审批驳回", value: text(rejectedCount, "0") },
     { label: "红冲成功", value: text(reversedCount, "0") },
     { label: "禁止红冲", value: text(blockedCount, "0") },
+    { label: "整改未闭环", value: text(openRemediationCount, "0") },
     { label: "异常金额", value: moneyText(totalAmount) },
   ];
 }
@@ -409,6 +415,10 @@ function costAnomalyRows(rows: Row[]) {
     ruleName: text(row.rule_name),
     redOffsetControl: text(row.red_offset_control_status),
     reversalNo: text(row.reversal_no, ""),
+    approvalRecord: text(row.approval_drilldown_label, "未触发审批"),
+    remediationNo: text(row.remediation_no, ""),
+    remediationStatus: text(row.remediation_status_label, "未生成"),
+    drilldownStage: text(row.drilldown_stage_label, ""),
     ownerRole: text(row.owner_role_label, ""),
     createdAt: dateText(row.created_at),
   }));
@@ -592,6 +602,9 @@ function costAnomalyColumns() {
     { key: "adjustmentAmount", label: "调整金额" },
     { key: "ruleName", label: "审批规则" },
     { key: "redOffsetControl", label: "红冲控制" },
+    { key: "approvalRecord", label: "审批记录" },
+    { key: "reversalNo", label: "红冲单" },
+    { key: "remediationStatus", label: "整改状态" },
   ];
 }
 

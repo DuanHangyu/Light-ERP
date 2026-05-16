@@ -3284,6 +3284,58 @@ function applyMigrations(database: Database.Database) {
         `);
       },
     },
+    {
+      id: "055_cost_anomaly_remediation_loop",
+      description: "成本异常下钻整改任务、复核与闭环记录",
+      up: () => {
+        database.exec(`
+          CREATE TABLE IF NOT EXISTS production_cost_anomaly_remediations (
+            id TEXT PRIMARY KEY,
+            remediation_no TEXT NOT NULL UNIQUE,
+            adjustment_id TEXT NOT NULL REFERENCES production_cost_adjustments(id),
+            production_order_id TEXT NOT NULL REFERENCES production_orders(id),
+            order_id TEXT NOT NULL REFERENCES orders(id),
+            exception_id TEXT REFERENCES production_material_adjustment_review_exceptions(id),
+            severity TEXT NOT NULL DEFAULT 'medium',
+            root_cause TEXT NOT NULL DEFAULT '',
+            corrective_action TEXT NOT NULL DEFAULT '',
+            preventive_action TEXT NOT NULL DEFAULT '',
+            owner_id TEXT NOT NULL REFERENCES users(id),
+            due_date TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL,
+            result_note TEXT NOT NULL DEFAULT '',
+            review_note TEXT NOT NULL DEFAULT '',
+            source_snapshot_json TEXT NOT NULL DEFAULT '{}',
+            created_by TEXT NOT NULL REFERENCES users(id),
+            created_at TEXT NOT NULL,
+            submitted_by TEXT REFERENCES users(id),
+            submitted_at TEXT,
+            closed_by TEXT REFERENCES users(id),
+            closed_at TEXT
+          );
+          CREATE UNIQUE INDEX IF NOT EXISTS ux_cost_anomaly_remediations_adjustment
+            ON production_cost_anomaly_remediations(adjustment_id);
+          CREATE INDEX IF NOT EXISTS idx_cost_anomaly_remediations_status_owner
+            ON production_cost_anomaly_remediations(status, owner_id, due_date);
+          CREATE INDEX IF NOT EXISTS idx_cost_anomaly_remediations_created
+            ON production_cost_anomaly_remediations(created_at);
+
+          CREATE TABLE IF NOT EXISTS production_cost_anomaly_remediation_reviews (
+            id TEXT PRIMARY KEY,
+            remediation_id TEXT NOT NULL REFERENCES production_cost_anomaly_remediations(id),
+            remediation_no TEXT NOT NULL,
+            decision TEXT NOT NULL,
+            review_note TEXT NOT NULL DEFAULT '',
+            reviewer_id TEXT NOT NULL REFERENCES users(id),
+            reviewed_at TEXT NOT NULL
+          );
+          CREATE INDEX IF NOT EXISTS idx_cost_anomaly_remediation_reviews_remediation
+            ON production_cost_anomaly_remediation_reviews(remediation_id, reviewed_at);
+          CREATE INDEX IF NOT EXISTS idx_cost_anomaly_remediation_reviews_decision
+            ON production_cost_anomaly_remediation_reviews(decision, reviewed_at);
+        `);
+      },
+    },
   ];
 
   const applied = database
@@ -3317,6 +3369,7 @@ function backfillDocumentSequences(database: Database.Database) {
     { table: "finished_goods_receipts", column: "receipt_no", prefix: "RK" },
     { table: "production_cost_summaries", column: "cost_no", prefix: "CB" },
     { table: "production_cost_adjustments", column: "adjustment_no", prefix: "CBTZ" },
+    { table: "production_cost_anomaly_remediations", column: "remediation_no", prefix: "CBZG" },
     { table: "shipments", column: "shipment_no", prefix: "FH" },
     { table: "receivables", column: "receivable_no", prefix: "YS" },
     { table: "purchase_orders", column: "purchase_no", prefix: "CG" },
@@ -3599,6 +3652,8 @@ export function resetDemoDatabase() {
     DELETE FROM finished_shipment_allocations;
     DELETE FROM shipments;
     DELETE FROM finished_batches;
+    DELETE FROM production_cost_anomaly_remediation_reviews;
+    DELETE FROM production_cost_anomaly_remediations;
     DELETE FROM production_cost_adjustments;
     DELETE FROM production_cost_summaries;
     DELETE FROM finished_goods_receipts;

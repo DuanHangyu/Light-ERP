@@ -208,6 +208,9 @@ type Snapshot = {
       byResponsibility?: Row[];
       detail?: Row[];
     };
+    costAnomalyDrilldowns: Row[];
+    costAnomalyRemediations: Row[];
+    costAnomalyRemediationReviews: Row[];
     materials: Row[];
     batches: Row[];
     inventoryAging: Row[];
@@ -1100,7 +1103,7 @@ export function ErpApp() {
               />
             ) : null}
             {activeModule === "reports" ? (
-              <ReportsModule snapshot={snapshot} actorId={actorId} openDetail={setDetail} />
+              <ReportsModule snapshot={snapshot} actorId={actorId} busy={busy} runAction={runAction} openDetail={setDetail} />
             ) : null}
             {activeModule === "approval" ? (
               <ApprovalFormulaModule
@@ -9362,10 +9365,14 @@ const reportCards = [
 function ReportsModule({
   snapshot,
   actorId,
+  busy,
+  runAction,
   openDetail,
 }: {
   snapshot: Snapshot;
   actorId: string;
+  busy: string | null;
+  runAction: (task: ActionRequest) => void | Promise<void>;
   openDetail: (detail: DetailState) => void;
 }) {
   const reportExports = snapshot.board.documentExports.filter((row) => String(row.entity_type) === "report");
@@ -9384,6 +9391,10 @@ function ReportsModule({
   const setFilter = (key: keyof ReportFilterState, value: string) =>
     setFilters((current) => ({ ...current, [key]: value }));
   const downloadReport = (type: string) => downloadExport(actorId, type, undefined, "xlsx", filters);
+  const canCreateCostAnomalyRemediation = snapshot.security.currentPermissions.includes("createCostAnomalyRemediation");
+  const canSubmitCostAnomalyRemediation = snapshot.security.currentPermissions.includes("markCostAnomalyRemediationReady");
+  const canCloseCostAnomalyRemediation = snapshot.security.currentPermissions.includes("closeCostAnomalyRemediation");
+  const canRejectCostAnomalyRemediation = snapshot.security.currentPermissions.includes("rejectCostAnomalyRemediationReview");
   const previewReport = (type: ReportPreviewType) => {
     setReportPreview(
       buildReportPreview({
@@ -9620,6 +9631,148 @@ function ReportsModule({
           action={{ label: "积压报表", onClick: () => downloadReport("inventory-overstock") }}
         />
       </div>
+      <DataTable
+        title="成本异常下钻明细"
+        icon={Search}
+        rows={snapshot.board.costAnomalyDrilldowns}
+        empty="暂无成本异常下钻记录"
+        columns={[
+          { key: "adjustment_no", label: "调整单号" },
+          { key: "prod_no", label: "生产工单" },
+          { key: "order_no", label: "客户订单" },
+          { key: "customer_name", label: "客户" },
+          { key: "adjustment_amount", label: "异常金额", render: formatCurrency },
+          { key: "anomaly_status_label", label: "异常状态", render: (value) => <StatusBadge value={String(value)} /> },
+          { key: "approval_request_no", label: "审批单" },
+          { key: "approval_status_label", label: "审批状态", render: (value) => (value ? <StatusBadge value={String(value)} /> : "-") },
+          { key: "reversal_no", label: "红冲单" },
+          { key: "remediation_status_label", label: "整改状态", render: (value) => <StatusBadge value={String(value)} /> },
+          {
+            key: "drilldown_ops",
+            label: "下钻/整改",
+            render: (_value, row) => (
+              <div className="flex flex-wrap gap-2">
+                <DetailButton onClick={() => openDetail(costAnomalyDrilldownDetail(row))} />
+                {canCreateCostAnomalyRemediation && !row.remediation_id ? (
+                  <InlineActionButton
+                    label="生成整改"
+                    busy={busy === `createCostAnomalyRemediation-${String(row.adjustment_id ?? row.id)}-primary`}
+                    onClick={() =>
+                      runAction({
+                        action: "createCostAnomalyRemediation",
+                        entityId: String(row.adjustment_id ?? row.id),
+                        payload: {
+                          severity: String(row.risk_level ?? "medium"),
+                          owner_id: String(row.created_by ?? "U-PROD"),
+                          due_date: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10),
+                          root_cause: `${String(row.reason_type_label ?? "成本异常")}：${String(row.adjustment_note ?? "需复核成本依据。")}`,
+                          corrective_action: "复核生产工单、补退料单、审批记录和红冲记录，补齐成本异常处理依据。",
+                          preventive_action: "后续成本调整入账前同步校验工单成本、审批附件和仓库执行流水。",
+                        },
+                      })
+                    }
+                  />
+                ) : null}
+                {canSubmitCostAnomalyRemediation && row.remediation_id && ["pending", "rejected"].includes(String(row.remediation_status)) ? (
+                  <InlineActionButton
+                    label={String(row.remediation_status) === "rejected" ? "重新提交" : "提交复核"}
+                    busy={busy === `markCostAnomalyRemediationReady-${String(row.remediation_id)}-primary`}
+                    onClick={() =>
+                      runAction({
+                        action: "markCostAnomalyRemediationReady",
+                        entityId: String(row.remediation_id),
+                        payload: { result_note: "成本异常原因、纠正措施和预防措施已落实，提交复核。" },
+                      })
+                    }
+                  />
+                ) : null}
+                {canCloseCostAnomalyRemediation && String(row.remediation_status) === "ready_for_review" ? (
+                  <InlineActionButton
+                    label="关闭整改"
+                    busy={busy === `closeCostAnomalyRemediation-${String(row.remediation_id)}-primary`}
+                    onClick={() =>
+                      runAction({
+                        action: "closeCostAnomalyRemediation",
+                        entityId: String(row.remediation_id),
+                        payload: { result_note: "整改资料完整，成本异常闭环。" },
+                      })
+                    }
+                  />
+                ) : null}
+              </div>
+            ),
+          },
+        ]}
+        action={{ label: "下载下钻报表", onClick: () => downloadReport("cost-anomaly-analysis") }}
+      />
+      <div className="grid gap-5 xl:grid-cols-2">
+        <DataTable
+          title="成本异常整改台账"
+          icon={FileCheck2}
+          rows={snapshot.board.costAnomalyRemediations}
+          empty="暂无成本异常整改任务"
+          columns={[
+            { key: "remediation_no", label: "整改单号" },
+            { key: "adjustment_no", label: "调整单号" },
+            { key: "prod_no", label: "生产工单" },
+            { key: "severity_label", label: "等级", render: (value) => <StatusBadge value={String(value)} /> },
+            { key: "status_label", label: "状态", render: (value) => <StatusBadge value={String(value)} /> },
+            { key: "owner_name", label: "责任人" },
+            { key: "due_date", label: "到期日", render: shortDate },
+            { key: "root_cause", label: "原因分析" },
+            {
+              key: "remediation_ops",
+              label: "处理",
+              render: (_value, row) => (
+                <div className="flex flex-wrap gap-2">
+                  <DetailButton onClick={() => openDetail(costAnomalyRemediationDetail(row))} />
+                  {canRejectCostAnomalyRemediation && String(row.status) === "ready_for_review" ? (
+                    <InlineActionButton
+                      label="驳回复核"
+                      busy={busy === `rejectCostAnomalyRemediationReview-${String(row.id)}-primary`}
+                      onClick={() =>
+                        runAction({
+                          action: "rejectCostAnomalyRemediationReview",
+                          entityId: String(row.id),
+                          payload: { review_note: "复核资料不足，请补充成本依据、审批附件和仓库流水后重新提交。" },
+                        })
+                      }
+                    />
+                  ) : null}
+                  {canCloseCostAnomalyRemediation && String(row.status) === "ready_for_review" ? (
+                    <InlineActionButton
+                      label="关闭"
+                      busy={busy === `closeCostAnomalyRemediation-${String(row.id)}-primary`}
+                      onClick={() =>
+                        runAction({
+                          action: "closeCostAnomalyRemediation",
+                          entityId: String(row.id),
+                          payload: { result_note: "整改资料完整，成本异常闭环。" },
+                        })
+                      }
+                    />
+                  ) : null}
+                </div>
+              ),
+            },
+          ]}
+        />
+        <DataTable
+          title="成本异常整改复核记录"
+          icon={ClipboardCheck}
+          rows={snapshot.board.costAnomalyRemediationReviews}
+          empty="暂无成本异常整改复核记录"
+          columns={[
+            { key: "remediation_no", label: "整改单号" },
+            { key: "adjustment_no", label: "调整单号" },
+            { key: "prod_no", label: "生产工单" },
+            { key: "decision_label", label: "复核动作", render: (value) => <StatusBadge value={String(value)} /> },
+            { key: "review_note", label: "复核说明" },
+            { key: "reviewer_name", label: "处理人" },
+            { key: "reviewed_at", label: "处理时间", render: shortDate },
+          ]}
+        />
+      </div>
       <ReportPreviewModal preview={reportPreview} onClose={() => setReportPreview(null)} />
     </div>
   );
@@ -9741,6 +9894,12 @@ function reportPreviewSummary(snapshot: Snapshot, filters: ReportFilterState) {
   const costAnomalyRejectedCount = rows.costAnomalyDetails.filter((row) => String(row.status) === "rejected").length;
   const costAnomalyReversedCount = rows.costAnomalyDetails.filter((row) => String(row.status) === "reversed").length;
   const costAnomalyRedOffsetBlockedCount = rows.costAnomalyDetails.filter((row) => Number(row.red_offset_blocked_flag ?? 0) === 1).length;
+  const costAnomalyRemediationOpenCount = rows.costAnomalyDetails.filter(
+    (row) => row.remediation_id && String(row.remediation_status) !== "closed",
+  ).length;
+  const costAnomalyRemediationClosedCount = rows.costAnomalyDetails.filter(
+    (row) => row.remediation_id && String(row.remediation_status) === "closed",
+  ).length;
   return {
     orderAmount: sumRows(orders, "total_amount"),
     purchaseAmount: sumRows(purchaseOrders, "total_amount"),
@@ -9775,6 +9934,8 @@ function reportPreviewSummary(snapshot: Snapshot, filters: ReportFilterState) {
     costAnomalyRejectedCount,
     costAnomalyReversedCount,
     costAnomalyRedOffsetBlockedCount,
+    costAnomalyRemediationOpenCount,
+    costAnomalyRemediationClosedCount,
     costAnomalyTotalAmount: rows.costAnomalyDetails.reduce((sum, row) => sum + Math.abs(Number(row.adjustment_amount ?? 0)), 0),
   };
 }
@@ -11309,6 +11470,59 @@ function approvalRuleDetail(row: Row): DetailState {
     ["规则说明", "description"],
     ["创建时间", "created_at", shortDate],
     ["更新时间", "updated_at", shortDate],
+  ]);
+}
+
+function costAnomalyDrilldownDetail(row: Row): DetailState {
+  return makeDetail("成本异常下钻详情", String(row.adjustment_no), row, [
+    ["生产工单", "production_drilldown_label"],
+    ["客户订单", "order_no"],
+    ["客户", "customer_name"],
+    ["产品", "product_name"],
+    ["异常原因", "reason_type_label"],
+    ["调整金额", "adjustment_amount", formatCurrency],
+    ["调整前总成本", "previous_total_cost", formatCurrency],
+    ["调整后总成本", "new_total_cost", formatCurrency],
+    ["异常状态", "anomaly_status_label"],
+    ["成本调整说明", "adjustment_note"],
+    ["审批记录", "approval_drilldown_label"],
+    ["审批意见", "approval_note"],
+    ["审批时间", "approval_decided_at", shortDate],
+    ["红冲单号", "reversal_no"],
+    ["红冲原因", "document_reversal_reason"],
+    ["红冲时间", "document_reversed_at", shortDate],
+    ["整改单号", "remediation_no"],
+    ["整改状态", "remediation_status_label"],
+    ["整改责任人", "remediation_owner_name"],
+    ["整改原因", "remediation_root_cause"],
+    ["纠正措施", "remediation_corrective_action"],
+    ["预防措施", "remediation_preventive_action"],
+    ["下钻阶段", "drilldown_stage_label"],
+  ]);
+}
+
+function costAnomalyRemediationDetail(row: Row): DetailState {
+  return makeDetail("成本异常整改详情", String(row.remediation_no), row, [
+    ["整改单号", "remediation_no"],
+    ["成本调整单", "adjustment_no"],
+    ["生产工单", "prod_no"],
+    ["客户订单", "order_no"],
+    ["客户", "customer_name"],
+    ["产品", "product_name"],
+    ["整改等级", "severity_label"],
+    ["整改状态", "status_label"],
+    ["责任人", "owner_name"],
+    ["到期日", "due_date", shortDate],
+    ["是否逾期", "is_overdue", (value) => (value ? "是" : "否")],
+    ["原因分析", "root_cause"],
+    ["纠正措施", "corrective_action"],
+    ["预防措施", "preventive_action"],
+    ["整改结果", "result_note"],
+    ["复核意见", "latest_review_note"],
+    ["提交人", "submitted_by_name"],
+    ["提交时间", "submitted_at", shortDate],
+    ["关闭人", "closed_by_name"],
+    ["关闭时间", "closed_at", shortDate],
   ]);
 }
 

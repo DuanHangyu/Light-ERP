@@ -165,6 +165,10 @@ const roleActionMap: Record<string, Role[]> = {
   markSystemHealthRemediationReady: ["sales", "assistant", "production", "warehouse", "purchasing", "quality", "technical", "manager", "finance", "admin"],
   rejectSystemHealthRemediationReview: ["manager", "admin"],
   closeSystemHealthRemediation: ["manager", "admin"],
+  createCostAnomalyRemediation: ["manager", "finance", "admin"],
+  markCostAnomalyRemediationReady: ["production", "warehouse", "technical", "finance", "manager", "admin"],
+  rejectCostAnomalyRemediationReview: ["manager", "finance", "admin"],
+  closeCostAnomalyRemediation: ["manager", "finance", "admin"],
   voidBusinessDocument: ["manager", "admin"],
   recordInventoryAgingDisposition: ["warehouse", "purchasing", "manager", "admin"],
   createStocktake: ["warehouse", "admin"],
@@ -252,6 +256,10 @@ const actionLabels: Record<string, string> = {
   markSystemHealthRemediationReady: "提交上线整改复核",
   rejectSystemHealthRemediationReview: "驳回上线整改复核",
   closeSystemHealthRemediation: "关闭上线整改任务",
+  createCostAnomalyRemediation: "创建成本异常整改",
+  markCostAnomalyRemediationReady: "提交成本异常整改复核",
+  rejectCostAnomalyRemediationReview: "驳回成本异常整改复核",
+  closeCostAnomalyRemediation: "关闭成本异常整改",
   voidBusinessDocument: "作废业务单据",
   recordInventoryAgingDisposition: "登记积压处置",
   createStocktake: "录入库存盘点",
@@ -790,6 +798,38 @@ function productionCostAdjustmentStatusLabel(status: string) {
       rejected: "已驳回",
       reversed: "已红冲",
     }[status] ?? status
+  );
+}
+
+function costAnomalyRemediationStatusLabel(status: string) {
+  return (
+    {
+      pending: "待整改",
+      ready_for_review: "待复核",
+      rejected: "复核驳回",
+      closed: "已关闭",
+    }[status] ?? status
+  );
+}
+
+function costAnomalyRemediationDecisionLabel(decision: string) {
+  return (
+    {
+      submitted: "提交复核",
+      rejected: "复核驳回",
+      approved: "复核通过",
+    }[decision] ?? decision
+  );
+}
+
+function costAnomalySeverityLabel(severity: string) {
+  return (
+    {
+      low: "低",
+      medium: "中",
+      high: "高",
+      critical: "重大",
+    }[severity] ?? severity
   );
 }
 
@@ -2750,6 +2790,9 @@ export function getSnapshot(actorId = "U-SALES") {
       approval_status_label: item.approval_status ? approvalRequestStatusLabel(String(item.approval_status)) : "",
     };
   });
+  const costAnomalyRemediations = costAnomalyRemediationRows(database);
+  const costAnomalyRemediationReviews = costAnomalyRemediationReviewRows(database);
+  const costAnomalyDrilldowns = costAnomalyDrilldownRows(database);
   const costAnomalyAnalytics = costAnomalyAnalyticsRows(database);
 
   const finishedShipmentAllocations = database.prepare(`
@@ -3791,6 +3834,7 @@ export function getSnapshot(actorId = "U-SALES") {
     supplierCorrectiveActions,
     supplierQualificationCertificates,
     supplierAnnualReviewDue,
+    costAnomalyRemediations,
   });
   const storage = getStorageSummary();
   const systemHealthChecks = buildSystemHealthChecks({
@@ -3890,6 +3934,9 @@ export function getSnapshot(actorId = "U-SALES") {
       technicalDispositions,
       qualityExceptionAnalytics,
       costAnomalyAnalytics,
+      costAnomalyDrilldowns,
+      costAnomalyRemediations,
+      costAnomalyRemediationReviews,
       materials,
       batches,
       inventoryAging,
@@ -4421,6 +4468,16 @@ function actionModuleLabel(action: string) {
   }
   if (["completeInspection", "createTechnicalDisposition"].includes(action)) return "质检收率";
   if (["completeMaterialIqcInspection"].includes(action)) return "质检收率";
+  if (
+    [
+      "createCostAnomalyRemediation",
+      "markCostAnomalyRemediationReady",
+      "rejectCostAnomalyRemediationReview",
+      "closeCostAnomalyRemediation",
+    ].includes(action)
+  ) {
+    return "报表中心";
+  }
   if (["submitApproval", "approveApproval", "rejectApproval", "createFormulaCalculation"].includes(action)) return "审批算价";
   if (["markAlertRead", "dismissAlert", "upsertAlertSubscription"].includes(action)) return "经营总览";
   if (["upsertSystemSetting", "voidBusinessDocument", "reverseBusinessDocument", "upsertSupplierAdmissionRule", "submitSupplierAdmissionRuleChange"].includes(action)) return "系统管理";
@@ -4465,6 +4522,8 @@ function actionRiskLevel(action: string) {
       "recordSalesReturn",
       "recordCustomerRefund",
       "createReplacementShipment",
+      "createCostAnomalyRemediation",
+      "closeCostAnomalyRemediation",
     ].includes(action)
   ) {
     return "高";
@@ -4493,6 +4552,8 @@ function actionRiskLevel(action: string) {
       "executeMaterialAdjustmentOrder",
       "reviewMaterialAdjustmentOrder",
       "resolveMaterialAdjustmentReviewException",
+      "markCostAnomalyRemediationReady",
+      "rejectCostAnomalyRemediationReview",
       "approveApproval",
       "rejectApproval",
       "upsertApprovalRule",
@@ -5024,6 +5085,104 @@ function systemHealthRemediationReviewRows(database: Database.Database) {
   });
 }
 
+function costAnomalyRemediationRows(database: Database.Database) {
+  return database.prepare(`
+    SELECT car.*,
+           pca.adjustment_no,
+           pca.adjustment_amount,
+           pca.status AS adjustment_status,
+           po.prod_no,
+           o.order_no,
+           c.name AS customer_name,
+           p.name AS product_name,
+           exception.exception_no,
+           owner.name AS owner_name,
+           owner.role AS owner_role,
+           owner.role_label AS owner_role_label,
+           creator.name AS created_by_name,
+           submitter.name AS submitted_by_name,
+           closer.name AS closed_by_name,
+           latest.decision AS latest_review_decision,
+           latest.review_note AS latest_review_note,
+           latest.reviewed_at AS latest_reviewed_at,
+           latestReviewer.name AS latest_reviewer_name,
+           COALESCE(reviewCounts.review_record_count, 0) AS review_record_count
+    FROM production_cost_anomaly_remediations car
+    JOIN production_cost_adjustments pca ON pca.id = car.adjustment_id
+    JOIN production_orders po ON po.id = car.production_order_id
+    JOIN orders o ON o.id = car.order_id
+    JOIN customers c ON c.id = o.customer_id
+    JOIN products p ON p.id = o.product_id
+    LEFT JOIN production_material_adjustment_review_exceptions exception ON exception.id = car.exception_id
+    LEFT JOIN users owner ON owner.id = car.owner_id
+    LEFT JOIN users creator ON creator.id = car.created_by
+    LEFT JOIN users submitter ON submitter.id = car.submitted_by
+    LEFT JOIN users closer ON closer.id = car.closed_by
+    LEFT JOIN (
+      SELECT r.*
+      FROM production_cost_anomaly_remediation_reviews r
+      JOIN (
+        SELECT remediation_id, MAX(reviewed_at) AS max_reviewed_at
+        FROM production_cost_anomaly_remediation_reviews
+        GROUP BY remediation_id
+      ) latestRows ON latestRows.remediation_id = r.remediation_id AND latestRows.max_reviewed_at = r.reviewed_at
+    ) latest ON latest.remediation_id = car.id
+    LEFT JOIN users latestReviewer ON latestReviewer.id = latest.reviewer_id
+    LEFT JOIN (
+      SELECT remediation_id, COUNT(*) AS review_record_count
+      FROM production_cost_anomaly_remediation_reviews
+      GROUP BY remediation_id
+    ) reviewCounts ON reviewCounts.remediation_id = car.id
+    ORDER BY CASE WHEN car.status = 'closed' THEN 1 ELSE 0 END ASC, car.created_at DESC
+    LIMIT 120
+  `).all().map((item) => {
+    const row = item as Record<string, unknown>;
+    return {
+      ...row,
+      status_label: costAnomalyRemediationStatusLabel(String(row.status)),
+      severity_label: costAnomalySeverityLabel(String(row.severity)),
+      adjustment_status_label: productionCostAdjustmentStatusLabel(String(row.adjustment_status)),
+      latest_review_decision_label: row.latest_review_decision
+        ? costAnomalyRemediationDecisionLabel(String(row.latest_review_decision))
+        : "",
+      age_days: calculateAgeDays({ fromDate: String(row.created_at) }),
+      due_days: daysUntil(row.due_date),
+      is_overdue: daysUntil(row.due_date) < 0 && String(row.status) !== "closed",
+      source_snapshot: parseJsonRecord(row.source_snapshot_json),
+    };
+  });
+}
+
+function costAnomalyRemediationReviewRows(database: Database.Database) {
+  return database.prepare(`
+    SELECT r.*,
+           remediation.adjustment_id,
+           remediation.root_cause,
+           remediation.corrective_action,
+           pca.adjustment_no,
+           po.prod_no,
+           o.order_no,
+           c.name AS customer_name,
+           reviewer.name AS reviewer_name,
+           reviewer.role_label AS reviewer_role_label
+    FROM production_cost_anomaly_remediation_reviews r
+    JOIN production_cost_anomaly_remediations remediation ON remediation.id = r.remediation_id
+    JOIN production_cost_adjustments pca ON pca.id = remediation.adjustment_id
+    JOIN production_orders po ON po.id = remediation.production_order_id
+    JOIN orders o ON o.id = remediation.order_id
+    JOIN customers c ON c.id = o.customer_id
+    JOIN users reviewer ON reviewer.id = r.reviewer_id
+    ORDER BY r.reviewed_at DESC
+    LIMIT 160
+  `).all().map((item) => {
+    const row = item as Record<string, unknown>;
+    return {
+      ...row,
+      decision_label: costAnomalyRemediationDecisionLabel(String(row.decision)),
+    };
+  });
+}
+
 function buildSystemHealthChecksFromDatabase(database: Database.Database, remediations: Array<Record<string, unknown>> = []) {
   const operatingParameters = operatingParameterValues(database);
   const dispositions = database.prepare(`
@@ -5187,8 +5346,40 @@ function buildTasks(
     supplierCorrectiveActions?: Array<Record<string, unknown>>;
     supplierQualificationCertificates?: Array<Record<string, unknown>>;
     supplierAnnualReviewDue?: Array<Record<string, unknown>>;
+    costAnomalyRemediations?: Array<Record<string, unknown>>;
   },
 ): Task[] {
+  const costAnomalyOwnerTasks = (data.costAnomalyRemediations ?? [])
+    .filter((item) => String(item.owner_id) === user.id && ["pending", "rejected"].includes(String(item.status)))
+    .slice(0, 6)
+    .map((item) => ({
+      id: `task-cost-anomaly-remediation-owner-${item.id}`,
+      title: `成本异常整改 ${item.remediation_no}`,
+      detail: `${item.adjustment_no} / ${item.prod_no} / 到期日 ${item.due_date ?? "-"}${item.is_overdue ? " / 已逾期" : ""}`,
+      entityType: "production_cost_anomaly_remediation",
+      entityId: String(item.id),
+      action: "markCostAnomalyRemediationReady",
+      tone: item.is_overdue ? ("rose" as const) : ("amber" as const),
+      primaryLabel: String(item.status) === "rejected" ? "重新提交" : "提交复核",
+      payload: {
+        result_note: "已完成原因分析、纠正措施和预防措施，提交复核。",
+      },
+    }));
+  const costAnomalyReviewTasks = (data.costAnomalyRemediations ?? [])
+    .filter((item) => String(item.status) === "ready_for_review" && ["manager", "finance", "admin"].includes(user.role))
+    .slice(0, 6)
+    .map((item) => ({
+      id: `task-cost-anomaly-remediation-review-${item.id}`,
+      title: `复核成本异常整改 ${item.remediation_no}`,
+      detail: `${item.adjustment_no} / ${item.prod_no} / ${item.owner_name ?? "-"}`,
+      entityType: "production_cost_anomaly_remediation",
+      entityId: String(item.id),
+      action: "closeCostAnomalyRemediation",
+      tone: "blue" as const,
+      primaryLabel: "关闭整改",
+      payload: { result_note: "整改资料完整，成本异常闭环。" },
+    }));
+  const costAnomalyTasks = [...costAnomalyOwnerTasks, ...costAnomalyReviewTasks];
   const remediationOwnerTasks = (data.systemHealthRemediations ?? [])
     .filter((remediation) => String(remediation.owner_id) === user.id && ["pending", "rejected"].includes(String(remediation.status)))
     .map((remediation) => ({
@@ -5423,6 +5614,7 @@ function buildTasks(
       },
     }));
   const commonTasks = [
+    ...costAnomalyTasks,
     ...remediationTasks,
     ...supplierGovernanceTasks,
     ...productionPlanNotificationTasks,
@@ -6115,6 +6307,18 @@ export function performAction(input: ActionInput) {
         break;
       case "closeSystemHealthRemediation":
         closeSystemHealthRemediation(database, input.actorId, mustEntity(input.entityId), input.payload);
+        break;
+      case "createCostAnomalyRemediation":
+        createCostAnomalyRemediation(database, input.actorId, mustEntity(input.entityId), input.payload);
+        break;
+      case "markCostAnomalyRemediationReady":
+        markCostAnomalyRemediationReady(database, input.actorId, mustEntity(input.entityId), input.payload);
+        break;
+      case "rejectCostAnomalyRemediationReview":
+        rejectCostAnomalyRemediationReview(database, input.actorId, mustEntity(input.entityId), input.payload);
+        break;
+      case "closeCostAnomalyRemediation":
+        closeCostAnomalyRemediation(database, input.actorId, mustEntity(input.entityId), input.payload);
         break;
       case "voidBusinessDocument":
         voidBusinessDocument(database, input.actorId, mustEntity(input.entityId), input.payload);
@@ -12784,6 +12988,271 @@ function rejectSystemHealthRemediationReview(
   );
 }
 
+function costAnomalySeverityValue(value: string) {
+  if (["low", "medium", "high", "critical"].includes(value)) return value;
+  throw new Error("成本异常整改等级不正确。");
+}
+
+function createCostAnomalyRemediation(
+  database: Database.Database,
+  actorId: string,
+  adjustmentId: string,
+  rawPayload?: Record<string, unknown>,
+) {
+  const payload = payloadObject(rawPayload);
+  const adjustment = database.prepare(`
+    SELECT pca.*,
+           po.prod_no,
+           o.order_no,
+           c.name AS customer_name,
+           p.name AS product_name,
+           exception.exception_no,
+           exception.reason_type,
+           ar.request_no AS approval_request_no,
+           ar.status AS approval_status,
+           dr.reversal_no
+    FROM production_cost_adjustments pca
+    JOIN production_orders po ON po.id = pca.production_order_id
+    JOIN orders o ON o.id = pca.order_id
+    JOIN customers c ON c.id = o.customer_id
+    JOIN products p ON p.id = o.product_id
+    LEFT JOIN production_material_adjustment_review_exceptions exception ON exception.id = pca.exception_id
+    LEFT JOIN approval_requests ar ON ar.id = pca.approval_request_id
+    LEFT JOIN document_reversals dr ON dr.id = pca.reversal_id
+    WHERE pca.id = ?
+  `).get(adjustmentId) as Record<string, unknown> | undefined;
+  if (!adjustment) throw new Error("成本异常调整单不存在。");
+
+  const existing = database
+    .prepare("SELECT remediation_no FROM production_cost_anomaly_remediations WHERE adjustment_id = ?")
+    .get(adjustmentId) as { remediation_no: string } | undefined;
+  if (existing) throw new Error(`该成本异常已生成整改任务：${existing.remediation_no}`);
+
+  const severity = costAnomalySeverityValue(payloadText(payload, "severity", "整改等级", false) || "medium");
+  const ownerId = payloadText(payload, "owner_id", "整改责任人", false) || String(adjustment.created_by);
+  const owner = getUser(database, ownerId);
+  const rootCause = payloadText(payload, "root_cause", "原因分析");
+  const correctiveAction = payloadText(payload, "corrective_action", "纠正措施");
+  const preventiveAction =
+    payloadText(payload, "preventive_action", "预防措施", false) ||
+    "将该成本异常纳入月度成本复盘，后续同类成本调整必须补齐工单、审批和红冲依据。";
+  const timestamp = now();
+  const dueDate = payloadDate(payload, "due_date", "整改到期日", addDays(timestamp, 7));
+  const id = uid("CBZG");
+  const remediationNo = serial(database, "production_cost_anomaly_remediations", "CBZG");
+  const sourceSnapshot = {
+    adjustment_id: adjustment.id,
+    adjustment_no: adjustment.adjustment_no,
+    adjustment_amount: adjustment.adjustment_amount,
+    adjustment_status: adjustment.status,
+    prod_no: adjustment.prod_no,
+    order_no: adjustment.order_no,
+    customer_name: adjustment.customer_name,
+    product_name: adjustment.product_name,
+    exception_no: adjustment.exception_no,
+    reason_type: adjustment.reason_type,
+    approval_request_no: adjustment.approval_request_no,
+    approval_status: adjustment.approval_status,
+    reversal_no: adjustment.reversal_no,
+    generated_at: timestamp,
+  };
+
+  database.prepare(`
+    INSERT INTO production_cost_anomaly_remediations (
+      id, remediation_no, adjustment_id, production_order_id, order_id, exception_id,
+      severity, root_cause, corrective_action, preventive_action,
+      owner_id, due_date, status, result_note, review_note, source_snapshot_json,
+      created_by, created_at, submitted_by, submitted_at, closed_by, closed_at
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', '', '', ?, ?, ?, NULL, NULL, NULL, NULL)
+  `).run(
+    id,
+    remediationNo,
+    adjustment.id,
+    adjustment.production_order_id,
+    adjustment.order_id,
+    adjustment.exception_id ?? null,
+    severity,
+    rootCause,
+    correctiveAction,
+    preventiveAction,
+    owner.id,
+    dueDate,
+    JSON.stringify(sourceSnapshot),
+    actorId,
+    timestamp,
+  );
+
+  audit(
+    database,
+    actorId,
+    "createCostAnomalyRemediation",
+    "production_cost_anomaly_remediation",
+    id,
+    `${remediationNo} / ${adjustment.adjustment_no}，责任人 ${owner.name}`,
+  );
+}
+
+function insertCostAnomalyRemediationReview(
+  database: Database.Database,
+  input: {
+    remediationId: string;
+    remediationNo: string;
+    decision: "submitted" | "rejected" | "approved";
+    reviewNote: string;
+    reviewerId: string;
+    reviewedAt: string;
+  },
+) {
+  database.prepare(`
+    INSERT INTO production_cost_anomaly_remediation_reviews (
+      id, remediation_id, remediation_no, decision, review_note, reviewer_id, reviewed_at
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    uid("CBZGR"),
+    input.remediationId,
+    input.remediationNo,
+    input.decision,
+    input.reviewNote,
+    input.reviewerId,
+    input.reviewedAt,
+  );
+}
+
+function getCostAnomalyRemediation(database: Database.Database, remediationId: string) {
+  const remediation = database.prepare(`
+    SELECT car.*, pca.adjustment_no, po.prod_no, o.order_no, c.name AS customer_name, p.name AS product_name
+    FROM production_cost_anomaly_remediations car
+    JOIN production_cost_adjustments pca ON pca.id = car.adjustment_id
+    JOIN production_orders po ON po.id = car.production_order_id
+    JOIN orders o ON o.id = car.order_id
+    JOIN customers c ON c.id = o.customer_id
+    JOIN products p ON p.id = o.product_id
+    WHERE car.id = ?
+  `).get(remediationId) as Record<string, unknown> | undefined;
+  if (!remediation) throw new Error("成本异常整改任务不存在。");
+  return remediation;
+}
+
+function markCostAnomalyRemediationReady(
+  database: Database.Database,
+  actorId: string,
+  remediationId: string,
+  rawPayload?: Record<string, unknown>,
+) {
+  const payload = payloadObject(rawPayload);
+  const remediation = getCostAnomalyRemediation(database, remediationId);
+  if (String(remediation.status) === "closed") throw new Error("成本异常整改任务已关闭。");
+  if (!["pending", "rejected", "ready_for_review"].includes(String(remediation.status))) {
+    throw new Error("成本异常整改任务状态不允许提交复核。");
+  }
+  if (String(remediation.owner_id) !== actorId) {
+    const actor = getUser(database, actorId);
+    if (!["manager", "finance", "admin"].includes(actor.role)) throw new Error("只有整改责任人、财务、管理层或管理员可以提交复核。");
+  }
+  const resultNote = payloadText(payload, "result_note", "整改结果", false) || "整改完成，提交复核。";
+  const timestamp = now();
+  database.prepare(`
+    UPDATE production_cost_anomaly_remediations
+    SET status = 'ready_for_review',
+        result_note = ?,
+        review_note = '',
+        submitted_by = ?,
+        submitted_at = ?
+    WHERE id = ?
+  `).run(resultNote, actorId, timestamp, remediationId);
+  insertCostAnomalyRemediationReview(database, {
+    remediationId,
+    remediationNo: String(remediation.remediation_no),
+    decision: "submitted",
+    reviewNote: resultNote,
+    reviewerId: actorId,
+    reviewedAt: timestamp,
+  });
+  audit(
+    database,
+    actorId,
+    "markCostAnomalyRemediationReady",
+    "production_cost_anomaly_remediation",
+    remediationId,
+    `${remediation.remediation_no} / ${remediation.adjustment_no} 提交复核`,
+  );
+}
+
+function rejectCostAnomalyRemediationReview(
+  database: Database.Database,
+  actorId: string,
+  remediationId: string,
+  rawPayload?: Record<string, unknown>,
+) {
+  const payload = payloadObject(rawPayload);
+  const remediation = getCostAnomalyRemediation(database, remediationId);
+  if (String(remediation.status) !== "ready_for_review") throw new Error("只有待复核的成本异常整改可以驳回。");
+  const reviewNote = payloadText(payload, "review_note", "驳回原因", false) || "复核未通过，请补充整改资料后重新提交。";
+  const timestamp = now();
+  database.prepare(`
+    UPDATE production_cost_anomaly_remediations
+    SET status = 'rejected',
+        review_note = ?
+    WHERE id = ?
+  `).run(reviewNote, remediationId);
+  insertCostAnomalyRemediationReview(database, {
+    remediationId,
+    remediationNo: String(remediation.remediation_no),
+    decision: "rejected",
+    reviewNote,
+    reviewerId: actorId,
+    reviewedAt: timestamp,
+  });
+  audit(
+    database,
+    actorId,
+    "rejectCostAnomalyRemediationReview",
+    "production_cost_anomaly_remediation",
+    remediationId,
+    `${remediation.remediation_no} / ${remediation.adjustment_no} 复核驳回`,
+  );
+}
+
+function closeCostAnomalyRemediation(
+  database: Database.Database,
+  actorId: string,
+  remediationId: string,
+  rawPayload?: Record<string, unknown>,
+) {
+  const payload = payloadObject(rawPayload);
+  const remediation = getCostAnomalyRemediation(database, remediationId);
+  if (String(remediation.status) !== "ready_for_review") throw new Error("只有待复核的成本异常整改可以关闭。");
+  const resultNote = payloadText(payload, "result_note", "整改结论", false) || "整改复核通过，成本异常闭环。";
+  const timestamp = now();
+  database.prepare(`
+    UPDATE production_cost_anomaly_remediations
+    SET status = 'closed',
+        result_note = ?,
+        review_note = ?,
+        closed_by = ?,
+        closed_at = ?
+    WHERE id = ?
+  `).run(resultNote, resultNote, actorId, timestamp, remediationId);
+  insertCostAnomalyRemediationReview(database, {
+    remediationId,
+    remediationNo: String(remediation.remediation_no),
+    decision: "approved",
+    reviewNote: resultNote,
+    reviewerId: actorId,
+    reviewedAt: timestamp,
+  });
+  audit(
+    database,
+    actorId,
+    "closeCostAnomalyRemediation",
+    "production_cost_anomaly_remediation",
+    remediationId,
+    `${remediation.remediation_no} / ${remediation.adjustment_no} 整改关闭`,
+  );
+}
+
 function documentTypeValue(value: string) {
   if (["quote", "sales_order", "purchase_order", "approval_request"].includes(value)) return value;
   throw new Error("单据类型不正确。");
@@ -14058,6 +14527,7 @@ export async function buildExport(input: {
     sheets.push({ name: "cost_anomaly_reason", rows: analytics.byReason });
     sheets.push({ name: "cost_anomaly_material", rows: analytics.byMaterial });
     sheets.push({ name: "cost_anomaly_responsibility", rows: analytics.byResponsibility });
+    sheets.push({ name: "cost_anomaly_remediation", rows: costAnomalyRemediationRows(database) });
   }
 
   if (input.type.startsWith("master-template-")) {
@@ -14801,6 +15271,8 @@ function formalReportCoverRows(database: Database.Database, type: FormalReportEx
     { field: "成本审批驳回", value: Number(metrics.cost_anomaly_rejected_count ?? 0) },
     { field: "成本红冲成功", value: Number(metrics.cost_anomaly_reversed_count ?? 0) },
     { field: "禁止直接红冲", value: Number(metrics.cost_anomaly_red_offset_blocked_count ?? 0) },
+    { field: "成本整改未闭环", value: Number(metrics.cost_anomaly_remediation_open_count ?? 0) },
+    { field: "成本整改已关闭", value: Number(metrics.cost_anomaly_remediation_closed_count ?? 0) },
     { field: "成本异常金额", value: Number(metrics.cost_anomaly_total_amount ?? 0) },
   ];
 }
@@ -14924,6 +15396,9 @@ function reportSnapshotMetrics(database: Database.Database, type: FormalReportEx
     cost_anomaly_rejected_count: Number(costAnomalyTotals.rejected_count ?? 0),
     cost_anomaly_reversed_count: Number(costAnomalyTotals.reversed_count ?? 0),
     cost_anomaly_red_offset_blocked_count: Number(costAnomalyTotals.red_offset_blocked_count ?? 0),
+    cost_anomaly_remediation_count: Number(costAnomalyTotals.remediation_count ?? 0),
+    cost_anomaly_remediation_open_count: Number(costAnomalyTotals.remediation_open_count ?? 0),
+    cost_anomaly_remediation_closed_count: Number(costAnomalyTotals.remediation_closed_count ?? 0),
     cost_anomaly_total_amount: Number(costAnomalyTotals.total_adjustment_amount ?? 0),
     cost_anomaly_rejected_amount: Number(costAnomalyTotals.rejected_amount ?? 0),
     cost_anomaly_reversed_amount: Number(costAnomalyTotals.reversed_amount ?? 0),
@@ -15610,11 +16085,13 @@ function costAnomalyDetailRows(database: Database.Database, filters: ReportFilte
     SELECT '成本异常分析报表' AS template_title,
            '本地化生产流转 ERP' AS company,
            pca.id,
+           pca.id AS adjustment_id,
            pca.adjustment_no,
            pca.production_order_id,
            po.prod_no,
            o.id AS order_id,
            o.order_no,
+           o.customer_id,
            c.name AS customer_name,
            p.name AS product_name,
            pca.cost_summary_id,
@@ -15644,14 +16121,33 @@ function costAnomalyDetailRows(database: Database.Database, filters: ReportFilte
            pca.reversed_at,
            ar.request_no AS approval_request_no,
            ar.status AS approval_status,
+           ar.created_at AS approval_created_at,
+           ar.decided_at AS approval_decided_at,
            ar.decision_note AS approval_note,
+           approvalDecider.name AS approval_decided_by_name,
            rule.rule_name,
            rule.risk_level,
            COALESCE(rule.allow_reversal, 1) AS allow_reversal,
            rule.reversal_approver_role,
            dr.reversal_no,
+           dr.status AS reversal_status,
            dr.reason AS document_reversal_reason,
-           exception.owner_role
+           dr.reversed_at AS document_reversed_at,
+           reversalUser.name AS document_reversed_by_name,
+           exception.owner_role,
+           remediation.id AS remediation_id,
+           remediation.remediation_no,
+           remediation.status AS remediation_status,
+           remediation.severity AS remediation_severity,
+           remediation.root_cause AS remediation_root_cause,
+           remediation.corrective_action AS remediation_corrective_action,
+           remediation.preventive_action AS remediation_preventive_action,
+           remediation.due_date AS remediation_due_date,
+           remediation.result_note AS remediation_result_note,
+           remediation.review_note AS remediation_review_note,
+           remediationOwner.name AS remediation_owner_name,
+           remediationCloser.name AS remediation_closed_by_name,
+           remediation.closed_at AS remediation_closed_at
     FROM production_cost_adjustments pca
     JOIN production_orders po ON po.id = pca.production_order_id
     JOIN orders o ON o.id = pca.order_id
@@ -15665,7 +16161,12 @@ function costAnomalyDetailRows(database: Database.Database, filters: ReportFilte
     LEFT JOIN production_material_adjustment_order_reviews review ON review.order_id = pmao.id
     LEFT JOIN approval_requests ar ON ar.id = pca.approval_request_id
     LEFT JOIN approval_rules rule ON rule.id = ar.rule_id
+    LEFT JOIN users approvalDecider ON approvalDecider.id = ar.decided_by
     LEFT JOIN document_reversals dr ON dr.id = pca.reversal_id
+    LEFT JOIN users reversalUser ON reversalUser.id = dr.reversed_by
+    LEFT JOIN production_cost_anomaly_remediations remediation ON remediation.adjustment_id = pca.id
+    LEFT JOIN users remediationOwner ON remediationOwner.id = remediation.owner_id
+    LEFT JOIN users remediationCloser ON remediationCloser.id = remediation.closed_by
     JOIN users creator ON creator.id = pca.created_by
     LEFT JOIN users applier ON applier.id = pca.applied_by
     LEFT JOIN users reverser ON reverser.id = pca.reversed_by
@@ -15699,6 +16200,22 @@ function costAnomalyDetailRows(database: Database.Database, filters: ReportFilte
       risk_level_label: approvalRiskLevelLabel(String(row.risk_level ?? "normal")),
       red_offset_control_status: allowReversal ? "允许红冲" : "禁止直接红冲",
       red_offset_blocked_flag: blocked ? 1 : 0,
+      production_drilldown_label: `生产工单 ${String(row.prod_no ?? "-")} / ${String(row.product_name ?? "-")}`,
+      approval_drilldown_label: row.approval_request_no
+        ? `${String(row.approval_request_no)} / ${row.approval_status ? approvalRequestStatusLabel(String(row.approval_status)) : "-"}`
+        : "未触发审批",
+      reversal_status_label: row.reversal_no ? "已冲销" : "",
+      remediation_status_label: row.remediation_status
+        ? costAnomalyRemediationStatusLabel(String(row.remediation_status))
+        : "未生成",
+      remediation_severity_label: row.remediation_severity
+        ? costAnomalySeverityLabel(String(row.remediation_severity))
+        : "",
+      drilldown_stage_label: row.remediation_status
+        ? String(row.remediation_status) === "closed"
+          ? "整改闭环"
+          : "已生成整改"
+        : "待生成整改",
       reversal_approver_role_label: row.reversal_approver_role ? roleLabel(String(row.reversal_approver_role)) : "",
       owner_role_label: row.owner_role ? roleLabel(String(row.owner_role)) : "",
     };
@@ -15734,6 +16251,12 @@ function groupCostAnomalyRows(rows: Array<Record<string, unknown>>, key: string,
 
 function costAnomalyAnalyticsRows(database: Database.Database, filters: ReportFilters = {}) {
   const detail = costAnomalyDetailRows(database, filters);
+  const remediationIds = new Set(detail.map((row) => String(row.remediation_id ?? "")).filter(Boolean));
+  const closedRemediationIds = new Set(
+    detail
+      .filter((row) => row.remediation_id && String(row.remediation_status) === "closed")
+      .map((row) => String(row.remediation_id)),
+  );
   const totals = {
     total_count: detail.length,
     pending_approval_count: detail.filter((row) => String(row.status) === "pending_approval").length,
@@ -15741,6 +16264,9 @@ function costAnomalyAnalyticsRows(database: Database.Database, filters: ReportFi
     applied_count: detail.filter((row) => String(row.status) === "applied").length,
     reversed_count: detail.filter((row) => String(row.status) === "reversed").length,
     red_offset_blocked_count: detail.filter((row) => Number(row.red_offset_blocked_flag ?? 0) === 1).length,
+    remediation_count: remediationIds.size,
+    remediation_closed_count: closedRemediationIds.size,
+    remediation_open_count: remediationIds.size - closedRemediationIds.size,
     total_adjustment_amount: roundMoney(detail.reduce((sum, row) => sum + Math.abs(Number(row.adjustment_amount ?? 0)), 0)),
     rejected_amount: roundMoney(
       detail.filter((row) => String(row.status) === "rejected").reduce((sum, row) => sum + Math.abs(Number(row.adjustment_amount ?? 0)), 0),
@@ -15756,6 +16282,10 @@ function costAnomalyAnalyticsRows(database: Database.Database, filters: ReportFi
     byResponsibility: groupCostAnomalyRows(detail, "owner_role", "owner_role_label"),
     detail,
   };
+}
+
+function costAnomalyDrilldownRows(database: Database.Database, filters: ReportFilters = {}) {
+  return costAnomalyDetailRows(database, filters);
 }
 
 function costAnomalySummaryRows(database: Database.Database, filters: ReportFilters = {}) {
