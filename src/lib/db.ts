@@ -1030,6 +1030,21 @@ function applySchema(database: Database.Database) {
       total_amount REAL NOT NULL,
       actor_id TEXT NOT NULL REFERENCES users(id),
       note TEXT NOT NULL DEFAULT '',
+      source_name TEXT NOT NULL DEFAULT '',
+      mode TEXT NOT NULL DEFAULT 'import',
+      valid_count INTEGER NOT NULL DEFAULT 0,
+      failed_count INTEGER NOT NULL DEFAULT 0,
+      error_summary TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS initialization_import_errors (
+      id TEXT PRIMARY KEY,
+      import_id TEXT NOT NULL REFERENCES initialization_imports(id),
+      row_no INTEGER NOT NULL,
+      field_name TEXT NOT NULL,
+      message TEXT NOT NULL,
+      raw_data_json TEXT NOT NULL DEFAULT '{}',
       created_at TEXT NOT NULL
     );
 
@@ -3445,6 +3460,32 @@ function applyMigrations(database: Database.Database) {
         `);
       },
     },
+    {
+      id: "059_initialization_import_validation_errors",
+      description: "正式初始化导入预校验批次、错误行明细与来源文件留痕",
+      up: () => {
+        ensureColumn(database, "initialization_imports", "source_name", "TEXT NOT NULL DEFAULT ''");
+        ensureColumn(database, "initialization_imports", "mode", "TEXT NOT NULL DEFAULT 'import'");
+        ensureColumn(database, "initialization_imports", "valid_count", "INTEGER NOT NULL DEFAULT 0");
+        ensureColumn(database, "initialization_imports", "failed_count", "INTEGER NOT NULL DEFAULT 0");
+        ensureColumn(database, "initialization_imports", "error_summary", "TEXT NOT NULL DEFAULT ''");
+        database.exec(`
+          CREATE TABLE IF NOT EXISTS initialization_import_errors (
+            id TEXT PRIMARY KEY,
+            import_id TEXT NOT NULL REFERENCES initialization_imports(id),
+            row_no INTEGER NOT NULL,
+            field_name TEXT NOT NULL,
+            message TEXT NOT NULL,
+            raw_data_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL
+          );
+          CREATE INDEX IF NOT EXISTS idx_initialization_import_errors_import
+            ON initialization_import_errors(import_id, row_no);
+          CREATE INDEX IF NOT EXISTS idx_initialization_import_errors_created
+            ON initialization_import_errors(created_at);
+        `);
+      },
+    },
   ];
 
   const applied = database
@@ -3727,6 +3768,7 @@ export function resetDemoDatabase() {
     DELETE FROM document_reversals;
     DELETE FROM document_cancellations;
     DELETE FROM document_attachments;
+    DELETE FROM initialization_import_errors;
     DELETE FROM initialization_imports;
     DELETE FROM customer_refunds;
     DELETE FROM sales_return_allocations;

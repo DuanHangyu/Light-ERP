@@ -289,6 +289,7 @@ type Snapshot = {
     ledgerRedOffsets: Row[];
     documentAttachments: Row[];
     initializationImports: Row[];
+    initializationImportErrors: Row[];
     documentExports: Row[];
     reportSnapshots: Row[];
     systemSettings: Row[];
@@ -2762,12 +2763,16 @@ function MasterDataModule({
   const [importing, setImporting] = useState(false);
   const [importMessage, setImportMessage] = useState("");
   const [importError, setImportError] = useState("");
+  const [importValidationRows, setImportValidationRows] = useState<Row[]>([]);
+  const [importValidating, setImportValidating] = useState(false);
   const importInputRef = useRef<HTMLInputElement>(null);
   const openingInputRef = useRef<HTMLInputElement>(null);
   const [openingType, setOpeningType] = useState<OpeningImportType>("opening-inventory");
   const [openingImporting, setOpeningImporting] = useState(false);
   const [openingMessage, setOpeningMessage] = useState("");
   const [openingError, setOpeningError] = useState("");
+  const [openingValidationRows, setOpeningValidationRows] = useState<Row[]>([]);
+  const [openingValidating, setOpeningValidating] = useState(false);
   const canEdit =
     snapshot.currentUser.role === "admin" ||
     (tab === "customers" && ["sales", "assistant"].includes(snapshot.currentUser.role)) ||
@@ -2811,58 +2816,78 @@ function MasterDataModule({
     };
     await runAction({ action: actionMap[tab], entityId: String(row.id) });
   };
-  const importMasterData = async () => {
+  const importMasterData = async (mode: "validate" | "import" = "import") => {
     const file = importInputRef.current?.files?.[0];
     if (!file) {
       setImportError("请选择要导入的 Excel 或 CSV 文件。");
       return;
     }
-    setImporting(true);
+    if (mode === "validate") setImportValidating(true);
+    else setImporting(true);
     setImportError("");
     setImportMessage("");
+    setImportValidationRows([]);
     const data = new FormData();
     data.append("actorId", actorId);
     data.append("type", tab);
+    data.append("mode", mode);
     data.append("file", file);
     const response = await fetch("/api/master-data/import", { method: "POST", body: data });
     const result = (await response.json()) as
-      | { ok: true; importedRows: number; created: number; updated: number; snapshot?: Snapshot }
-      | { error: string };
+      | { ok: true; importedRows: number; validRows?: number; failedRows?: number; created: number; updated: number; errors?: Row[]; snapshot?: Snapshot }
+      | { error: string; errors?: Row[]; validation?: { errors?: Row[]; failedRows?: number } };
     if (!response.ok || "error" in result) {
       setImportError("error" in result ? result.error : "导入失败");
+      setImportValidationRows("validation" in result ? result.validation?.errors ?? [] : "errors" in result ? result.errors ?? [] : []);
     } else {
-      setImportMessage(`导入 ${result.importedRows} 行，新增 ${result.created} 条，更新 ${result.updated} 条`);
+      setImportValidationRows(result.errors ?? []);
+      setImportMessage(
+        mode === "validate"
+          ? `预校验 ${result.importedRows} 行，通过 ${result.validRows ?? result.importedRows} 行，问题 ${result.failedRows ?? 0} 行`
+          : `导入 ${result.importedRows} 行，新增 ${result.created} 条，更新 ${result.updated} 条`,
+      );
       onImported(result.snapshot);
-      if (importInputRef.current) importInputRef.current.value = "";
+      if (mode === "import" && importInputRef.current) importInputRef.current.value = "";
     }
-    setImporting(false);
+    if (mode === "validate") setImportValidating(false);
+    else setImporting(false);
   };
-  const importOpeningData = async () => {
+  const importOpeningData = async (mode: "validate" | "import" = "import") => {
     const file = openingInputRef.current?.files?.[0];
     if (!file) {
       setOpeningError("请选择期初数据 Excel 或 CSV 文件。");
       return;
     }
-    setOpeningImporting(true);
+    if (mode === "validate") setOpeningValidating(true);
+    else setOpeningImporting(true);
     setOpeningError("");
     setOpeningMessage("");
+    setOpeningValidationRows([]);
     const data = new FormData();
     data.append("actorId", actorId);
     data.append("type", openingType);
+    data.append("mode", mode);
     data.append("note", "正式上线初始化导入");
     data.append("file", file);
     const response = await fetch("/api/opening/import", { method: "POST", body: data });
     const result = (await response.json()) as
-      | { ok: true; importedRows: number; created: number; updated: number; totalAmount: number; snapshot?: Snapshot }
-      | { error: string };
+      | { ok: true; importedRows: number; validRows?: number; failedRows?: number; created: number; updated: number; totalAmount: number; errors?: Row[]; snapshot?: Snapshot }
+      | { error: string; errors?: Row[]; validation?: { errors?: Row[]; failedRows?: number } };
     if (!response.ok || "error" in result) {
       setOpeningError("error" in result ? result.error : "初始化导入失败");
+      setOpeningValidationRows("validation" in result ? result.validation?.errors ?? [] : "errors" in result ? result.errors ?? [] : []);
     } else {
-      setOpeningMessage(`导入 ${result.importedRows} 行，生成 ${result.created} 条，金额 ${formatCurrency(result.totalAmount)}`);
+      setOpeningValidationRows(result.errors ?? []);
+      setOpeningMessage(
+        mode === "validate"
+          ? `预校验 ${result.importedRows} 行，通过 ${result.validRows ?? result.importedRows} 行，问题 ${result.failedRows ?? 0} 行，金额 ${formatCurrency(result.totalAmount)}`
+          : `导入 ${result.importedRows} 行，生成 ${result.created} 条，金额 ${formatCurrency(result.totalAmount)}`,
+      );
       onImported(result.snapshot);
-      if (openingInputRef.current) openingInputRef.current.value = "";
+      if (mode === "import" && openingInputRef.current) openingInputRef.current.value = "";
     }
-    setOpeningImporting(false);
+    if (mode === "validate") setOpeningValidating(false);
+    else setOpeningImporting(false);
   };
 
   return (
@@ -2905,8 +2930,25 @@ function MasterDataModule({
               />
               <button
                 type="button"
-                disabled={openingImporting}
-                onClick={importOpeningData}
+                onClick={() => downloadExport(actorId, `opening-template-${openingType}`)}
+                className="inline-flex h-9 items-center gap-2 rounded-md border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-700 hover:border-blue-300 hover:text-blue-700"
+              >
+                <FileSpreadsheet className="h-4 w-4" />
+                下载模板
+              </button>
+              <button
+                type="button"
+                disabled={openingValidating || openingImporting}
+                onClick={() => void importOpeningData("validate")}
+                className="inline-flex h-9 items-center gap-2 rounded-md border border-blue-200 bg-white px-3 text-xs font-semibold text-blue-700 hover:border-blue-300 hover:bg-blue-50 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                <FileCheck2 className="h-4 w-4" />
+                {openingValidating ? "校验中" : "预校验"}
+              </button>
+              <button
+                type="button"
+                disabled={openingImporting || openingValidating}
+                onClick={() => void importOpeningData("import")}
                 className="inline-flex h-9 items-center gap-2 rounded-md bg-blue-600 px-3 text-xs font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
               >
                 <Upload className="h-4 w-4" />
@@ -2920,6 +2962,11 @@ function MasterDataModule({
             {openingError ? <p className="mt-2 text-xs font-medium text-rose-700">{openingError}</p> : null}
           </div>
         </div>
+        {openingValidationRows.length > 0 ? (
+          <div className="mt-4">
+            <ImportErrorList rows={openingValidationRows} />
+          </div>
+        ) : null}
       </Panel>
 
       <DataTable
@@ -2929,12 +2976,31 @@ function MasterDataModule({
         columns={[
           { key: "import_no", label: "导入批次" },
           { key: "type_label", label: "类型" },
+          { key: "status_label", label: "状态", render: (value) => <StatusBadge value={String(value)} /> },
+          { key: "source_name", label: "来源文件" },
           { key: "imported_rows", label: "行数" },
+          { key: "valid_count", label: "通过" },
+          { key: "failed_count", label: "错误" },
           { key: "created_count", label: "生成" },
           { key: "total_amount", label: "金额", render: formatCurrency },
           { key: "actor_name", label: "导入人" },
           { key: "created_at", label: "导入时间", render: shortDate },
         ]}
+      />
+      <DataTable
+        title="初始化导入错误行台账"
+        icon={AlertTriangle}
+        rows={snapshot.board.initializationImportErrors}
+        columns={[
+          { key: "import_no", label: "导入批次" },
+          { key: "type_label", label: "类型" },
+          { key: "source_name", label: "来源文件" },
+          { key: "row_no", label: "行号" },
+          { key: "field_name", label: "字段" },
+          { key: "message", label: "错误原因" },
+          { key: "created_at", label: "记录时间", render: shortDate },
+        ]}
+        empty="暂无导入错误行"
       />
 
       <section className="rounded-lg border border-slate-200 bg-white shadow-sm">
@@ -2993,8 +3059,17 @@ function MasterDataModule({
             />
             <button
               type="button"
-              disabled={importing || !canEdit}
-              onClick={importMasterData}
+              disabled={importValidating || importing || !canEdit}
+              onClick={() => void importMasterData("validate")}
+              className="inline-flex h-9 items-center gap-2 rounded-md border border-blue-200 bg-white px-3 text-xs font-semibold text-blue-700 hover:border-blue-300 hover:bg-blue-50 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <FileCheck2 className="h-4 w-4" />
+              {importValidating ? "校验中" : "预校验"}
+            </button>
+            <button
+              type="button"
+              disabled={importing || importValidating || !canEdit}
+              onClick={() => void importMasterData("import")}
               className="inline-flex h-9 items-center gap-2 rounded-md bg-blue-600 px-3 text-xs font-semibold text-white shadow-sm hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
             >
               <Upload className="h-4 w-4" />
@@ -3002,6 +3077,11 @@ function MasterDataModule({
             </button>
           </div>
         </div>
+        {importValidationRows.length > 0 ? (
+          <div className="border-b border-slate-200 px-4 py-3">
+            <ImportErrorList rows={importValidationRows} />
+          </div>
+        ) : null}
 
         <div className="grid gap-5 p-4 xl:grid-cols-[360px_1fr]">
           <Panel
@@ -12340,6 +12420,44 @@ function DataTable({
         </table>
       </div>
     </section>
+  );
+}
+
+function ImportErrorList({ rows }: { rows: Row[] }) {
+  return (
+    <div className="rounded-md border border-rose-200 bg-rose-50/60">
+      <div className="flex items-center justify-between gap-3 border-b border-rose-100 px-3 py-2">
+        <div className="flex items-center gap-2 text-sm font-semibold text-rose-800">
+          <AlertTriangle className="h-4 w-4" />
+          导入错误行
+        </div>
+        <span className="text-xs font-medium text-rose-600">{rows.length} 行</span>
+      </div>
+      <div className="max-h-[220px] overflow-x-auto overflow-y-auto">
+        <table className="w-full min-w-[680px] text-left text-xs">
+          <thead>
+            <tr className="border-b border-rose-100 text-rose-700">
+              <th className="px-3 py-2">行号</th>
+              <th className="px-3 py-2">字段</th>
+              <th className="px-3 py-2">问题</th>
+              <th className="px-3 py-2">原始数据</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-rose-100">
+            {rows.map((row, index) => (
+              <tr key={`${String(row.rowNo ?? row.row_no ?? index)}-${String(row.fieldName ?? row.field_name ?? "")}`}>
+                <td className="px-3 py-2 font-semibold text-rose-900">{String(row.rowNo ?? row.row_no ?? "-")}</td>
+                <td className="px-3 py-2 text-rose-700">{String(row.fieldName ?? row.field_name ?? "-")}</td>
+                <td className="px-3 py-2 text-rose-700">{String(row.message ?? "-")}</td>
+                <td className="max-w-[260px] truncate px-3 py-2 text-rose-500">
+                  {String(row.raw_data_json ?? JSON.stringify(row.rawData ?? {}))}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
   );
 }
 

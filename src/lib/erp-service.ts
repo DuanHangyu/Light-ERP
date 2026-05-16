@@ -100,6 +100,39 @@ export type ReportFilters = {
   purchaseOrderId?: string;
 };
 
+export type ImportValidationErrorRow = {
+  rowNo: number;
+  fieldName: string;
+  message: string;
+  rawData: Record<string, unknown>;
+};
+
+export type ImportValidationResult = {
+  ok: boolean;
+  importId: string;
+  importNo: string;
+  type: string;
+  sourceName: string;
+  status: "validated" | "validation_failed" | "completed";
+  importedRows: number;
+  validRows: number;
+  failedRows: number;
+  created: number;
+  updated: number;
+  totalAmount: number;
+  errors: ImportValidationErrorRow[];
+};
+
+export class ImportValidationError extends Error {
+  result: ImportValidationResult;
+
+  constructor(result: ImportValidationResult) {
+    super(`导入校验未通过：${result.failedRows} 行存在问题，请先修正错误行。`);
+    this.name = "ImportValidationError";
+    this.result = result;
+  }
+}
+
 type Task = {
   id: string;
   title: string;
@@ -3544,11 +3577,25 @@ export function getSnapshot(actorId = "U-SALES") {
     SELECT ii.*, u.name AS actor_name
     FROM initialization_imports ii
     LEFT JOIN users u ON u.id = ii.actor_id
-    ORDER BY ii.created_at DESC
+    ORDER BY ii.created_at DESC, ii.rowid DESC
     LIMIT 20
   `).all() as Array<Record<string, unknown>>;
   initializationImports.forEach((item) => {
     item.type_label = initializationImportTypeLabel(String(item.type));
+    item.status_label = initializationImportStatusLabel(String(item.status));
+  });
+  const initializationImportErrors: Array<Record<string, unknown>> = database.prepare(`
+    SELECT iie.*, ii.import_no, ii.type, ii.source_name, ii.status,
+           u.name AS actor_name
+    FROM initialization_import_errors iie
+    JOIN initialization_imports ii ON ii.id = iie.import_id
+    LEFT JOIN users u ON u.id = ii.actor_id
+    ORDER BY iie.created_at DESC, ii.rowid DESC, iie.row_no ASC
+    LIMIT 60
+  `).all() as Array<Record<string, unknown>>;
+  initializationImportErrors.forEach((item) => {
+    item.type_label = initializationImportTypeLabel(String(item.type));
+    item.status_label = initializationImportStatusLabel(String(item.status));
   });
 
   const documentSequences = database.prepare(`
@@ -4169,6 +4216,7 @@ export function getSnapshot(actorId = "U-SALES") {
       ledgerRedOffsets,
       documentAttachments,
       initializationImports,
+      initializationImportErrors,
       documentExports,
       reportSnapshots,
       systemSettings,
@@ -4808,10 +4856,26 @@ function documentTypeLabel(documentType: string) {
 function initializationImportTypeLabel(type: string) {
   return (
     {
+      "master-customers": "客户主数据",
+      "master-suppliers": "供应商主数据",
+      "master-materials": "物料主数据",
+      "master-products": "产品主数据",
+      "master-boms": "BOM 主数据",
       "opening-inventory": "期初库存",
       "opening-receivables": "期初应收",
       "opening-payables": "期初应付",
     }[type] ?? type
+  );
+}
+
+function initializationImportStatusLabel(status: string) {
+  return (
+    {
+      completed: "已导入",
+      validated: "校验通过",
+      validation_failed: "校验失败",
+      failed: "导入失败",
+    }[status] ?? status
   );
 }
 
@@ -15145,7 +15209,10 @@ export async function buildExport(input: {
     | "master-template-suppliers"
     | "master-template-materials"
     | "master-template-products"
-    | "master-template-boms";
+    | "master-template-boms"
+    | "opening-template-opening-inventory"
+    | "opening-template-opening-receivables"
+    | "opening-template-opening-payables";
   format: "xlsx" | "csv";
   entityId?: string;
   filters?: ReportFilters;
@@ -15362,6 +15429,11 @@ export async function buildExport(input: {
     sheets.push({ name: `${masterType}_template`, rows: masterTemplateRows(masterType) });
   }
 
+  if (input.type.startsWith("opening-template-")) {
+    const openingType = input.type.replace("opening-template-", "") as OpeningDataType;
+    sheets.push({ name: `${openingType}_template`, rows: openingTemplateRows(openingType) });
+  }
+
   if (input.type.startsWith("master-") && !input.type.startsWith("master-template-")) {
     const masterType = input.type.replace("master-", "") as MasterDataType;
     sheets.push({ name: `${masterType}_master`, rows: masterExportRows(database, masterType) });
@@ -15401,6 +15473,7 @@ export function importMasterDataRows(input: {
   actorId: string;
   type: MasterDataType;
   rows: Array<Record<string, unknown>>;
+  sourceName?: string;
 }) {
   const database = getDb();
   const allowed: Record<MasterDataType, Role[]> = {
@@ -15413,8 +15486,42 @@ export function importMasterDataRows(input: {
   requireRole(database, input.actorId, allowed[input.type]);
   if (!input.rows.length) throw new Error("导入文件没有可用数据行。");
 
+  const validation = validateMasterDataRowsInternal(database, input);
+  if (validation.errors.length > 0) {
+    const result = recordInitializationImportBatch(database, {
+      actorId: input.actorId,
+      type: `master-${input.type}`,
+      sourceName: input.sourceName,
+      mode: "import",
+      status: "validation_failed",
+      importedRows: input.rows.length,
+      validRows: validation.validRows,
+      failedRows: validation.errors.length,
+      totalAmount: 0,
+      errors: validation.errors,
+      note: "主数据导入校验失败，未写入业务数据。",
+    });
+    throw new ImportValidationError(result);
+  }
+
   if (input.type === "boms") {
-    return importMasterBomRows(database, input.actorId, input.rows);
+    const result = importMasterBomRows(database, input.actorId, input.rows);
+    recordInitializationImportBatch(database, {
+      actorId: input.actorId,
+      type: "master-boms",
+      sourceName: input.sourceName,
+      mode: "import",
+      status: "completed",
+      importedRows: input.rows.length,
+      validRows: input.rows.length,
+      failedRows: 0,
+      created: result.created,
+      updated: result.updated,
+      totalAmount: 0,
+      errors: [],
+      note: "BOM 主数据正式导入完成。",
+    });
+    return result;
   }
 
   const masterType = input.type as Exclude<MasterDataType, "boms">;
@@ -15431,16 +15538,266 @@ export function importMasterDataRows(input: {
       else result.created += 1;
     });
   })();
+  recordInitializationImportBatch(database, {
+    actorId: input.actorId,
+    type: `master-${input.type}`,
+    sourceName: input.sourceName,
+    mode: "import",
+    status: "completed",
+    importedRows: input.rows.length,
+    validRows: input.rows.length,
+    failedRows: 0,
+    created: result.created,
+    updated: result.updated,
+    totalAmount: 0,
+    errors: [],
+    note: "主数据正式导入完成。",
+  });
   return result;
 }
 
 export type OpeningDataType = "opening-inventory" | "opening-receivables" | "opening-payables";
+
+type ImportValidationInput = {
+  actorId: string;
+  rows: Array<Record<string, unknown>>;
+  sourceName?: string;
+};
+
+function recordInitializationImportBatch(
+  database: Database.Database,
+  input: {
+    actorId: string;
+    type: string;
+    sourceName?: string;
+    mode: "validate" | "import";
+    status: "validated" | "validation_failed" | "completed";
+    importedRows: number;
+    validRows: number;
+    failedRows: number;
+    created?: number;
+    updated?: number;
+    totalAmount?: number;
+    errors: ImportValidationErrorRow[];
+    note?: string;
+  },
+): ImportValidationResult {
+  const importId = uid("INIT");
+  const importNo = serial(database, "initialization_imports", "DR");
+  const createdAt = now();
+  const errorSummary = input.errors
+    .slice(0, 5)
+    .map((error) => `第${error.rowNo}行 ${error.fieldName}：${error.message}`)
+    .join("；");
+  database.prepare(`
+    INSERT INTO initialization_imports (
+      id, import_no, type, status, imported_rows, created_count, updated_count,
+      total_amount, actor_id, note, source_name, mode, valid_count, failed_count,
+      error_summary, created_at
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    importId,
+    importNo,
+    input.type,
+    input.status,
+    input.importedRows,
+    input.created ?? 0,
+    input.updated ?? 0,
+    roundMoney(input.totalAmount ?? 0),
+    input.actorId,
+    input.note ?? initializationImportTypeLabel(input.type),
+    input.sourceName ?? "",
+    input.mode,
+    input.validRows,
+    input.failedRows,
+    errorSummary,
+    createdAt,
+  );
+  const insertError = database.prepare(`
+    INSERT INTO initialization_import_errors (
+      id, import_id, row_no, field_name, message, raw_data_json, created_at
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `);
+  input.errors.forEach((error) => {
+    insertError.run(
+      uid("IERR"),
+      importId,
+      error.rowNo,
+      error.fieldName,
+      error.message,
+      JSON.stringify(error.rawData ?? {}),
+      createdAt,
+    );
+  });
+  audit(
+    database,
+    input.actorId,
+    input.mode === "validate" ? "validateInitializationImport" : "importInitializationData",
+    "initialization_import",
+    importId,
+    `${initializationImportTypeLabel(input.type)}${input.mode === "validate" ? "预校验" : "导入"}：${input.validRows} 行通过，${input.failedRows} 行失败`,
+  );
+  return {
+    ok: input.failedRows === 0,
+    importId,
+    importNo,
+    type: input.type,
+    sourceName: input.sourceName ?? "",
+    status: input.status,
+    importedRows: input.importedRows,
+    validRows: input.validRows,
+    failedRows: input.failedRows,
+    created: input.created ?? 0,
+    updated: input.updated ?? 0,
+    totalAmount: roundMoney(input.totalAmount ?? 0),
+    errors: input.errors,
+  };
+}
+
+export function validateMasterDataRows(input: ImportValidationInput & { type: MasterDataType }) {
+  const database = getDb();
+  const allowed: Record<MasterDataType, Role[]> = {
+    customers: ["admin", "sales", "assistant"],
+    suppliers: ["admin", "purchasing"],
+    materials: ["admin", "purchasing", "warehouse"],
+    products: ["admin", "production"],
+    boms: ["admin", "production"],
+  };
+  requireRole(database, input.actorId, allowed[input.type]);
+  if (!input.rows.length) throw new Error("导入文件没有可用数据行。");
+  const validation = validateMasterDataRowsInternal(database, input);
+  return recordInitializationImportBatch(database, {
+    actorId: input.actorId,
+    type: `master-${input.type}`,
+    sourceName: input.sourceName,
+    mode: "validate",
+    status: validation.errors.length > 0 ? "validation_failed" : "validated",
+    importedRows: input.rows.length,
+    validRows: validation.validRows,
+    failedRows: validation.errors.length,
+    totalAmount: 0,
+    errors: validation.errors,
+    note: "主数据导入预校验。",
+  });
+}
+
+function validateMasterDataRowsInternal(
+  database: Database.Database,
+  input: ImportValidationInput & { type: MasterDataType },
+) {
+  const errors: ImportValidationErrorRow[] = [];
+  const seen = new Set<string>();
+  let validRows = 0;
+
+  input.rows.forEach((row, index) => {
+    const rowNo = index + 1;
+    const rowErrors: ImportValidationErrorRow[] = [];
+    try {
+      if (input.type === "boms") {
+        validateMasterBomRow(database, row, rowNo);
+      } else {
+        const masterType = input.type as Exclude<MasterDataType, "boms">;
+        const payload = masterPayloadFromRow(masterType, row, index);
+        validateMasterPayload(masterType, payload, rowNo);
+        const payloadRecord = payload as Record<string, unknown>;
+        const code = String(
+          payloadRecord[
+            {
+              customers: "customer_code",
+              suppliers: "supplier_code",
+              materials: "material_code",
+              products: "product_code",
+            }[masterType]
+          ] ?? "",
+        );
+        const codeKey = `${masterType}:${code.toLowerCase()}`;
+        if (seen.has(codeKey)) {
+          rowErrors.push({
+            rowNo,
+            fieldName: masterCodeField(masterType),
+            message: `${code} 在本次导入文件中重复。`,
+            rawData: row,
+          });
+        }
+        seen.add(codeKey);
+      }
+    } catch (error) {
+      rowErrors.push({
+        rowNo,
+        fieldName: masterErrorField(input.type, error instanceof Error ? error.message : ""),
+        message: error instanceof Error ? error.message : "数据行校验失败。",
+        rawData: row,
+      });
+    }
+
+    if (rowErrors.length > 0) errors.push(...rowErrors);
+    else validRows += 1;
+  });
+
+  return { validRows, errors };
+}
+
+function masterCodeField(type: Exclude<MasterDataType, "boms">) {
+  return {
+    customers: "customer_code",
+    suppliers: "supplier_code",
+    materials: "material_code",
+    products: "product_code",
+  }[type];
+}
+
+function validateMasterPayload(type: Exclude<MasterDataType, "boms">, payload: Record<string, unknown>, rowNo: number) {
+  if (type === "materials") {
+    payloadNumber(payload, "reorder_min_qty", `物料第 ${rowNo} 行安全库存`, { min: 0 });
+  }
+  if (type === "products") {
+    payloadNumber(payload, "process_fee", `产品第 ${rowNo} 行加工费`, { min: 0 });
+    payloadNumber(payload, "default_margin", `产品第 ${rowNo} 行默认利润率`, { min: 0 });
+  }
+}
+
+function masterErrorField(type: MasterDataType, message: string) {
+  if (message.includes("客户编码")) return "customer_code";
+  if (message.includes("供应商编码")) return "supplier_code";
+  if (message.includes("物料编码")) return "material_code";
+  if (message.includes("产品编码")) return "product_code";
+  if (message.includes("安全库存")) return "reorder_min_qty";
+  if (message.includes("加工费")) return "process_fee";
+  if (message.includes("利润率")) return "default_margin";
+  if (message.includes("单位用量")) return "qty_per";
+  if (message.includes("组件")) return "component_code";
+  return type === "boms" ? "bom_line" : "row";
+}
+
+function validateMasterBomRow(database: Database.Database, row: Record<string, unknown>, rowNo: number) {
+  const get = (keys: string[], fallback = "") => {
+    for (const key of keys) {
+      const value = row[key];
+      if (String(value ?? "").trim() !== "") return String(value).trim();
+    }
+    return fallback;
+  };
+  const productCodeOrId = get(["product_code", "product_id", "产品编码", "产品ID"]);
+  const parentCodeOrId = get(["parent_product_code", "parent_product_id", "父级产品编码", "父级产品ID"], productCodeOrId);
+  const componentTypeRaw = get(["component_type", "组件类型"], "material");
+  const componentCodeOrId = get(["component_code", "component_id", "组件编码", "组件ID", "物料编码"]);
+  const qtyPer = Number(get(["qty_per", "单位用量"], "0"));
+  resolveProduct(database, productCodeOrId);
+  resolveProduct(database, parentCodeOrId);
+  const componentType = componentTypeRaw === "product" || componentTypeRaw === "产品" ? "product" : "material";
+  if (componentType === "product") resolveProduct(database, componentCodeOrId);
+  else resolveMaterial(database, componentCodeOrId);
+  if (!Number.isFinite(qtyPer) || qtyPer <= 0) throw new Error(`BOM 第 ${rowNo} 行单位用量必须大于 0。`);
+}
 
 export function importOpeningDataRows(input: {
   actorId: string;
   type: OpeningDataType;
   rows: Array<Record<string, unknown>>;
   note?: string;
+  sourceName?: string;
 }) {
   const database = getDb();
   const allowed: Record<OpeningDataType, Role[]> = {
@@ -15450,6 +15807,24 @@ export function importOpeningDataRows(input: {
   };
   requireRole(database, input.actorId, allowed[input.type]);
   if (!input.rows.length) throw new Error("初始化导入文件没有可用数据行。");
+
+  const validation = validateOpeningDataRowsInternal(database, input);
+  if (validation.errors.length > 0) {
+    const result = recordInitializationImportBatch(database, {
+      actorId: input.actorId,
+      type: input.type,
+      sourceName: input.sourceName,
+      mode: "import",
+      status: "validation_failed",
+      importedRows: input.rows.length,
+      validRows: validation.validRows,
+      failedRows: validation.errors.length,
+      totalAmount: validation.totalAmount,
+      errors: validation.errors,
+      note: "期初数据导入校验失败，未写入业务数据。",
+    });
+    throw new ImportValidationError(result);
+  }
 
   const importId = uid("INIT");
   const importNo = serial(database, "initialization_imports", "DR");
@@ -15546,9 +15921,10 @@ export function importOpeningDataRows(input: {
     database.prepare(`
       INSERT INTO initialization_imports (
         id, import_no, type, status, imported_rows, created_count, updated_count,
-        total_amount, actor_id, note, created_at
+        total_amount, actor_id, note, source_name, mode, valid_count, failed_count,
+        error_summary, created_at
       )
-      VALUES (?, ?, ?, 'completed', ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, 'completed', ?, ?, ?, ?, ?, ?, ?, 'import', ?, 0, '', ?)
     `).run(
       importId,
       importNo,
@@ -15559,12 +15935,125 @@ export function importOpeningDataRows(input: {
       result.totalAmount,
       input.actorId,
       input.note ?? initializationImportTypeLabel(input.type),
+      input.sourceName ?? "",
+      result.importedRows,
       createdAt,
     );
     audit(database, input.actorId, "importOpeningData", "initialization_import", importId, `${initializationImportTypeLabel(input.type)}导入 ${result.importedRows} 行`);
   })();
 
   return result;
+}
+
+export function validateOpeningDataRows(input: ImportValidationInput & { type: OpeningDataType; note?: string }) {
+  const database = getDb();
+  const allowed: Record<OpeningDataType, Role[]> = {
+    "opening-inventory": ["admin", "warehouse"],
+    "opening-receivables": ["admin", "finance"],
+    "opening-payables": ["admin", "finance", "purchasing"],
+  };
+  requireRole(database, input.actorId, allowed[input.type]);
+  if (!input.rows.length) throw new Error("初始化导入文件没有可用数据行。");
+  const validation = validateOpeningDataRowsInternal(database, input);
+  return recordInitializationImportBatch(database, {
+    actorId: input.actorId,
+    type: input.type,
+    sourceName: input.sourceName,
+    mode: "validate",
+    status: validation.errors.length > 0 ? "validation_failed" : "validated",
+    importedRows: input.rows.length,
+    validRows: validation.validRows,
+    failedRows: validation.errors.length,
+    totalAmount: validation.totalAmount,
+    errors: validation.errors,
+    note: input.note || "期初数据导入预校验。",
+  });
+}
+
+function validateOpeningDataRowsInternal(
+  database: Database.Database,
+  input: ImportValidationInput & { type: OpeningDataType },
+) {
+  const errors: ImportValidationErrorRow[] = [];
+  const seenBatchKeys = new Set<string>();
+  let validRows = 0;
+  let totalAmount = 0;
+
+  input.rows.forEach((row, index) => {
+    const rowNo = index + 1;
+    try {
+      const amount = validateOpeningRow(database, input.type, row, index, seenBatchKeys);
+      validRows += 1;
+      totalAmount = roundMoney(totalAmount + amount);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "期初数据行校验失败。";
+      errors.push({
+        rowNo,
+        fieldName: openingErrorField(input.type, message),
+        message,
+        rawData: row,
+      });
+    }
+  });
+
+  return { validRows, totalAmount, errors };
+}
+
+function validateOpeningRow(
+  database: Database.Database,
+  type: OpeningDataType,
+  row: Record<string, unknown>,
+  index: number,
+  seenBatchKeys: Set<string>,
+) {
+  if (type === "opening-inventory") {
+    const material = resolveMaterial(database, openingText(row, ["material_code", "material_id", "物料编码", "物料ID"], index, "物料编码"));
+    const qty = openingNumber(row, ["qty", "数量", "期初数量"], index, "期初数量", { min: 0.000001 });
+    const unitCost = openingNumber(row, ["unit_cost", "单价", "移动均价", "期初单价"], index, "期初单价", { min: 0 });
+    const receivedAt = openingDate(row, ["received_at", "入库日期", "期初日期"], index, "期初日期", "2026-01-01");
+    const batchNo =
+      openingOptionalText(row, ["batch_no", "批次号", "期初批次"]) ||
+      `OPEN-${receivedAt.replaceAll("-", "")}-${material.id.replace(/[^A-Z0-9]/gi, "")}`;
+    const batchKey = `${material.id}:${batchNo}`;
+    if (seenBatchKeys.has(batchKey)) throw new Error(`初始化导入第 ${index + 1} 行批次号在本次文件中重复。`);
+    const existing = database
+      .prepare("SELECT id FROM material_batches WHERE material_id = ? AND batch_no = ?")
+      .get(material.id, batchNo) as { id: string } | undefined;
+    if (existing) throw new Error(`初始化导入第 ${index + 1} 行批次号已存在。`);
+    seenBatchKeys.add(batchKey);
+    return roundMoney(qty * unitCost);
+  }
+
+  if (type === "opening-receivables") {
+    resolveCustomer(database, openingText(row, ["customer_code", "customer_id", "客户编码", "客户ID"], index, "客户编码"));
+    const totalAmount = openingNumber(row, ["total_amount", "应收金额", "期初应收"], index, "应收金额", { min: 0.000001 });
+    const receivedAmount = openingNumber(row, ["received_amount", "已收金额"], index, "已收金额", { min: 0, fallback: 0 });
+    if (receivedAmount > totalAmount) throw new Error(`期初应收第 ${index + 1} 行已收金额不能大于应收金额。`);
+    openingDate(row, ["created_at", "发生日期", "期初日期"], index, "发生日期", "2026-01-01");
+    openingDate(row, ["due_date", "到期日"], index, "到期日", openingOptionalText(row, ["created_at", "发生日期", "期初日期"]) || "2026-01-01");
+    return totalAmount;
+  }
+
+  resolveSupplier(database, openingText(row, ["supplier_code", "supplier_id", "供应商编码", "供应商ID"], index, "供应商编码"));
+  const totalAmount = openingNumber(row, ["total_amount", "应付金额", "期初应付"], index, "应付金额", { min: 0.000001 });
+  const paidAmount = openingNumber(row, ["paid_amount", "已付金额"], index, "已付金额", { min: 0, fallback: 0 });
+  if (paidAmount > totalAmount) throw new Error(`期初应付第 ${index + 1} 行已付金额不能大于应付金额。`);
+  openingDate(row, ["created_at", "发生日期", "期初日期"], index, "发生日期", "2026-01-01");
+  openingDate(row, ["due_date", "到期日"], index, "到期日", openingOptionalText(row, ["created_at", "发生日期", "期初日期"]) || "2026-01-01");
+  return totalAmount;
+}
+
+function openingErrorField(type: OpeningDataType, message: string) {
+  if (message.includes("物料")) return "material_code";
+  if (message.includes("客户")) return "customer_code";
+  if (message.includes("供应商")) return "supplier_code";
+  if (message.includes("已收金额")) return "received_amount";
+  if (message.includes("已付金额")) return "paid_amount";
+  if (message.includes("应收金额")) return "total_amount";
+  if (message.includes("应付金额")) return "total_amount";
+  if (message.includes("批次")) return "batch_no";
+  if (message.includes("日期") || message.includes("到期日")) return "date";
+  return type;
 }
 
 function masterPayloadFromRow(type: MasterDataType, row: Record<string, unknown>, index: number) {
@@ -15949,6 +16438,44 @@ function masterTemplateRows(type: MasterDataType) {
         qty_per: 1,
         is_primary: "是",
         remark: "同一产品和版本可填写多行",
+      },
+    ],
+  };
+  return templates[type];
+}
+
+function openingTemplateRows(type: OpeningDataType) {
+  const templates: Record<OpeningDataType, Array<Record<string, unknown>>> = {
+    "opening-inventory": [
+      {
+        material_code: "WL-001",
+        batch_no: "OPEN-20260101-WL001",
+        qty: 100,
+        unit_cost: 12.5,
+        received_at: "2026-01-01",
+        note: "上线期初库存",
+      },
+    ],
+    "opening-receivables": [
+      {
+        customer_code: "KH-001",
+        receivable_no: "YS-OPEN-001",
+        total_amount: 10000,
+        received_amount: 2000,
+        created_at: "2026-01-01",
+        due_date: "2026-02-01",
+        note: "上线期初应收",
+      },
+    ],
+    "opening-payables": [
+      {
+        supplier_code: "GYS-001",
+        payable_no: "YF-OPEN-001",
+        total_amount: 8000,
+        paid_amount: 1000,
+        created_at: "2026-01-01",
+        due_date: "2026-02-01",
+        note: "上线期初应付",
       },
     ],
   };
