@@ -7928,6 +7928,143 @@ describe("ERP service formal report center", () => {
     expect(Number(snapshot.summary.unreadAlertCount ?? 0)).toBeLessThan(unreadBefore);
   });
 
+  it("configures cost anomaly warning subscriptions by role severity and task routing", async () => {
+    const service = await loadService();
+
+    let snapshot = service.getSnapshot("U-ADMIN") as unknown as {
+      tasks: Array<Record<string, unknown>>;
+      board: {
+        alertCenter: Array<Record<string, unknown>>;
+        alertSubscriptions: Array<Record<string, unknown>>;
+        costAnomalyWarningRules: Array<Record<string, unknown>>;
+        costAnomalyWarningEvents: Array<Record<string, unknown>>;
+        productionCostAdjustments: Array<Record<string, unknown>>;
+      };
+    };
+    expect(snapshot.board.alertSubscriptions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          role: "manager",
+          alert_type: "cost_anomaly_warning",
+          alert_type_label: "成本异常预警",
+          min_severity: "low",
+          enabled: 1,
+          route_to_tasks: 1,
+          task_routing_label: "进入待办",
+        }),
+      ]),
+    );
+
+    const amountRule = snapshot.board.costAnomalyWarningRules.find((item) => item.rule_code === "COST-AMOUNT-HIGH") as Record<string, unknown>;
+    service.performAction({
+      actorId: "U-ADMIN",
+      action: "upsertCostAnomalyWarningRule",
+      entityId: String(amountRule.id),
+      payload: {
+        rule_code: "COST-AMOUNT-HIGH",
+        rule_name: "单笔成本异常超额预警",
+        metric_key: "single_adjustment_amount",
+        operator: "gte",
+        threshold_value: "300",
+        window_days: "0",
+        severity: "high",
+        owner_id: "U-PROD",
+        auto_create_remediation: "true",
+        priority: "90",
+        status: "active",
+        description: "订阅配置测试：高等级成本预警。",
+      },
+    });
+    const high = createMaterialAdjustmentReviewException(service, { costAdjustmentAmount: "650" });
+    receiveFinishedGoodsForCostAdjustment(service, String(high.scenario.production.id), "成本预警订阅测试。");
+    service.performAction({
+      actorId: "U-PROD",
+      action: "resolveMaterialAdjustmentReviewException",
+      entityId: String(high.exception.id),
+      payload: {
+        resolution_type: "cost_adjustment",
+        final_cost_adjustment_amount: "650",
+        resolution_note: "成本异常预警订阅规则需要控制预警中心和待办。",
+      },
+    });
+    snapshot = service.getSnapshot("U-MGR") as typeof snapshot;
+    const adjustment = snapshot.board.productionCostAdjustments.find((item) => item.exception_id === high.exception.id) as Record<string, unknown>;
+    const event = snapshot.board.costAnomalyWarningEvents.find((item) => item.adjustment_id === adjustment.id) as Record<string, unknown>;
+    expect(snapshot.board.alertCenter).toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: `alert-cost-anomaly-warning-${event.id}` })]),
+    );
+    expect(snapshot.tasks).toEqual(
+      expect.arrayContaining([expect.objectContaining({ entityId: `alert-cost-anomaly-warning-${event.id}` })]),
+    );
+
+    service.performAction({
+      actorId: "U-ADMIN",
+      action: "upsertAlertSubscription",
+      payload: {
+        role: "manager",
+        alert_type: "cost_anomaly_warning",
+        min_severity: "high",
+        enabled: "true",
+        route_to_tasks: "false",
+      },
+    });
+    snapshot = service.getSnapshot("U-MGR") as typeof snapshot;
+    expect(snapshot.board.alertSubscriptions.find((item) => item.role === "manager" && item.alert_type === "cost_anomaly_warning")).toMatchObject({
+      enabled: 1,
+      min_severity: "high",
+      route_to_tasks: 0,
+      task_routing_label: "仅预警中心",
+    });
+    expect(snapshot.board.alertCenter).toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: `alert-cost-anomaly-warning-${event.id}` })]),
+    );
+    expect(snapshot.tasks).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ entityId: `alert-cost-anomaly-warning-${event.id}` })]),
+    );
+
+    service.performAction({
+      actorId: "U-ADMIN",
+      action: "upsertAlertSubscription",
+      payload: {
+        role: "manager",
+        alert_type: "cost_anomaly_warning",
+        min_severity: "critical",
+        enabled: "true",
+        route_to_tasks: "true",
+      },
+    });
+    snapshot = service.getSnapshot("U-MGR") as typeof snapshot;
+    expect(snapshot.board.alertCenter).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: `alert-cost-anomaly-warning-${event.id}` })]),
+    );
+    expect(snapshot.tasks).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ entityId: `alert-cost-anomaly-warning-${event.id}` })]),
+    );
+
+    service.performAction({
+      actorId: "U-ADMIN",
+      action: "upsertAlertSubscription",
+      payload: {
+        role: "finance",
+        alert_type: "cost_anomaly_warning",
+        min_severity: "low",
+        enabled: "false",
+        route_to_tasks: "true",
+      },
+    });
+    snapshot = service.getSnapshot("U-FIN") as typeof snapshot;
+    expect(snapshot.board.alertSubscriptions.find((item) => item.role === "finance" && item.alert_type === "cost_anomaly_warning")).toMatchObject({
+      enabled: 0,
+      route_to_tasks: 1,
+    });
+    expect(snapshot.board.alertCenter).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: `alert-cost-anomaly-warning-${event.id}` })]),
+    );
+    expect(snapshot.tasks).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ entityId: `alert-cost-anomaly-warning-${event.id}` })]),
+    );
+  });
+
   it("applies formal report query filters to reconciliation and inventory exports", async () => {
     const service = await loadService();
 
