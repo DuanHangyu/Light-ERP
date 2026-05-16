@@ -211,6 +211,8 @@ type Snapshot = {
     costAnomalyDrilldowns: Row[];
     costAnomalyRemediations: Row[];
     costAnomalyRemediationReviews: Row[];
+    costAnomalyWarningRules: Row[];
+    costAnomalyWarningEvents: Row[];
     materials: Row[];
     batches: Row[];
     inventoryAging: Row[];
@@ -399,6 +401,7 @@ const taskIcon: Record<string, typeof ClipboardList> = {
   markSystemHealthRemediationReady: Upload,
   rejectSystemHealthRemediationReview: X,
   closeSystemHealthRemediation: CheckCircle2,
+  upsertCostAnomalyWarningRule: ShieldCheck,
   voidBusinessDocument: FileCheck2,
   reverseBusinessDocument: RotateCcw,
   recordSalesReturn: RotateCcw,
@@ -493,7 +496,9 @@ const statusClass: Record<string, string> = {
   允许采购: "bg-emerald-50 text-emerald-700 ring-emerald-200",
   限制下单: "bg-rose-50 text-rose-700 ring-rose-200",
   自动生成整改: "bg-blue-50 text-blue-700 ring-blue-200",
+  已生成整改: "bg-blue-50 text-blue-700 ring-blue-200",
   仅记录事件: "bg-slate-100 text-slate-700 ring-slate-200",
+  仅记录: "bg-slate-100 text-slate-700 ring-slate-200",
   待复评: "bg-blue-50 text-blue-700 ring-blue-200",
   复评驳回: "bg-rose-50 text-rose-700 ring-rose-200",
   复评通过: "bg-emerald-50 text-emerald-700 ring-emerald-200",
@@ -628,6 +633,12 @@ function formatCurrency(value: unknown) {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   })}`;
+}
+
+function formatNumber(value: unknown) {
+  return Number(value ?? 0).toLocaleString("zh-CN", {
+    maximumFractionDigits: 2,
+  });
 }
 
 function formatQty(value: unknown, unit?: unknown) {
@@ -9395,6 +9406,7 @@ function ReportsModule({
   const canSubmitCostAnomalyRemediation = snapshot.security.currentPermissions.includes("markCostAnomalyRemediationReady");
   const canCloseCostAnomalyRemediation = snapshot.security.currentPermissions.includes("closeCostAnomalyRemediation");
   const canRejectCostAnomalyRemediation = snapshot.security.currentPermissions.includes("rejectCostAnomalyRemediationReview");
+  const canConfigureCostAnomalyWarnings = snapshot.security.currentPermissions.includes("upsertCostAnomalyWarningRule");
   const previewReport = (type: ReportPreviewType) => {
     setReportPreview(
       buildReportPreview({
@@ -9631,6 +9643,104 @@ function ReportsModule({
           action={{ label: "积压报表", onClick: () => downloadReport("inventory-overstock") }}
         />
       </div>
+      <div className="grid gap-5 xl:grid-cols-[1.25fr_0.75fr]">
+        <DataTable
+          title="成本异常预警规则配置"
+          icon={ShieldCheck}
+          rows={snapshot.board.costAnomalyWarningRules}
+          empty="暂无成本异常预警规则"
+          columns={[
+            { key: "rule_code", label: "规则编号" },
+            { key: "rule_name", label: "规则名称" },
+            { key: "metric_label", label: "预警指标" },
+            {
+              key: "threshold_value",
+              label: "触发口径",
+              render: (_value, row) =>
+                `${String(row.operator_label ?? "")}${formatNumber(row.threshold_value)} / ${String(row.window_label ?? "不限定")}`,
+            },
+            { key: "severity_label", label: "等级", render: (value) => <StatusBadge value={String(value)} /> },
+            { key: "status_label", label: "状态", render: (value) => <StatusBadge value={String(value)} /> },
+            { key: "auto_create_remediation_label", label: "整改策略", render: (value) => <StatusBadge value={String(value)} /> },
+            { key: "event_count", label: "触发次数" },
+            {
+              key: "warning_rule_ops",
+              label: "配置",
+              render: (_value, row) => (
+                <div className="flex flex-wrap gap-2">
+                  <DetailButton onClick={() => openDetail(costAnomalyWarningRuleDetail(row))} />
+                  {canConfigureCostAnomalyWarnings ? (
+                    <>
+                      <InlineActionButton
+                        label={String(row.status) === "active" ? "停用" : "启用"}
+                        busy={busy === `upsertCostAnomalyWarningRule-${String(row.id)}-primary`}
+                        onClick={() =>
+                          runAction({
+                            action: "upsertCostAnomalyWarningRule",
+                            entityId: String(row.id),
+                            payload: costAnomalyWarningRulePayload(row, {
+                              status: String(row.status) === "active" ? "inactive" : "active",
+                            }),
+                          })
+                        }
+                      />
+                      <InlineActionButton
+                        label="严格阈值"
+                        busy={busy === `upsertCostAnomalyWarningRule-${String(row.id)}-strict`}
+                        onClick={() =>
+                          runAction({
+                            action: "upsertCostAnomalyWarningRule",
+                            entityId: String(row.id),
+                            variant: "strict",
+                            payload: strictCostAnomalyWarningRulePayload(row),
+                          })
+                        }
+                      />
+                    </>
+                  ) : null}
+                </div>
+              ),
+            },
+          ]}
+        />
+        <Panel title="自动预警说明" icon={AlertTriangle} action="正式规则">
+          <div className="space-y-3 text-sm leading-6 text-slate-600">
+            <p>
+              系统会在成本调整创建、成本红冲成功时自动执行启用中的预警规则，覆盖单笔金额、同物料连续异常、同工单多次红冲三个正式管控场景。
+            </p>
+            <p>
+              命中阈值后会生成预警事件；规则开启“自动生成整改”时，同时写入成本异常整改任务并进入责任人待办。
+            </p>
+            <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-500">
+              “严格阈值”用于客户验收演示：单笔金额 300、同物料 2 次、同工单红冲 1 次，便于现场快速触发闭环。
+            </div>
+          </div>
+        </Panel>
+      </div>
+      <DataTable
+        title="成本异常预警触发记录"
+        icon={BellRing}
+        rows={snapshot.board.costAnomalyWarningEvents}
+        empty="暂无成本异常预警触发记录"
+        columns={[
+          { key: "event_no", label: "预警编号" },
+          { key: "rule_code", label: "规则编号" },
+          { key: "metric_label", label: "预警指标" },
+          { key: "actual_value", label: "当前值", render: formatNumber },
+          { key: "threshold_value", label: "阈值", render: formatNumber },
+          { key: "adjustment_no", label: "成本调整单" },
+          { key: "prod_no", label: "生产工单" },
+          { key: "material_name", label: "物料" },
+          { key: "event_status_label", label: "处理状态", render: (value) => <StatusBadge value={String(value)} /> },
+          { key: "remediation_no", label: "整改单" },
+          { key: "triggered_at", label: "触发时间", render: shortDate },
+          {
+            key: "warning_event_detail",
+            label: "详情",
+            render: (_value, row) => <DetailButton onClick={() => openDetail(costAnomalyWarningEventDetail(row))} />,
+          },
+        ]}
+      />
       <DataTable
         title="成本异常下钻明细"
         icon={Search}
@@ -11470,6 +11580,87 @@ function approvalRuleDetail(row: Row): DetailState {
     ["规则说明", "description"],
     ["创建时间", "created_at", shortDate],
     ["更新时间", "updated_at", shortDate],
+  ]);
+}
+
+function costAnomalyWarningRulePayload(row: Row, overrides: Record<string, unknown> = {}) {
+  return {
+    rule_code: String(row.rule_code ?? ""),
+    rule_name: String(row.rule_name ?? ""),
+    metric_key: String(row.metric_key ?? ""),
+    operator: String(row.operator ?? "gte"),
+    threshold_value: String(row.threshold_value ?? 0),
+    window_days: String(row.window_days ?? 0),
+    severity: String(row.severity ?? "medium"),
+    owner_id: String(row.owner_id ?? "U-PROD"),
+    auto_create_remediation: Number(row.auto_create_remediation ?? 1) ? "true" : "false",
+    priority: String(row.priority ?? 50),
+    status: String(row.status ?? "active"),
+    description: String(row.description ?? ""),
+    ...overrides,
+  };
+}
+
+function strictCostAnomalyWarningRulePayload(row: Row) {
+  const metric = String(row.metric_key ?? "");
+  const strictValues =
+    metric === "single_adjustment_amount"
+      ? { threshold_value: "300", window_days: "0", severity: "high" }
+      : metric === "material_anomaly_count"
+        ? { threshold_value: "2", window_days: "30", severity: "medium" }
+        : { threshold_value: "1", window_days: "90", severity: "critical" };
+  return costAnomalyWarningRulePayload(row, {
+    ...strictValues,
+    operator: "gte",
+    status: "active",
+    auto_create_remediation: "true",
+  });
+}
+
+function costAnomalyWarningRuleDetail(row: Row): DetailState {
+  return makeDetail("成本异常预警规则", String(row.rule_name), row, [
+    ["规则编号", "rule_code"],
+    ["规则名称", "rule_name"],
+    ["预警指标", "metric_label"],
+    ["触发条件", "operator_label"],
+    ["阈值", "threshold_value", formatNumber],
+    ["统计窗口", "window_label"],
+    ["整改等级", "severity_label"],
+    ["责任人", "owner_name"],
+    ["整改策略", "auto_create_remediation_label"],
+    ["状态", "status_label"],
+    ["触发次数", "event_count"],
+    ["已生成整改", "remediation_event_count"],
+    ["规则说明", "description"],
+    ["创建人", "created_by_name"],
+    ["创建时间", "created_at", shortDate],
+    ["更新人", "updated_by_name"],
+    ["更新时间", "updated_at", shortDate],
+  ]);
+}
+
+function costAnomalyWarningEventDetail(row: Row): DetailState {
+  return makeDetail("成本异常预警触发记录", String(row.event_no), row, [
+    ["预警编号", "event_no"],
+    ["规则编号", "rule_code"],
+    ["规则名称", "rule_name"],
+    ["预警指标", "metric_label"],
+    ["阈值", "threshold_value", formatNumber],
+    ["当前值", "actual_value", formatNumber],
+    ["处理状态", "event_status_label"],
+    ["触发来源", "trigger_source"],
+    ["触发原因", "trigger_reason"],
+    ["成本调整单", "adjustment_no"],
+    ["调整金额", "adjustment_amount", formatCurrency],
+    ["生产工单", "prod_no"],
+    ["客户订单", "order_no"],
+    ["客户", "customer_name"],
+    ["产品", "product_name"],
+    ["物料", "material_name"],
+    ["整改任务", "remediation_no"],
+    ["整改状态", "remediation_status_label"],
+    ["触发人", "triggered_by_name"],
+    ["触发时间", "triggered_at", shortDate],
   ]);
 }
 

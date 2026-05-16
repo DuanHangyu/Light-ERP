@@ -169,6 +169,7 @@ const roleActionMap: Record<string, Role[]> = {
   markCostAnomalyRemediationReady: ["production", "warehouse", "technical", "finance", "manager", "admin"],
   rejectCostAnomalyRemediationReview: ["manager", "finance", "admin"],
   closeCostAnomalyRemediation: ["manager", "finance", "admin"],
+  upsertCostAnomalyWarningRule: ["admin"],
   voidBusinessDocument: ["manager", "admin"],
   recordInventoryAgingDisposition: ["warehouse", "purchasing", "manager", "admin"],
   createStocktake: ["warehouse", "admin"],
@@ -260,6 +261,7 @@ const actionLabels: Record<string, string> = {
   markCostAnomalyRemediationReady: "提交成本异常整改复核",
   rejectCostAnomalyRemediationReview: "驳回成本异常整改复核",
   closeCostAnomalyRemediation: "关闭成本异常整改",
+  upsertCostAnomalyWarningRule: "配置成本异常预警规则",
   voidBusinessDocument: "作废业务单据",
   recordInventoryAgingDisposition: "登记积压处置",
   createStocktake: "录入库存盘点",
@@ -830,6 +832,26 @@ function costAnomalySeverityLabel(severity: string) {
       high: "高",
       critical: "重大",
     }[severity] ?? severity
+  );
+}
+
+function costAnomalyWarningMetricLabel(metric: string) {
+  return (
+    {
+      single_adjustment_amount: "单笔调整金额",
+      material_anomaly_count: "同物料异常次数",
+      work_order_reversal_count: "同工单红冲次数",
+    }[metric] ?? metric
+  );
+}
+
+function costAnomalyWarningEventStatusLabel(status: string) {
+  return (
+    {
+      remediation_created: "已生成整改",
+      skipped_existing: "已生成整改",
+      recorded: "仅记录",
+    }[status] ?? status
   );
 }
 
@@ -2794,6 +2816,8 @@ export function getSnapshot(actorId = "U-SALES") {
   const costAnomalyRemediationReviews = costAnomalyRemediationReviewRows(database);
   const costAnomalyDrilldowns = costAnomalyDrilldownRows(database);
   const costAnomalyAnalytics = costAnomalyAnalyticsRows(database);
+  const costAnomalyWarningRules = costAnomalyWarningRuleRows(database);
+  const costAnomalyWarningEvents = costAnomalyWarningEventRows(database);
 
   const finishedShipmentAllocations = database.prepare(`
     SELECT fsa.*, s.shipment_no, o.order_no, c.name AS customer_name,
@@ -3937,6 +3961,8 @@ export function getSnapshot(actorId = "U-SALES") {
       costAnomalyDrilldowns,
       costAnomalyRemediations,
       costAnomalyRemediationReviews,
+      costAnomalyWarningRules,
+      costAnomalyWarningEvents,
       materials,
       batches,
       inventoryAging,
@@ -4474,6 +4500,7 @@ function actionModuleLabel(action: string) {
       "markCostAnomalyRemediationReady",
       "rejectCostAnomalyRemediationReview",
       "closeCostAnomalyRemediation",
+      "upsertCostAnomalyWarningRule",
     ].includes(action)
   ) {
     return "报表中心";
@@ -4554,6 +4581,7 @@ function actionRiskLevel(action: string) {
       "resolveMaterialAdjustmentReviewException",
       "markCostAnomalyRemediationReady",
       "rejectCostAnomalyRemediationReview",
+      "upsertCostAnomalyWarningRule",
       "approveApproval",
       "rejectApproval",
       "upsertApprovalRule",
@@ -5181,6 +5209,138 @@ function costAnomalyRemediationReviewRows(database: Database.Database) {
       decision_label: costAnomalyRemediationDecisionLabel(String(row.decision)),
     };
   });
+}
+
+type CostAnomalyWarningRuleRow = {
+  id: string;
+  rule_code: string;
+  rule_name: string;
+  metric_key: string;
+  operator: string;
+  threshold_value: number;
+  window_days: number;
+  severity: string;
+  owner_id: string;
+  auto_create_remediation: number;
+  priority: number;
+  status: string;
+  description: string;
+};
+
+type CostAnomalyWarningRuleInput = ReturnType<typeof costAnomalyWarningRulePayload>;
+
+function costAnomalyWarningRuleStatusValue(value: string) {
+  if (["active", "inactive"].includes(value)) return value;
+  throw new Error("成本异常预警规则状态不正确。");
+}
+
+function costAnomalyWarningMetricValue(value: string) {
+  if (["single_adjustment_amount", "material_anomaly_count", "work_order_reversal_count"].includes(value)) return value;
+  throw new Error("成本异常预警规则指标不正确。");
+}
+
+function costAnomalyWarningRulePayload(rawPayload?: Record<string, unknown>) {
+  const payload = payloadObject(rawPayload);
+  const ruleCode = payloadText(payload, "rule_code", "规则编号");
+  if (!/^[A-Z0-9][A-Z0-9_-]{2,40}$/.test(ruleCode)) throw new Error("规则编号需为 3-41 位大写字母、数字、横线或下划线。");
+  const ruleName = payloadText(payload, "rule_name", "规则名称");
+  const metricKey = costAnomalyWarningMetricValue(payloadText(payload, "metric_key", "预警指标"));
+  const operator = supplierAdmissionRuleOperatorValue(payloadText(payload, "operator", "触发条件"));
+  const thresholdValue = roundMoney(payloadNumber(payload, "threshold_value", "阈值", { min: 0 }));
+  const windowDays = Math.round(payloadNumber(payload, "window_days", "统计窗口天数", { min: 0 }));
+  const severity = costAnomalySeverityValue(payloadText(payload, "severity", "整改等级", false) || "medium");
+  const ownerId = payloadText(payload, "owner_id", "整改责任人");
+  const autoCreateRemediation = booleanPayload(payload, "auto_create_remediation", true) ? 1 : 0;
+  const priority = Math.round(payloadNumber(payload, "priority", "规则优先级", { min: 0 }));
+  const status = costAnomalyWarningRuleStatusValue(payloadText(payload, "status", "规则状态", false) || "active");
+  return {
+    ruleCode,
+    ruleName,
+    metricKey,
+    operator,
+    thresholdValue,
+    windowDays,
+    severity,
+    ownerId,
+    autoCreateRemediation,
+    priority,
+    status,
+    description: payloadText(payload, "description", "规则说明", false),
+  };
+}
+
+function costAnomalyWarningRuleRows(database: Database.Database): Array<Record<string, unknown>> {
+  return (database.prepare(`
+    SELECT cawr.*,
+           owner.name AS owner_name,
+           owner.role AS owner_role,
+           owner.role_label AS owner_role_label,
+           creator.name AS created_by_name,
+           updater.name AS updated_by_name,
+           COALESCE(eventCounts.event_count, 0) AS event_count,
+           COALESCE(eventCounts.remediation_event_count, 0) AS remediation_event_count
+    FROM production_cost_anomaly_warning_rules cawr
+    LEFT JOIN users owner ON owner.id = cawr.owner_id
+    LEFT JOIN users creator ON creator.id = cawr.created_by
+    LEFT JOIN users updater ON updater.id = cawr.updated_by
+    LEFT JOIN (
+      SELECT rule_id,
+             COUNT(*) AS event_count,
+             SUM(CASE WHEN remediation_id IS NOT NULL THEN 1 ELSE 0 END) AS remediation_event_count
+      FROM production_cost_anomaly_warning_events
+      GROUP BY rule_id
+    ) eventCounts ON eventCounts.rule_id = cawr.id
+    ORDER BY CASE WHEN cawr.status = 'active' THEN 0 ELSE 1 END ASC, cawr.priority DESC, cawr.rule_code ASC
+  `).all() as Array<Record<string, unknown>>).map((row) => ({
+    ...row,
+    metric_label: costAnomalyWarningMetricLabel(String(row.metric_key)),
+    operator_label: supplierAdmissionOperatorLabel(String(row.operator)),
+    severity_label: costAnomalySeverityLabel(String(row.severity)),
+    status_label: supplierAdmissionRuleStatusLabel(String(row.status)),
+    auto_create_remediation_label: Number(row.auto_create_remediation) ? "自动生成整改" : "仅记录事件",
+    window_label: Number(row.window_days ?? 0) > 0 ? `${Number(row.window_days)} 天` : "不限定",
+  }));
+}
+
+function costAnomalyWarningEventRows(database: Database.Database): Array<Record<string, unknown>> {
+  return (database.prepare(`
+    SELECT event.*,
+           rule.severity,
+           rule.owner_id,
+           owner.name AS owner_name,
+           pca.adjustment_no,
+           pca.adjustment_amount,
+           pca.status AS adjustment_status,
+           po.prod_no,
+           o.order_no,
+           c.name AS customer_name,
+           p.name AS product_name,
+           m.material_code,
+           m.name AS material_name,
+           remediation.remediation_no,
+           remediation.status AS remediation_status,
+           triggerUser.name AS triggered_by_name
+    FROM production_cost_anomaly_warning_events event
+    JOIN production_cost_anomaly_warning_rules rule ON rule.id = event.rule_id
+    JOIN production_cost_adjustments pca ON pca.id = event.adjustment_id
+    JOIN production_orders po ON po.id = event.production_order_id
+    JOIN orders o ON o.id = event.order_id
+    JOIN customers c ON c.id = o.customer_id
+    JOIN products p ON p.id = o.product_id
+    LEFT JOIN materials m ON m.id = event.material_id
+    LEFT JOIN production_cost_anomaly_remediations remediation ON remediation.id = event.remediation_id
+    LEFT JOIN users owner ON owner.id = rule.owner_id
+    JOIN users triggerUser ON triggerUser.id = event.triggered_by
+    ORDER BY event.triggered_at DESC
+    LIMIT 180
+  `).all() as Array<Record<string, unknown>>).map((row) => ({
+    ...row,
+    metric_label: costAnomalyWarningMetricLabel(String(row.metric_key)),
+    event_status_label: costAnomalyWarningEventStatusLabel(String(row.event_status)),
+    severity_label: costAnomalySeverityLabel(String(row.severity)),
+    adjustment_status_label: productionCostAdjustmentStatusLabel(String(row.adjustment_status)),
+    remediation_status_label: row.remediation_status ? costAnomalyRemediationStatusLabel(String(row.remediation_status)) : "",
+  }));
 }
 
 function buildSystemHealthChecksFromDatabase(database: Database.Database, remediations: Array<Record<string, unknown>> = []) {
@@ -6310,6 +6470,9 @@ export function performAction(input: ActionInput) {
         break;
       case "createCostAnomalyRemediation":
         createCostAnomalyRemediation(database, input.actorId, mustEntity(input.entityId), input.payload);
+        break;
+      case "upsertCostAnomalyWarningRule":
+        upsertCostAnomalyWarningRule(database, input.actorId, input.entityId, input.payload);
         break;
       case "markCostAnomalyRemediationReady":
         markCostAnomalyRemediationReady(database, input.actorId, mustEntity(input.entityId), input.payload);
@@ -8546,8 +8709,11 @@ function postProductionCostAdjustment(
       .prepare("UPDATE production_cost_adjustments SET approval_request_id = ? WHERE id = ?")
       .run(approvalId, adjustmentId);
     audit(database, input.actorId, "submitProductionCostAdjustmentApproval", "production_cost_adjustment", adjustmentId, `发起工单成本调整审批 ${approvalNo}：${adjustmentNo}`);
+    evaluateCostAnomalyWarningRules(database, input.actorId, adjustmentId, "cost_adjustment_created");
     return;
   }
+
+  evaluateCostAnomalyWarningRules(database, input.actorId, adjustmentId, "cost_adjustment_created");
 
   if (!summary) {
     audit(database, input.actorId, "postProductionCostAdjustment", "production_cost_adjustment", adjustmentId, `登记待归集工单成本调整 ${adjustmentNo}`);
@@ -13093,6 +13259,351 @@ function createCostAnomalyRemediation(
   );
 }
 
+function upsertCostAnomalyWarningRule(
+  database: Database.Database,
+  actorId: string,
+  ruleId?: string,
+  rawPayload?: Record<string, unknown>,
+) {
+  const input = costAnomalyWarningRulePayload(rawPayload);
+  const owner = getUser(database, input.ownerId);
+  const timestamp = now();
+  const duplicate = database.prepare(`
+    SELECT id
+    FROM production_cost_anomaly_warning_rules
+    WHERE rule_code = ?
+      AND id != COALESCE(?, '')
+    LIMIT 1
+  `).get(input.ruleCode, ruleId ?? "") as { id: string } | undefined;
+  if (duplicate) throw new Error("成本异常预警规则编号已存在。");
+
+  if (ruleId) {
+    const existing = database.prepare("SELECT id FROM production_cost_anomaly_warning_rules WHERE id = ?").get(ruleId) as
+      | { id: string }
+      | undefined;
+    if (!existing) throw new Error("成本异常预警规则不存在。");
+    database.prepare(`
+      UPDATE production_cost_anomaly_warning_rules
+      SET rule_code = ?,
+          rule_name = ?,
+          metric_key = ?,
+          operator = ?,
+          threshold_value = ?,
+          window_days = ?,
+          severity = ?,
+          owner_id = ?,
+          auto_create_remediation = ?,
+          priority = ?,
+          status = ?,
+          description = ?,
+          updated_by = ?,
+          updated_at = ?
+      WHERE id = ?
+    `).run(
+      input.ruleCode,
+      input.ruleName,
+      input.metricKey,
+      input.operator,
+      input.thresholdValue,
+      input.windowDays,
+      input.severity,
+      owner.id,
+      input.autoCreateRemediation,
+      input.priority,
+      input.status,
+      input.description,
+      actorId,
+      timestamp,
+      existing.id,
+    );
+    audit(database, actorId, "upsertCostAnomalyWarningRule", "production_cost_anomaly_warning_rule", existing.id, `更新成本异常预警规则 ${input.ruleName}`);
+    return;
+  }
+
+  const id = uid("CAWR");
+  database.prepare(`
+    INSERT INTO production_cost_anomaly_warning_rules (
+      id, rule_code, rule_name, metric_key, operator, threshold_value,
+      window_days, severity, owner_id, auto_create_remediation, priority,
+      status, description, created_by, created_at, updated_by, updated_at
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    id,
+    input.ruleCode,
+    input.ruleName,
+    input.metricKey,
+    input.operator,
+    input.thresholdValue,
+    input.windowDays,
+    input.severity,
+    owner.id,
+    input.autoCreateRemediation,
+    input.priority,
+    input.status,
+    input.description,
+    actorId,
+    timestamp,
+    actorId,
+    timestamp,
+  );
+  audit(database, actorId, "upsertCostAnomalyWarningRule", "production_cost_anomaly_warning_rule", id, `新增成本异常预警规则 ${input.ruleName}`);
+}
+
+function costAnomalyAdjustmentContext(database: Database.Database, adjustmentId: string): Record<string, unknown> | undefined {
+  return database.prepare(`
+    SELECT pca.*,
+           po.prod_no,
+           o.order_no,
+           c.name AS customer_name,
+           p.name AS product_name,
+           exception.exception_no,
+           exception.reason_type,
+           pmaol.material_id,
+           m.material_code,
+           m.name AS material_name,
+           ar.request_no AS approval_request_no,
+           ar.status AS approval_status,
+           dr.reversal_no
+    FROM production_cost_adjustments pca
+    JOIN production_orders po ON po.id = pca.production_order_id
+    JOIN orders o ON o.id = pca.order_id
+    JOIN customers c ON c.id = o.customer_id
+    JOIN products p ON p.id = o.product_id
+    LEFT JOIN production_material_adjustment_review_exceptions exception ON exception.id = pca.exception_id
+    LEFT JOIN production_material_adjustment_orders pmao ON pmao.id = exception.order_id
+    LEFT JOIN production_material_adjustment_order_lines pmaol ON pmaol.order_id = pmao.id
+    LEFT JOIN materials m ON m.id = pmaol.material_id
+    LEFT JOIN approval_requests ar ON ar.id = pca.approval_request_id
+    LEFT JOIN document_reversals dr ON dr.id = pca.reversal_id
+    WHERE pca.id = ?
+    ORDER BY pmaol.created_at ASC, pmaol.rowid ASC
+    LIMIT 1
+  `).get(adjustmentId) as Record<string, unknown> | undefined;
+}
+
+function warningWindowCutoff(windowDays: number) {
+  if (!Number.isFinite(windowDays) || windowDays <= 0) return "";
+  const date = new Date();
+  date.setUTCDate(date.getUTCDate() - Math.round(windowDays));
+  return date.toISOString();
+}
+
+function costAnomalyWarningActualValue(
+  database: Database.Database,
+  rule: CostAnomalyWarningRuleRow,
+  adjustment: Record<string, unknown>,
+) {
+  if (rule.metric_key === "single_adjustment_amount") {
+    return roundMoney(Math.abs(Number(adjustment.adjustment_amount ?? 0)));
+  }
+
+  if (rule.metric_key === "material_anomaly_count") {
+    const materialId = String(adjustment.material_id ?? "");
+    if (!materialId) return 0;
+    const conditions = ["pmaol.material_id = ?"];
+    const params: unknown[] = [materialId];
+    const cutoff = warningWindowCutoff(Number(rule.window_days ?? 0));
+    if (cutoff) {
+      conditions.push("pca.created_at >= ?");
+      params.push(cutoff);
+    }
+    return scalarNumber(
+      database,
+      `
+        SELECT COUNT(DISTINCT pca.id) AS value
+        FROM production_cost_adjustments pca
+        JOIN production_material_adjustment_review_exceptions exception ON exception.id = pca.exception_id
+        JOIN production_material_adjustment_orders pmao ON pmao.id = exception.order_id
+        JOIN production_material_adjustment_order_lines pmaol ON pmaol.order_id = pmao.id
+        WHERE ${conditions.join(" AND ")}
+      `,
+      params,
+    );
+  }
+
+  if (rule.metric_key === "work_order_reversal_count") {
+    const conditions = ["production_order_id = ?", "status = 'reversed'"];
+    const params: unknown[] = [String(adjustment.production_order_id ?? "")];
+    const cutoff = warningWindowCutoff(Number(rule.window_days ?? 0));
+    if (cutoff) {
+      conditions.push("reversed_at >= ?");
+      params.push(cutoff);
+    }
+    return scalarNumber(
+      database,
+      `
+        SELECT COUNT(*) AS value
+        FROM production_cost_adjustments
+        WHERE ${conditions.join(" AND ")}
+      `,
+      params,
+    );
+  }
+
+  return 0;
+}
+
+function ensureAutomaticCostAnomalyRemediation(input: {
+  database: Database.Database;
+  actorId: string;
+  adjustment: Record<string, unknown>;
+  rule: CostAnomalyWarningRuleRow;
+  actualValue: number;
+}) {
+  const existing = input.database
+    .prepare("SELECT id, remediation_no FROM production_cost_anomaly_remediations WHERE adjustment_id = ?")
+    .get(String(input.adjustment.id)) as { id: string; remediation_no: string } | undefined;
+  if (existing) return { id: existing.id, remediationNo: existing.remediation_no, created: false };
+
+  const owner = getUser(input.database, input.rule.owner_id);
+  const timestamp = now();
+  const id = uid("CBZG");
+  const remediationNo = serial(input.database, "production_cost_anomaly_remediations", "CBZG");
+  const metricLabel = costAnomalyWarningMetricLabel(input.rule.metric_key);
+  const triggerSummary = `${input.rule.rule_code} ${input.rule.rule_name}：${metricLabel}${supplierAdmissionOperatorLabel(input.rule.operator)}${input.rule.threshold_value}，当前值 ${roundMoney(input.actualValue)}。`;
+  const sourceSnapshot = {
+    generated_by_rule: input.rule.rule_code,
+    generated_by_rule_name: input.rule.rule_name,
+    metric_key: input.rule.metric_key,
+    metric_label: metricLabel,
+    threshold_value: input.rule.threshold_value,
+    actual_value: roundMoney(input.actualValue),
+    adjustment_id: input.adjustment.id,
+    adjustment_no: input.adjustment.adjustment_no,
+    adjustment_amount: input.adjustment.adjustment_amount,
+    adjustment_status: input.adjustment.status,
+    prod_no: input.adjustment.prod_no,
+    order_no: input.adjustment.order_no,
+    customer_name: input.adjustment.customer_name,
+    product_name: input.adjustment.product_name,
+    material_id: input.adjustment.material_id,
+    material_name: input.adjustment.material_name,
+    exception_no: input.adjustment.exception_no,
+    reason_type: input.adjustment.reason_type,
+    approval_request_no: input.adjustment.approval_request_no,
+    approval_status: input.adjustment.approval_status,
+    reversal_no: input.adjustment.reversal_no,
+    generated_at: timestamp,
+  };
+
+  input.database.prepare(`
+    INSERT INTO production_cost_anomaly_remediations (
+      id, remediation_no, adjustment_id, production_order_id, order_id, exception_id,
+      severity, root_cause, corrective_action, preventive_action,
+      owner_id, due_date, status, result_note, review_note, source_snapshot_json,
+      created_by, created_at, submitted_by, submitted_at, closed_by, closed_at
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', '', '', ?, ?, ?, NULL, NULL, NULL, NULL)
+  `).run(
+    id,
+    remediationNo,
+    input.adjustment.id,
+    input.adjustment.production_order_id,
+    input.adjustment.order_id,
+    input.adjustment.exception_id ?? null,
+    input.rule.severity,
+    `系统预警自动生成：${triggerSummary}`,
+    "复核生产工单、补退料单、审批记录和红冲记录，补齐成本异常处理依据。",
+    "将本规则纳入月度成本复盘；同类物料或同一工单连续异常时提前预警并要求责任人复核。",
+    owner.id,
+    addDays(timestamp, input.rule.severity === "critical" ? 3 : 7),
+    JSON.stringify(sourceSnapshot),
+    input.actorId,
+    timestamp,
+  );
+  audit(
+    input.database,
+    input.actorId,
+    "autoCreateCostAnomalyRemediation",
+    "production_cost_anomaly_remediation",
+    id,
+    `${remediationNo} / ${String(input.adjustment.adjustment_no)}，由预警规则 ${input.rule.rule_code} 自动生成`,
+  );
+  return { id, remediationNo, created: true };
+}
+
+function evaluateCostAnomalyWarningRules(
+  database: Database.Database,
+  actorId: string,
+  adjustmentId: string,
+  triggerSource: string,
+) {
+  const adjustment = costAnomalyAdjustmentContext(database, adjustmentId);
+  if (!adjustment) return;
+  const rules = database.prepare(`
+    SELECT *
+    FROM production_cost_anomaly_warning_rules
+    WHERE status = 'active'
+    ORDER BY priority DESC, rule_code ASC
+  `).all() as CostAnomalyWarningRuleRow[];
+  for (const rule of rules) {
+    const existing = database.prepare(`
+      SELECT id
+      FROM production_cost_anomaly_warning_events
+      WHERE rule_id = ?
+        AND adjustment_id = ?
+      LIMIT 1
+    `).get(rule.id, adjustmentId) as { id: string } | undefined;
+    if (existing) continue;
+
+    const actualValue = costAnomalyWarningActualValue(database, rule, adjustment);
+    if (!supplierAdmissionRuleMatches(actualValue, rule.operator, Number(rule.threshold_value))) continue;
+
+    let remediation: { id: string; remediationNo: string; created: boolean } | null = null;
+    if (Number(rule.auto_create_remediation)) {
+      remediation = ensureAutomaticCostAnomalyRemediation({
+        database,
+        actorId,
+        adjustment,
+        rule,
+        actualValue,
+      });
+    }
+
+    const eventId = uid("CBYJ");
+    const eventNo = serial(database, "production_cost_anomaly_warning_events", "CBYJ");
+    const triggerReason = `${costAnomalyWarningMetricLabel(rule.metric_key)}${supplierAdmissionOperatorLabel(rule.operator)}${rule.threshold_value}，当前值 ${roundMoney(actualValue)}；来源 ${triggerSource}。`;
+    const eventStatus = remediation ? (remediation.created ? "remediation_created" : "skipped_existing") : "recorded";
+    database.prepare(`
+      INSERT INTO production_cost_anomaly_warning_events (
+        id, event_no, rule_id, rule_code, rule_name, metric_key,
+        threshold_value, actual_value, adjustment_id, production_order_id, order_id,
+        material_id, remediation_id, event_status, trigger_source, trigger_reason,
+        triggered_by, triggered_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      eventId,
+      eventNo,
+      rule.id,
+      rule.rule_code,
+      rule.rule_name,
+      rule.metric_key,
+      roundMoney(Number(rule.threshold_value)),
+      roundMoney(actualValue),
+      adjustment.id,
+      adjustment.production_order_id,
+      adjustment.order_id,
+      adjustment.material_id || null,
+      remediation?.id ?? null,
+      eventStatus,
+      triggerSource,
+      triggerReason,
+      actorId,
+      now(),
+    );
+    audit(
+      database,
+      actorId,
+      "triggerCostAnomalyWarningRule",
+      "production_cost_anomaly_warning_event",
+      eventId,
+      `${eventNo} / ${rule.rule_code} / ${String(adjustment.adjustment_no)}：${triggerReason}`,
+    );
+  }
+}
+
 function insertCostAnomalyRemediationReview(
   database: Database.Database,
   input: {
@@ -13579,6 +14090,7 @@ function reverseProductionCostAdjustment(database: Database.Database, actorId: s
     WHERE id = ?
   `).run(reversal.reversalId, actorId, reversal.reversedAt, reason, adjustment.id);
   audit(database, actorId, "reverseProductionCostAdjustment", "production_cost_adjustment", adjustment.id, `红冲工单成本调整 ${adjustment.adjustment_no}：${reason}`);
+  evaluateCostAnomalyWarningRules(database, actorId, adjustment.id, "cost_adjustment_reversed");
 }
 
 function reversePurchaseReceipt(database: Database.Database, actorId: string, purchaseOrderId: string, reason: string) {

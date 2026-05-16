@@ -3336,6 +3336,63 @@ function applyMigrations(database: Database.Database) {
         `);
       },
     },
+    {
+      id: "056_cost_anomaly_warning_rules",
+      description: "成本异常预警规则配置、触发事件与自动整改",
+      up: () => {
+        database.exec(`
+          CREATE TABLE IF NOT EXISTS production_cost_anomaly_warning_rules (
+            id TEXT PRIMARY KEY,
+            rule_code TEXT NOT NULL UNIQUE,
+            rule_name TEXT NOT NULL,
+            metric_key TEXT NOT NULL,
+            operator TEXT NOT NULL,
+            threshold_value REAL NOT NULL,
+            window_days INTEGER NOT NULL DEFAULT 0,
+            severity TEXT NOT NULL DEFAULT 'medium',
+            owner_id TEXT NOT NULL REFERENCES users(id),
+            auto_create_remediation INTEGER NOT NULL DEFAULT 1,
+            priority INTEGER NOT NULL DEFAULT 50,
+            status TEXT NOT NULL DEFAULT 'inactive',
+            description TEXT NOT NULL DEFAULT '',
+            created_by TEXT REFERENCES users(id),
+            created_at TEXT NOT NULL,
+            updated_by TEXT REFERENCES users(id),
+            updated_at TEXT NOT NULL
+          );
+          CREATE INDEX IF NOT EXISTS idx_cost_anomaly_warning_rules_active
+            ON production_cost_anomaly_warning_rules(status, priority, metric_key);
+
+          CREATE TABLE IF NOT EXISTS production_cost_anomaly_warning_events (
+            id TEXT PRIMARY KEY,
+            event_no TEXT NOT NULL UNIQUE,
+            rule_id TEXT NOT NULL REFERENCES production_cost_anomaly_warning_rules(id),
+            rule_code TEXT NOT NULL,
+            rule_name TEXT NOT NULL,
+            metric_key TEXT NOT NULL,
+            threshold_value REAL NOT NULL,
+            actual_value REAL NOT NULL,
+            adjustment_id TEXT NOT NULL REFERENCES production_cost_adjustments(id),
+            production_order_id TEXT NOT NULL REFERENCES production_orders(id),
+            order_id TEXT NOT NULL REFERENCES orders(id),
+            material_id TEXT REFERENCES materials(id),
+            remediation_id TEXT REFERENCES production_cost_anomaly_remediations(id),
+            event_status TEXT NOT NULL,
+            trigger_source TEXT NOT NULL,
+            trigger_reason TEXT NOT NULL DEFAULT '',
+            triggered_by TEXT NOT NULL REFERENCES users(id),
+            triggered_at TEXT NOT NULL
+          );
+          CREATE UNIQUE INDEX IF NOT EXISTS ux_cost_anomaly_warning_event_rule_adjustment
+            ON production_cost_anomaly_warning_events(rule_id, adjustment_id);
+          CREATE INDEX IF NOT EXISTS idx_cost_anomaly_warning_events_rule
+            ON production_cost_anomaly_warning_events(rule_code, triggered_at);
+          CREATE INDEX IF NOT EXISTS idx_cost_anomaly_warning_events_adjustment
+            ON production_cost_anomaly_warning_events(adjustment_id);
+        `);
+        seedDefaultCostAnomalyWarningRules(database);
+      },
+    },
   ];
 
   const applied = database
@@ -3370,6 +3427,7 @@ function backfillDocumentSequences(database: Database.Database) {
     { table: "production_cost_summaries", column: "cost_no", prefix: "CB" },
     { table: "production_cost_adjustments", column: "adjustment_no", prefix: "CBTZ" },
     { table: "production_cost_anomaly_remediations", column: "remediation_no", prefix: "CBZG" },
+    { table: "production_cost_anomaly_warning_events", column: "event_no", prefix: "CBYJ" },
     { table: "shipments", column: "shipment_no", prefix: "FH" },
     { table: "receivables", column: "receivable_no", prefix: "YS" },
     { table: "purchase_orders", column: "purchase_no", prefix: "CG" },
@@ -3652,6 +3710,8 @@ export function resetDemoDatabase() {
     DELETE FROM finished_shipment_allocations;
     DELETE FROM shipments;
     DELETE FROM finished_batches;
+    DELETE FROM production_cost_anomaly_warning_events;
+    DELETE FROM production_cost_anomaly_warning_rules;
     DELETE FROM production_cost_anomaly_remediation_reviews;
     DELETE FROM production_cost_anomaly_remediations;
     DELETE FROM production_cost_adjustments;
@@ -3987,6 +4047,51 @@ const defaultSupplierAdmissionRules = [
   },
 ] as const;
 
+const defaultCostAnomalyWarningRules = [
+  {
+    id: "CAWR-AMOUNT-HIGH",
+    ruleCode: "COST-AMOUNT-HIGH",
+    ruleName: "单笔成本异常超额预警",
+    metricKey: "single_adjustment_amount",
+    operator: "gte",
+    thresholdValue: 500,
+    windowDays: 0,
+    severity: "high",
+    ownerId: "U-PROD",
+    autoCreateRemediation: 1,
+    priority: 90,
+    description: "单笔工单成本调整金额达到阈值时自动生成成本异常整改任务。",
+  },
+  {
+    id: "CAWR-MATERIAL-FREQUENT",
+    ruleCode: "COST-MATERIAL-FREQUENT",
+    ruleName: "同物料连续成本异常预警",
+    metricKey: "material_anomaly_count",
+    operator: "gte",
+    thresholdValue: 2,
+    windowDays: 30,
+    severity: "medium",
+    ownerId: "U-PROD",
+    autoCreateRemediation: 1,
+    priority: 80,
+    description: "同一物料在统计窗口内连续发生成本异常时自动生成整改任务。",
+  },
+  {
+    id: "CAWR-WORKORDER-REVERSAL",
+    ruleCode: "COST-WORKORDER-REVERSAL",
+    ruleName: "同工单多次红冲预警",
+    metricKey: "work_order_reversal_count",
+    operator: "gte",
+    thresholdValue: 2,
+    windowDays: 90,
+    severity: "critical",
+    ownerId: "U-PROD",
+    autoCreateRemediation: 1,
+    priority: 100,
+    description: "同一生产工单在统计窗口内多次发生成本红冲时自动生成整改任务。",
+  },
+] as const;
+
 function seedDefaultApprovalRules(database: Database.Database) {
   const timestamp = new Date().toISOString();
   const insert = database.prepare(`
@@ -4073,11 +4178,45 @@ function seedDefaultSupplierAdmissionRules(database: Database.Database) {
   );
 }
 
+function seedDefaultCostAnomalyWarningRules(database: Database.Database) {
+  const ownerExists = database.prepare("SELECT id FROM users WHERE id = 'U-PROD'").get();
+  const adminExists = database.prepare("SELECT id FROM users WHERE id = 'U-ADMIN'").get();
+  if (!ownerExists || !adminExists) return;
+  const timestamp = new Date().toISOString();
+  const insert = database.prepare(`
+    INSERT OR IGNORE INTO production_cost_anomaly_warning_rules (
+      id, rule_code, rule_name, metric_key, operator, threshold_value,
+      window_days, severity, owner_id, auto_create_remediation, priority,
+      status, description, created_by, created_at, updated_by, updated_at
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'inactive', ?, 'U-ADMIN', ?, 'U-ADMIN', ?)
+  `);
+  defaultCostAnomalyWarningRules.forEach((rule) =>
+    insert.run(
+      rule.id,
+      rule.ruleCode,
+      rule.ruleName,
+      rule.metricKey,
+      rule.operator,
+      rule.thresholdValue,
+      rule.windowDays,
+      rule.severity,
+      rule.ownerId,
+      rule.autoCreateRemediation,
+      rule.priority,
+      rule.description,
+      timestamp,
+      timestamp,
+    ),
+  );
+}
+
 function seedDefaultGovernanceData(database: Database.Database) {
   seedDefaultApprovalRules(database);
   seedDefaultAlertSubscriptions(database);
   seedDefaultSystemSettings(database);
   seedDefaultSupplierAdmissionRules(database);
+  seedDefaultCostAnomalyWarningRules(database);
 }
 
 function seedProductionBaseData(database: Database.Database) {
@@ -4347,6 +4486,7 @@ function seedDemoData(database: Database.Database) {
 function seedEnhancementData(database: Database.Database) {
   const now = new Date().toISOString();
   seedDefaultSupplierAdmissionRules(database);
+  seedDefaultCostAnomalyWarningRules(database);
   const certificateCount = database.prepare("SELECT COUNT(*) AS count FROM supplier_qualification_certificates").get() as { count: number };
   if (certificateCount.count === 0) {
     const insertCertificate = database.prepare(`
