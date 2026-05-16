@@ -7805,6 +7805,129 @@ describe("ERP service formal report center", () => {
     );
   });
 
+  it("pushes cost anomaly warning events into overview notifications and manager dashboard", async () => {
+    const service = await loadService();
+
+    let snapshot = service.getSnapshot("U-ADMIN") as unknown as {
+      summary: Record<string, unknown>;
+      tasks: Array<Record<string, unknown>>;
+      board: {
+        alertCenter: Array<Record<string, unknown>>;
+        costAnomalyWarningRules: Array<Record<string, unknown>>;
+        costAnomalyWarningEvents: Array<Record<string, unknown>>;
+        costAnomalyWarningDashboard: {
+          totals?: Record<string, unknown>;
+          bySeverity?: Array<Record<string, unknown>>;
+          recentEvents?: Array<Record<string, unknown>>;
+        };
+        productionCostAdjustments: Array<Record<string, unknown>>;
+      };
+    };
+    const amountRule = snapshot.board.costAnomalyWarningRules.find((item) => item.rule_code === "COST-AMOUNT-HIGH") as Record<string, unknown>;
+    service.performAction({
+      actorId: "U-ADMIN",
+      action: "upsertCostAnomalyWarningRule",
+      entityId: String(amountRule.id),
+      payload: {
+        rule_code: "COST-AMOUNT-HIGH",
+        rule_name: "单笔成本异常超额预警",
+        metric_key: "single_adjustment_amount",
+        operator: "gte",
+        threshold_value: "300",
+        window_days: "0",
+        severity: "high",
+        owner_id: "U-PROD",
+        auto_create_remediation: "true",
+        priority: "90",
+        status: "active",
+        description: "单笔工单成本调整金额达到 300 元时推送经营总览预警。",
+      },
+    });
+
+    const high = createMaterialAdjustmentReviewException(service, { costAdjustmentAmount: "650" });
+    receiveFinishedGoodsForCostAdjustment(service, String(high.scenario.production.id), "成本预警通知增强测试。");
+    service.performAction({
+      actorId: "U-PROD",
+      action: "resolveMaterialAdjustmentReviewException",
+      entityId: String(high.exception.id),
+      payload: {
+        resolution_type: "cost_adjustment",
+        final_cost_adjustment_amount: "650",
+        resolution_note: "成本异常预警通知需要进入经营总览和管理层看板。",
+      },
+    });
+
+    snapshot = service.getSnapshot("U-MGR") as typeof snapshot;
+    const adjustment = snapshot.board.productionCostAdjustments.find((item) => item.exception_id === high.exception.id) as Record<string, unknown>;
+    const event = snapshot.board.costAnomalyWarningEvents.find((item) => item.adjustment_id === adjustment.id) as Record<string, unknown>;
+    expect(event).toMatchObject({
+      rule_code: "COST-AMOUNT-HIGH",
+      severity: "high",
+      event_status_label: "已生成整改",
+      remediation_no: expect.stringMatching(/^CBZG-/),
+    });
+    expect(snapshot.summary).toMatchObject({
+      costAnomalyWarningEventCount: expect.any(Number),
+      costAnomalyWarningOpenCount: expect.any(Number),
+      costAnomalyWarningCriticalCount: expect.any(Number),
+    });
+    expect(Number(snapshot.summary.costAnomalyWarningEventCount)).toBeGreaterThanOrEqual(1);
+    expect(Number(snapshot.summary.costAnomalyWarningOpenCount)).toBeGreaterThanOrEqual(1);
+    expect(snapshot.board.costAnomalyWarningDashboard.totals).toMatchObject({
+      total_count: expect.any(Number),
+      open_count: expect.any(Number),
+      high_count: expect.any(Number),
+      unresolved_amount: expect.any(Number),
+    });
+    expect(snapshot.board.costAnomalyWarningDashboard.recentEvents).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: event.id,
+          rule_code: "COST-AMOUNT-HIGH",
+          remediation_no: event.remediation_no,
+        }),
+      ]),
+    );
+    expect(snapshot.board.alertCenter).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: `alert-cost-anomaly-warning-${event.id}`,
+          alert_type: "cost_anomaly_warning",
+          alert_type_label: "成本异常预警",
+          severity: "high",
+          module_label: "报表中心",
+          entity_id: event.remediation_id,
+          action: "markCostAnomalyRemediationReady",
+          title: expect.stringContaining("成本异常预警"),
+        }),
+      ]),
+    );
+    expect(snapshot.tasks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          title: expect.stringContaining("成本异常预警"),
+          action: "markAlertRead",
+          entityId: `alert-cost-anomaly-warning-${event.id}`,
+          payload: expect.objectContaining({ alert_type: "cost_anomaly_warning" }),
+        }),
+      ]),
+    );
+
+    const unreadBefore = Number(snapshot.summary.unreadAlertCount ?? 0);
+    service.performAction({
+      actorId: "U-MGR",
+      action: "markAlertRead",
+      entityId: `alert-cost-anomaly-warning-${event.id}`,
+      payload: { alert_type: "cost_anomaly_warning" },
+    });
+    snapshot = service.getSnapshot("U-MGR") as typeof snapshot;
+    expect(snapshot.board.alertCenter.find((item) => item.id === `alert-cost-anomaly-warning-${event.id}`)).toMatchObject({
+      message_status: "read",
+      status_label: "已读",
+    });
+    expect(Number(snapshot.summary.unreadAlertCount ?? 0)).toBeLessThan(unreadBefore);
+  });
+
   it("applies formal report query filters to reconciliation and inventory exports", async () => {
     const service = await loadService();
 
