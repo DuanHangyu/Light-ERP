@@ -1100,6 +1100,7 @@ function applySchema(database: Database.Database) {
       alert_type TEXT NOT NULL,
       min_severity TEXT NOT NULL DEFAULT 'low',
       enabled INTEGER NOT NULL DEFAULT 1,
+      route_to_tasks INTEGER NOT NULL DEFAULT 1,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
       UNIQUE(role, alert_type)
@@ -1788,6 +1789,7 @@ function applyMigrations(database: Database.Database) {
             alert_type TEXT NOT NULL,
             min_severity TEXT NOT NULL DEFAULT 'low',
             enabled INTEGER NOT NULL DEFAULT 1,
+            route_to_tasks INTEGER NOT NULL DEFAULT 1,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             UNIQUE(role, alert_type)
@@ -1811,6 +1813,7 @@ function applyMigrations(database: Database.Database) {
           CREATE INDEX IF NOT EXISTS idx_alert_message_states_alert_key
             ON alert_message_states(alert_key);
         `);
+        ensureColumn(database, "alert_subscriptions", "route_to_tasks", "INTEGER NOT NULL DEFAULT 1");
       },
     },
     {
@@ -3393,6 +3396,14 @@ function applyMigrations(database: Database.Database) {
         seedDefaultCostAnomalyWarningRules(database);
       },
     },
+    {
+      id: "057_alert_subscription_task_routing",
+      description: "预警订阅是否进入待办配置",
+      up: () => {
+        ensureColumn(database, "alert_subscriptions", "route_to_tasks", "INTEGER NOT NULL DEFAULT 1");
+        seedDefaultAlertSubscriptions(database);
+      },
+    },
   ];
 
   const applied = database
@@ -3887,6 +3898,7 @@ const defaultAlertSubscriptions = [
   { role: "admin", alertType: "quality_yield_warning", minSeverity: "low" },
   { role: "admin", alertType: "mrp_shortage", minSeverity: "low" },
   { role: "admin", alertType: "system_health_remediation_due", minSeverity: "low" },
+  { role: "admin", alertType: "cost_anomaly_warning", minSeverity: "low" },
   { role: "manager", alertType: "low_stock", minSeverity: "low" },
   { role: "manager", alertType: "inventory_stale", minSeverity: "low" },
   { role: "manager", alertType: "inventory_overstock", minSeverity: "low" },
@@ -3896,6 +3908,7 @@ const defaultAlertSubscriptions = [
   { role: "manager", alertType: "quality_yield_warning", minSeverity: "low" },
   { role: "manager", alertType: "mrp_shortage", minSeverity: "low" },
   { role: "manager", alertType: "system_health_remediation_due", minSeverity: "low" },
+  { role: "manager", alertType: "cost_anomaly_warning", minSeverity: "low" },
   { role: "sales", alertType: "system_health_remediation_due", minSeverity: "low" },
   { role: "assistant", alertType: "system_health_remediation_due", minSeverity: "low" },
   { role: "purchasing", alertType: "low_stock", minSeverity: "low" },
@@ -3914,6 +3927,7 @@ const defaultAlertSubscriptions = [
   { role: "finance", alertType: "receivable_due", minSeverity: "low" },
   { role: "finance", alertType: "payable_due", minSeverity: "low" },
   { role: "finance", alertType: "system_health_remediation_due", minSeverity: "low" },
+  { role: "finance", alertType: "cost_anomaly_warning", minSeverity: "low" },
 ] as const;
 
 const defaultSystemSettings = [
@@ -4122,9 +4136,9 @@ function seedDefaultAlertSubscriptions(database: Database.Database) {
   const timestamp = new Date().toISOString();
   const insert = database.prepare(`
     INSERT OR IGNORE INTO alert_subscriptions (
-      id, role, alert_type, min_severity, enabled, created_at, updated_at
+      id, role, alert_type, min_severity, enabled, route_to_tasks, created_at, updated_at
     )
-    VALUES (?, ?, ?, ?, 1, ?, ?)
+    VALUES (?, ?, ?, ?, 1, 1, ?, ?)
   `);
   defaultAlertSubscriptions.forEach((subscription) =>
     insert.run(

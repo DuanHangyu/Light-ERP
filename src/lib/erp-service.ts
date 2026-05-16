@@ -1800,6 +1800,7 @@ function alertSubscriptionRows(database: Database.Database) {
         role_label: roleLabel(String(item.role)),
         alert_type_label: alertTypeLabel(String(item.alert_type)),
         min_severity_label: alertSeverityLabel(String(item.min_severity)),
+        task_routing_label: Number(item.route_to_tasks ?? 1) ? "进入待办" : "仅预警中心",
       };
     });
 }
@@ -3901,6 +3902,7 @@ export function getSnapshot(actorId = "U-SALES") {
     supplierAnnualReviewDue,
     costAnomalyRemediations,
     costAnomalyWarningEvents,
+    alertSubscriptions,
   });
   const storage = getStorageSummary();
   const systemHealthChecks = buildSystemHealthChecks({
@@ -5592,10 +5594,22 @@ function buildTasks(
     supplierAnnualReviewDue?: Array<Record<string, unknown>>;
     costAnomalyRemediations?: Array<Record<string, unknown>>;
     costAnomalyWarningEvents?: Array<Record<string, unknown>>;
+    alertSubscriptions?: Array<Record<string, unknown>>;
   },
 ): Task[] {
+  const costWarningSubscription = (data.alertSubscriptions ?? []).find(
+    (item) => String(item.role) === user.role && String(item.alert_type) === "cost_anomaly_warning",
+  );
+  const shouldRouteCostWarningToTasks = (event: Record<string, unknown>) => {
+    if (!costWarningSubscription) return ["manager", "finance", "admin"].includes(user.role);
+    return (
+      Number(costWarningSubscription.enabled ?? 1) === 1 &&
+      Number(costWarningSubscription.route_to_tasks ?? 1) === 1 &&
+      severityAllows(event.severity, costWarningSubscription.min_severity ?? "low")
+    );
+  };
   const costAnomalyWarningNoticeTasks = (data.costAnomalyWarningEvents ?? [])
-    .filter((item) => String(item.remediation_status ?? "") !== "closed" && ["manager", "finance", "admin"].includes(user.role))
+    .filter((item) => String(item.remediation_status ?? "") !== "closed" && shouldRouteCostWarningToTasks(item))
     .slice(0, 5)
     .map((item) => ({
       id: `task-cost-anomaly-warning-${item.id}`,
@@ -12907,19 +12921,21 @@ function upsertAlertSubscription(database: Database.Database, actorId: string, r
   const alertType = alertTypeValue(payloadText(payload, "alert_type", "预警类型"));
   const minSeverity = alertSeverityValue(payloadText(payload, "min_severity", "最低预警等级", false) || "low");
   const enabled = booleanPayload(payload, "enabled", true) ? 1 : 0;
+  const routeToTasks = booleanPayload(payload, "route_to_tasks", true) ? 1 : 0;
   const timestamp = now();
   const id = `ALS-${role}-${alertType}`;
 
   database.prepare(`
     INSERT INTO alert_subscriptions (
-      id, role, alert_type, min_severity, enabled, created_at, updated_at
+      id, role, alert_type, min_severity, enabled, route_to_tasks, created_at, updated_at
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(role, alert_type) DO UPDATE SET
       min_severity = excluded.min_severity,
       enabled = excluded.enabled,
+      route_to_tasks = excluded.route_to_tasks,
       updated_at = excluded.updated_at
-  `).run(id, role, alertType, minSeverity, enabled, timestamp, timestamp);
+  `).run(id, role, alertType, minSeverity, enabled, routeToTasks, timestamp, timestamp);
 
   audit(
     database,
@@ -12927,7 +12943,7 @@ function upsertAlertSubscription(database: Database.Database, actorId: string, r
     "upsertAlertSubscription",
     "alert_subscription",
     id,
-    `${enabled ? "启用" : "停用"}${roleLabel(role)} ${alertTypeLabel(alertType)} 订阅，最低等级 ${alertSeverityLabel(minSeverity)}`,
+    `${enabled ? "启用" : "停用"}${roleLabel(role)} ${alertTypeLabel(alertType)} 订阅，最低等级 ${alertSeverityLabel(minSeverity)}，${routeToTasks ? "进入待办" : "仅预警中心"}`,
   );
 }
 

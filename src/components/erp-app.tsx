@@ -508,6 +508,8 @@ const statusClass: Record<string, string> = {
   仅记录事件: "bg-slate-100 text-slate-700 ring-slate-200",
   仅记录: "bg-slate-100 text-slate-700 ring-slate-200",
   成本异常预警: "bg-rose-50 text-rose-700 ring-rose-200",
+  进入待办: "bg-blue-50 text-blue-700 ring-blue-200",
+  仅预警中心: "bg-slate-100 text-slate-700 ring-slate-200",
   待复评: "bg-blue-50 text-blue-700 ring-blue-200",
   复评驳回: "bg-rose-50 text-rose-700 ring-rose-200",
   复评通过: "bg-emerald-50 text-emerald-700 ring-emerald-200",
@@ -10352,6 +10354,7 @@ function ApprovalFormulaModule({
     alert_type: "receivable_due",
     min_severity: "medium",
     enabled: "true",
+    route_to_tasks: "true",
   });
   const setApprovalField = (key: string, value: string) => setApprovalForm((current) => ({ ...current, [key]: value }));
   const setRuleField = (key: string, value: string) => setRuleForm((current) => ({ ...current, [key]: value }));
@@ -10697,6 +10700,10 @@ function ApprovalFormulaModule({
                 <option value="approval_pending">待审批</option>
                 <option value="receivable_due">应收到期</option>
                 <option value="payable_due">应付到期</option>
+                <option value="quality_yield_warning">收率预警</option>
+                <option value="mrp_shortage">MRP缺料建议</option>
+                <option value="system_health_remediation_due">上线整改到期</option>
+                <option value="cost_anomaly_warning">成本异常预警</option>
               </MasterSelect>
               <MasterSelect
                 label="最低等级"
@@ -10715,6 +10722,14 @@ function ApprovalFormulaModule({
               >
                 <option value="true">启用</option>
                 <option value="false">停用</option>
+              </MasterSelect>
+              <MasterSelect
+                label="待办路由"
+                value={alertSubscriptionForm.route_to_tasks}
+                onChange={(value) => setAlertSubscriptionField("route_to_tasks", value)}
+              >
+                <option value="true">进入待办</option>
+                <option value="false">仅预警中心</option>
               </MasterSelect>
               <MasterSubmitButton
                 busy={busy === "upsertAlertSubscription-system-primary"}
@@ -10736,6 +10751,7 @@ function ApprovalFormulaModule({
             { key: "alert_type_label", label: "预警类型" },
             { key: "min_severity_label", label: "最低等级", render: (value) => <StatusBadge value={String(value)} /> },
             { key: "enabled", label: "状态", render: (value) => <StatusBadge value={Number(value) === 1 ? "启用" : "停用"} /> },
+            { key: "task_routing_label", label: "待办路由", render: (value) => <StatusBadge value={String(value)} /> },
             { key: "updated_at", label: "更新时间", render: shortDate },
             {
               key: "subscription_ops",
@@ -10753,6 +10769,7 @@ function ApprovalFormulaModule({
                           alert_type: String(row.alert_type),
                           min_severity: String(row.min_severity ?? "low"),
                           enabled: Number(row.enabled) === 1 ? "false" : "true",
+                          route_to_tasks: Number(row.route_to_tasks ?? 1) === 1 ? "true" : "false",
                         },
                       })
                     }
