@@ -151,8 +151,8 @@ const roleActionMap: Record<string, Role[]> = {
   recordReceivableReceipt: ["finance", "assistant", "admin"],
   purchaseInbound: ["admin", "purchasing"],
   submitApproval: ["sales", "assistant", "production", "warehouse", "purchasing", "quality", "technical", "finance", "admin"],
-  approveApproval: ["manager", "admin"],
-  rejectApproval: ["manager", "admin"],
+  approveApproval: ["manager", "warehouse", "finance", "purchasing", "admin"],
+  rejectApproval: ["manager", "warehouse", "finance", "purchasing", "admin"],
   createFormulaCalculation: ["manager", "admin", "purchasing", "production"],
   upsertApprovalRule: ["admin"],
   deactivateApprovalRule: ["admin"],
@@ -979,17 +979,111 @@ type ApprovalRuleRow = {
   approver_role: Role;
   sla_hours: number;
   status: string;
+  condition_scope: string;
+  material_id: string | null;
+  material_name?: string | null;
+  adjustment_type: string;
+  risk_level: string;
+  allow_reversal: number;
+  reversal_approver_role: Role;
   description: string;
   created_at: string;
   updated_at: string;
 };
 
+type ApprovalRuleMatchContext = {
+  materialId?: string;
+  adjustmentType?: string;
+};
+
+function approvalRuleConditionScopeLabel(scope: string) {
+  return (
+    {
+      all: "全部",
+      material: "指定物料",
+      adjustment_type: "指定场景",
+      material_and_adjustment_type: "物料+场景",
+    }[scope] ?? scope
+  );
+}
+
+function approvalRuleConditionSpecificity(rule: Pick<ApprovalRuleRow, "condition_scope">) {
+  return (
+    {
+      material_and_adjustment_type: 3,
+      material: 2,
+      adjustment_type: 1,
+      all: 0,
+    }[rule.condition_scope || "all"] ?? 0
+  );
+}
+
+function approvalRuleAdjustmentTypeLabel(type: string) {
+  return (
+    {
+      supplement: "补料",
+      return: "退料",
+      check: "复核",
+    }[type] ?? type
+  );
+}
+
+function approvalRiskLevelLabel(level: string) {
+  return (
+    {
+      low: "低风险",
+      normal: "普通",
+      medium: "中风险",
+      high: "高风险",
+      critical: "重大风险",
+      低: "低风险",
+      中: "中风险",
+      高: "高风险",
+    }[level] ?? level
+  );
+}
+
+function approvalRuleConditionSummary(rule: ApprovalRuleRow) {
+  if (rule.source_type !== "production_cost_adjustment") return approvalRuleConditionScopeLabel(rule.condition_scope || "all");
+  const materialName = rule.material_name || rule.material_id || "指定物料";
+  const adjustmentTypeLabel = rule.adjustment_type ? approvalRuleAdjustmentTypeLabel(rule.adjustment_type) : "指定场景";
+  if (rule.condition_scope === "material_and_adjustment_type") return `${materialName} / ${adjustmentTypeLabel}`;
+  if (rule.condition_scope === "material") return String(materialName);
+  if (rule.condition_scope === "adjustment_type") return adjustmentTypeLabel;
+  return "全部成本调整";
+}
+
+function approvalRuleMatchesContext(rule: ApprovalRuleRow, context?: ApprovalRuleMatchContext) {
+  const scope = rule.condition_scope || "all";
+  if (scope === "all") return true;
+  if (scope === "material") return Boolean(context?.materialId) && rule.material_id === context?.materialId;
+  if (scope === "adjustment_type") return Boolean(context?.adjustmentType) && rule.adjustment_type === context?.adjustmentType;
+  if (scope === "material_and_adjustment_type") {
+    return (
+      Boolean(context?.materialId) &&
+      Boolean(context?.adjustmentType) &&
+      rule.material_id === context?.materialId &&
+      rule.adjustment_type === context?.adjustmentType
+    );
+  }
+  return false;
+}
+
 function approvalRuleView(rule: ApprovalRuleRow): Record<string, unknown> {
+  const allowReversal = Number(rule.allow_reversal ?? 1) === 1;
   return {
     ...rule,
     source_type_label: approvalSourceTypeLabel(rule.source_type),
     approver_role_label: roleLabel(rule.approver_role),
     status_label: approvalRuleStatusLabel(rule.status),
+    condition_scope_label: approvalRuleConditionScopeLabel(rule.condition_scope || "all"),
+    adjustment_type_label: rule.adjustment_type ? approvalRuleAdjustmentTypeLabel(rule.adjustment_type) : "",
+    risk_level_label: approvalRiskLevelLabel(rule.risk_level || "normal"),
+    reversal_approver_role_label: roleLabel(rule.reversal_approver_role || "manager"),
+    condition_summary: approvalRuleConditionSummary(rule),
+    reversal_rule_summary: allowReversal
+      ? `允许直接红冲，${roleLabel(rule.reversal_approver_role || "manager")}复核`
+      : `禁止直接红冲，需${roleLabel(rule.reversal_approver_role || "manager")}复核`,
     amount_scope:
       rule.max_amount == null
         ? `${roundMoney(rule.min_amount)} 以上`
@@ -999,23 +1093,35 @@ function approvalRuleView(rule: ApprovalRuleRow): Record<string, unknown> {
 
 function approvalRuleRows(database: Database.Database) {
   return (database.prepare(`
-    SELECT *
-    FROM approval_rules
-    ORDER BY status ASC, source_type ASC, min_amount ASC, max_amount ASC, created_at ASC
+    SELECT ar.*, m.name AS material_name
+    FROM approval_rules ar
+    LEFT JOIN materials m ON m.id = ar.material_id
+    ORDER BY ar.status ASC, ar.source_type ASC, ar.min_amount ASC, ar.max_amount ASC, ar.created_at ASC
   `).all() as ApprovalRuleRow[]).map(approvalRuleView);
 }
 
-function matchApprovalRule(database: Database.Database, sourceType: string, amount: number) {
-  return database.prepare(`
-    SELECT *
-    FROM approval_rules
-    WHERE status = 'active'
-      AND source_type = ?
-      AND min_amount <= ?
-      AND (max_amount IS NULL OR max_amount >= ?)
-    ORDER BY min_amount DESC, COALESCE(max_amount, 999999999) ASC, updated_at DESC
-    LIMIT 1
-  `).get(sourceType, amount, amount) as ApprovalRuleRow | undefined;
+function matchApprovalRule(database: Database.Database, sourceType: string, amount: number, context?: ApprovalRuleMatchContext) {
+  const rules = database.prepare(`
+    SELECT ar.*, m.name AS material_name
+    FROM approval_rules ar
+    LEFT JOIN materials m ON m.id = ar.material_id
+    WHERE ar.status = 'active'
+      AND ar.source_type = ?
+      AND ar.min_amount <= ?
+      AND (ar.max_amount IS NULL OR ar.max_amount >= ?)
+  `).all(sourceType, amount, amount) as ApprovalRuleRow[];
+  return rules
+    .filter((rule) => approvalRuleMatchesContext(rule, context))
+    .sort((a, b) => {
+      const specificityDelta = approvalRuleConditionSpecificity(b) - approvalRuleConditionSpecificity(a);
+      if (specificityDelta !== 0) return specificityDelta;
+      const minDelta = Number(b.min_amount ?? 0) - Number(a.min_amount ?? 0);
+      if (minDelta !== 0) return minDelta;
+      const maxA = a.max_amount == null ? 999999999 : Number(a.max_amount);
+      const maxB = b.max_amount == null ? 999999999 : Number(b.max_amount);
+      if (maxA !== maxB) return maxA - maxB;
+      return String(b.updated_at ?? "").localeCompare(String(a.updated_at ?? ""));
+    })[0];
 }
 
 function matchApprovalRuleFromRows(rules: Array<Record<string, unknown>>, sourceType: string, amount: number) {
@@ -1423,19 +1529,21 @@ function approvalCenterRows(input: {
         approver_role_label: roleLabel(String(approval.approver_role ?? "manager")),
         sla_hours: slaHours,
         is_overdue: ageDays * 24 >= slaHours,
-        risk_level: approvalRiskLevel(
-          isSupplierAnnualReview
-            ? "supplier_annual_review"
-            : isProductionPlan
-              ? "production_plan"
-              : isSupplierRuleChange
-                ? "supplier_admission_rule_change"
-                : isPurchase
-                  ? "purchase_order"
-                  : "approval_request",
-          amount,
-          input.operatingParameters,
-        ),
+        risk_level:
+          approval.risk_level ||
+          approvalRiskLevel(
+            isSupplierAnnualReview
+              ? "supplier_annual_review"
+              : isProductionPlan
+                ? "production_plan"
+                : isSupplierRuleChange
+                  ? "supplier_admission_rule_change"
+                  : isPurchase
+                    ? "purchase_order"
+                    : "approval_request",
+            amount,
+            input.operatingParameters,
+          ),
         status: approval.status,
         status_label: approvalRequestStatusLabel(String(approval.status)),
         approve_action: "approveApproval",
@@ -3385,7 +3493,7 @@ export function getSnapshot(actorId = "U-SALES") {
            COALESCE(ar.sla_hours, rule.sla_hours, 48) AS sla_hours,
            ar.entity_type, ar.entity_id, ar.created_at, ar.decided_by, ar.decided_at, ar.decision_note,
            applicant.name AS applicant_name, approver.name AS decided_by_name,
-           rule.rule_code, rule.rule_name
+           rule.rule_code, rule.rule_name, rule.risk_level
     FROM approval_requests ar
     JOIN users applicant ON applicant.id = ar.applicant_id
     LEFT JOIN users approver ON approver.id = ar.decided_by
@@ -8171,7 +8279,8 @@ function postProductionCostAdjustment(
     | undefined;
   const adjustmentId = uid("PCA");
   const adjustmentNo = serial(database, "production_cost_adjustments", "CBTZ");
-  const approvalRule = matchApprovalRule(database, "production_cost_adjustment", Math.abs(input.adjustmentAmount));
+  const ruleContext = productionCostAdjustmentRuleContext(database, input.exceptionId);
+  const approvalRule = matchApprovalRule(database, "production_cost_adjustment", Math.abs(input.adjustmentAmount), ruleContext);
   const previousTotalCost = summary ? roundMoney(Number(summary.total_cost ?? 0)) : 0;
   const previousUnitCost = summary ? roundMoney(Number(summary.unit_cost ?? 0)) : 0;
   const previewTotalCost = roundMoney(previousTotalCost + input.adjustmentAmount);
@@ -8239,6 +8348,22 @@ function postProductionCostAdjustment(
   }
 
   applyProductionCostAdjustment(database, adjustmentId, input.actorId, input.postedAt);
+}
+
+function productionCostAdjustmentRuleContext(database: Database.Database, exceptionId: string): ApprovalRuleMatchContext {
+  const context = database.prepare(`
+    SELECT pmao.adjustment_type, pmaol.material_id
+    FROM production_material_adjustment_review_exceptions exception
+    JOIN production_material_adjustment_orders pmao ON pmao.id = exception.order_id
+    LEFT JOIN production_material_adjustment_order_lines pmaol ON pmaol.order_id = pmao.id
+    WHERE exception.id = ?
+    ORDER BY pmaol.created_at ASC, pmaol.rowid ASC
+    LIMIT 1
+  `).get(exceptionId) as { adjustment_type?: string; material_id?: string } | undefined;
+  return {
+    adjustmentType: context?.adjustment_type || undefined,
+    materialId: context?.material_id || undefined,
+  };
 }
 
 function applyProductionCostAdjustment(
@@ -12071,6 +12196,36 @@ function approvalRulePayload(rawPayload?: Record<string, unknown>) {
   const slaHours = Math.round(payloadNumber(payload, "sla_hours", "处理时限", { min: 1 }));
   const status = payloadText(payload, "status", "状态", false) || "active";
   if (!["active", "inactive"].includes(status)) throw new Error("规则状态不正确。");
+  const conditionScope =
+    sourceType === "production_cost_adjustment"
+      ? payloadText(payload, "condition_scope", "适用条件", false) || "all"
+      : "all";
+  if (!["all", "material", "adjustment_type", "material_and_adjustment_type"].includes(conditionScope)) {
+    throw new Error("适用条件不正确。");
+  }
+  const rawMaterialId = payloadText(payload, "material_id", "适用物料", false);
+  const materialId = sourceType === "production_cost_adjustment" && ["material", "material_and_adjustment_type"].includes(conditionScope) ? rawMaterialId : "";
+  if (["material", "material_and_adjustment_type"].includes(conditionScope) && !materialId) {
+    throw new Error("物料类成本调整审批规则必须选择适用物料。");
+  }
+  const rawAdjustmentType = payloadText(payload, "adjustment_type", "补退料场景", false);
+  const adjustmentType =
+    sourceType === "production_cost_adjustment" && ["adjustment_type", "material_and_adjustment_type"].includes(conditionScope)
+      ? rawAdjustmentType
+      : "";
+  if (["adjustment_type", "material_and_adjustment_type"].includes(conditionScope) && !["supplement", "return", "check"].includes(adjustmentType)) {
+    throw new Error("补退料场景不正确。");
+  }
+  const riskLevel = sourceType === "production_cost_adjustment" ? payloadText(payload, "risk_level", "风险等级", false) || "normal" : "normal";
+  if (!["low", "normal", "medium", "high", "critical"].includes(riskLevel)) throw new Error("风险等级不正确。");
+  const allowReversal = sourceType === "production_cost_adjustment" ? (booleanPayload(payload, "allow_reversal", true) ? 1 : 0) : 1;
+  const reversalApproverRole =
+    sourceType === "production_cost_adjustment"
+      ? (payloadText(payload, "reversal_approver_role", "红冲复核角色", false) as Role) || "manager"
+      : "manager";
+  if (!["manager", "warehouse", "finance", "admin", "purchasing"].includes(reversalApproverRole)) {
+    throw new Error("红冲复核角色不正确。");
+  }
   return {
     ruleName,
     sourceType,
@@ -12079,6 +12234,12 @@ function approvalRulePayload(rawPayload?: Record<string, unknown>) {
     approverRole,
     slaHours,
     status,
+    conditionScope,
+    materialId,
+    adjustmentType,
+    riskLevel,
+    allowReversal,
+    reversalApproverRole,
     description: payloadText(payload, "description", "规则说明", false),
     ruleCode: payloadText(payload, "rule_code", "规则编码", false),
   };
@@ -12106,6 +12267,12 @@ function upsertApprovalRule(
           approver_role = ?,
           sla_hours = ?,
           status = ?,
+          condition_scope = ?,
+          material_id = ?,
+          adjustment_type = ?,
+          risk_level = ?,
+          allow_reversal = ?,
+          reversal_approver_role = ?,
           description = ?,
           updated_at = ?
       WHERE id = ?
@@ -12117,6 +12284,12 @@ function upsertApprovalRule(
       input.approverRole,
       input.slaHours,
       input.status,
+      input.conditionScope,
+      input.materialId || null,
+      input.adjustmentType,
+      input.riskLevel,
+      input.allowReversal,
+      input.reversalApproverRole,
       input.description,
       timestamp,
       existing.id,
@@ -12130,9 +12303,10 @@ function upsertApprovalRule(
   database.prepare(`
     INSERT INTO approval_rules (
       id, rule_code, rule_name, source_type, min_amount, max_amount,
-      approver_role, sla_hours, status, description, created_at, updated_at
+      approver_role, sla_hours, status, condition_scope, material_id, adjustment_type,
+      risk_level, allow_reversal, reversal_approver_role, description, created_at, updated_at
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     id,
     ruleCode,
@@ -12143,6 +12317,12 @@ function upsertApprovalRule(
     input.approverRole,
     input.slaHours,
     input.status,
+    input.conditionScope,
+    input.materialId || null,
+    input.adjustmentType,
+    input.riskLevel,
+    input.allowReversal,
+    input.reversalApproverRole,
     input.description,
     timestamp,
     timestamp,
@@ -12864,9 +13044,13 @@ function reverseBusinessDocument(database: Database.Database, actorId: string, d
 
 function reverseProductionCostAdjustment(database: Database.Database, actorId: string, adjustmentId: string, reason: string) {
   const adjustment = database.prepare(`
-    SELECT pca.*, pcs.material_cost, pcs.total_cost, pcs.unit_cost, pcs.finished_qty
+    SELECT pca.*, pcs.material_cost, pcs.total_cost, pcs.unit_cost, pcs.finished_qty,
+           rule.rule_name AS approval_rule_name,
+           COALESCE(rule.allow_reversal, 1) AS allow_reversal
     FROM production_cost_adjustments pca
     LEFT JOIN production_cost_summaries pcs ON pcs.id = pca.cost_summary_id
+    LEFT JOIN approval_requests ar ON ar.id = pca.approval_request_id
+    LEFT JOIN approval_rules rule ON rule.id = ar.rule_id
     WHERE pca.id = ?
   `).get(adjustmentId) as
     | {
@@ -12879,10 +13063,15 @@ function reverseProductionCostAdjustment(database: Database.Database, actorId: s
         total_cost: number | null;
         unit_cost: number | null;
         finished_qty: number | null;
+        approval_rule_name: string | null;
+        allow_reversal: number | null;
       }
     | undefined;
   if (!adjustment) throw new Error("工单成本调整单不存在。");
   if (adjustment.status !== "applied") throw new Error("工单成本调整单未入账或已处理，不能红冲。");
+  if (Number(adjustment.allow_reversal ?? 1) === 0) {
+    throw new Error(`当前成本调整审批规则不允许直接红冲：${adjustment.approval_rule_name ?? adjustment.adjustment_no}`);
+  }
   if (!adjustment.cost_summary_id || adjustment.total_cost == null) {
     throw new Error("工单成本调整单缺少成本归集信息，不能红冲。");
   }

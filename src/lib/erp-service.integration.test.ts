@@ -7101,7 +7101,7 @@ describe("ERP service production plan lock approval and change notifications", (
     expect(approvedAdjustment).toMatchObject({
       status: "applied",
       approval_status: "approved",
-      applied_by_name: "财务专员-周敏",
+      applied_by_name: "财务专员-赵会计",
     });
     expect(() =>
       service.performAction({

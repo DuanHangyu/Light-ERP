@@ -9963,13 +9963,19 @@ function ApprovalFormulaModule({
     reason: "需要管理层确认后执行，并在系统内保留审批痕迹。",
   });
   const [ruleForm, setRuleForm] = useState<Record<string, string>>({
-    rule_name: "合同用印快速审批",
-    source_type: "office_oa",
-    min_amount: "200",
-    max_amount: "500",
+    rule_name: "主材补料成本调整审批",
+    source_type: "production_cost_adjustment",
+    min_amount: "500",
+    max_amount: "",
     approver_role: "manager",
-    sla_hours: "6",
-    description: "200-500 元合同用印类审批，管理层 6 小时内处理。",
+    sla_hours: "24",
+    condition_scope: "material_and_adjustment_type",
+    material_id: "M-STEEL",
+    adjustment_type: "supplement",
+    risk_level: "high",
+    allow_reversal: "true",
+    reversal_approver_role: "manager",
+    description: "主材补料形成的高额成本调整，需管理层审批后入账并保留红冲控制规则。",
   });
   const [alertSubscriptionForm, setAlertSubscriptionForm] = useState<Record<string, string>>({
     role: "finance",
@@ -9983,6 +9989,7 @@ function ApprovalFormulaModule({
     setAlertSubscriptionForm((current) => ({ ...current, [key]: value }));
   const canSubmitApproval = snapshot.security.currentPermissions.includes("submitApproval");
   const canConfigureRules = snapshot.security.currentPermissions.includes("upsertApprovalRule");
+  const isCostAdjustmentRule = ruleForm.source_type === "production_cost_adjustment";
   const canConfigureAlertSubscriptions = snapshot.security.currentPermissions.includes("upsertAlertSubscription");
   const canRunApprovalAction = (row: Row, key: "approve_action" | "reject_action") =>
     snapshot.security.currentPermissions.includes(String(row[key] ?? ""));
@@ -10112,6 +10119,7 @@ function ApprovalFormulaModule({
               <option value="office_oa">办公 OA</option>
               <option value="purchase_requisition">采购申请</option>
               <option value="purchase_order">采购订单</option>
+              <option value="production_cost_adjustment">工单成本调整</option>
               <option value="stocktake">库存盘点</option>
               <option value="requisition">领料单</option>
               <option value="formula_price">配方算价</option>
@@ -10144,6 +10152,62 @@ function ApprovalFormulaModule({
             <div className="lg:col-span-5">
               <MasterInput label="规则说明" value={ruleForm.description} onChange={(value) => setRuleField("description", value)} />
             </div>
+            {isCostAdjustmentRule ? (
+              <div className="grid gap-3 rounded-md border border-blue-100 bg-blue-50/50 p-3 lg:col-span-6 lg:grid-cols-6">
+                <MasterSelect
+                  label="适用条件"
+                  value={ruleForm.condition_scope}
+                  onChange={(value) => setRuleField("condition_scope", value)}
+                >
+                  <option value="all">全部成本调整</option>
+                  <option value="material">指定物料</option>
+                  <option value="adjustment_type">指定场景</option>
+                  <option value="material_and_adjustment_type">物料+场景</option>
+                </MasterSelect>
+                <MasterSelect label="适用物料" value={ruleForm.material_id} onChange={(value) => setRuleField("material_id", value)}>
+                  <option value="">全部物料</option>
+                  {snapshot.board.materials.map((material) => (
+                    <option key={String(material.id)} value={String(material.id)}>
+                      {String(material.name)}
+                    </option>
+                  ))}
+                </MasterSelect>
+                <MasterSelect
+                  label="补退料场景"
+                  value={ruleForm.adjustment_type}
+                  onChange={(value) => setRuleField("adjustment_type", value)}
+                >
+                  <option value="">全部场景</option>
+                  <option value="supplement">补料</option>
+                  <option value="return">退料</option>
+                  <option value="check">复核</option>
+                </MasterSelect>
+                <MasterSelect label="风险等级" value={ruleForm.risk_level} onChange={(value) => setRuleField("risk_level", value)}>
+                  <option value="normal">普通</option>
+                  <option value="medium">中风险</option>
+                  <option value="high">高风险</option>
+                  <option value="critical">重大风险</option>
+                </MasterSelect>
+                <MasterSelect
+                  label="允许红冲"
+                  value={ruleForm.allow_reversal}
+                  onChange={(value) => setRuleField("allow_reversal", value)}
+                >
+                  <option value="true">允许</option>
+                  <option value="false">禁止直接红冲</option>
+                </MasterSelect>
+                <MasterSelect
+                  label="红冲复核"
+                  value={ruleForm.reversal_approver_role}
+                  onChange={(value) => setRuleField("reversal_approver_role", value)}
+                >
+                  <option value="manager">管理层</option>
+                  <option value="finance">财务专员</option>
+                  <option value="warehouse">仓库管理员</option>
+                  <option value="admin">系统管理员</option>
+                </MasterSelect>
+              </div>
+            ) : null}
             <div className="flex items-end">
               <MasterSubmitButton
                 busy={busy === "upsertApprovalRule-system-primary"}
@@ -10206,9 +10270,12 @@ function ApprovalFormulaModule({
         columns={[
           { key: "rule_name", label: "规则名称" },
           { key: "source_type_label", label: "适用来源", render: (value) => <StatusBadge value={String(value)} /> },
+          { key: "condition_summary", label: "细分条件" },
           { key: "amount_scope", label: "金额区间" },
           { key: "approver_role_label", label: "审批角色" },
           { key: "sla_hours", label: "SLA", render: (value) => `${String(value ?? 0)} 小时` },
+          { key: "risk_level_label", label: "风险等级", render: (value) => <StatusBadge value={String(value)} /> },
+          { key: "reversal_rule_summary", label: "红冲规则" },
           { key: "status_label", label: "状态", render: (value) => <StatusBadge value={String(value)} /> },
           { key: "description", label: "规则说明" },
           {
@@ -11153,9 +11220,12 @@ function approvalRuleDetail(row: Row): DetailState {
     ["规则编码", "rule_code"],
     ["规则名称", "rule_name"],
     ["适用来源", "source_type_label"],
+    ["细分条件", "condition_summary"],
     ["金额区间", "amount_scope"],
     ["审批角色", "approver_role_label"],
     ["处理时限", "sla_hours", (value) => `${String(value ?? 0)} 小时`],
+    ["风险等级", "risk_level_label"],
+    ["红冲规则", "reversal_rule_summary"],
     ["状态", "status_label"],
     ["规则说明", "description"],
     ["创建时间", "created_at", shortDate],

@@ -1083,6 +1083,12 @@ function applySchema(database: Database.Database) {
       approver_role TEXT NOT NULL,
       sla_hours INTEGER NOT NULL DEFAULT 48,
       status TEXT NOT NULL DEFAULT 'active',
+      condition_scope TEXT NOT NULL DEFAULT 'all',
+      material_id TEXT REFERENCES materials(id),
+      adjustment_type TEXT NOT NULL DEFAULT '',
+      risk_level TEXT NOT NULL DEFAULT 'normal',
+      allow_reversal INTEGER NOT NULL DEFAULT 1,
+      reversal_approver_role TEXT NOT NULL DEFAULT 'manager',
       description TEXT NOT NULL DEFAULT '',
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
@@ -3259,6 +3265,22 @@ function applyMigrations(database: Database.Database) {
             ON production_cost_adjustments(status, created_at);
           CREATE INDEX IF NOT EXISTS idx_production_cost_adjustments_approval
             ON production_cost_adjustments(approval_request_id);
+        `);
+      },
+    },
+    {
+      id: "054_detailed_cost_adjustment_approval_rules",
+      description: "成本调整审批规则细化条件与红冲控制",
+      up: () => {
+        ensureColumn(database, "approval_rules", "condition_scope", "TEXT NOT NULL DEFAULT 'all'");
+        ensureColumn(database, "approval_rules", "material_id", "TEXT REFERENCES materials(id)");
+        ensureColumn(database, "approval_rules", "adjustment_type", "TEXT NOT NULL DEFAULT ''");
+        ensureColumn(database, "approval_rules", "risk_level", "TEXT NOT NULL DEFAULT 'normal'");
+        ensureColumn(database, "approval_rules", "allow_reversal", "INTEGER NOT NULL DEFAULT 1");
+        ensureColumn(database, "approval_rules", "reversal_approver_role", "TEXT NOT NULL DEFAULT 'manager'");
+        database.exec(`
+          CREATE INDEX IF NOT EXISTS idx_approval_rules_cost_context
+            ON approval_rules(source_type, condition_scope, material_id, adjustment_type, status);
         `);
       },
     },
