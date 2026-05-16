@@ -105,6 +105,128 @@ describe("ERP service formal MRP shortage planning", () => {
   });
 });
 
+describe("ERP service formal user and permission matrix management", () => {
+  it("lets administrators maintain users with real login status", async () => {
+    const service = await loadService();
+
+    service.performAction({
+      actorId: "U-ADMIN",
+      action: "upsertUser",
+      payload: {
+        username: "planner",
+        name: "生产计划员-林晓",
+        role: "production",
+        title: "生产计划与工单协调",
+        status: "active",
+        new_password: "Plan@2026",
+      },
+    });
+
+    let snapshot = service.getSnapshot("U-ADMIN");
+    const user = snapshot.users.find((item) => item.username === "planner");
+    expect(user).toMatchObject({
+      name: "生产计划员-林晓",
+      role: "production",
+      role_label: "生产主管",
+      status: "active",
+      title: "生产计划与工单协调",
+    });
+    expect(service.authenticateUser({ account: "planner", password: "Plan@2026" }).user.name).toBe("生产计划员-林晓");
+
+    service.performAction({
+      actorId: "U-ADMIN",
+      action: "upsertUser",
+      entityId: String(user?.id),
+      payload: {
+        username: "planner",
+        name: "生产计划员-林晓",
+        role: "warehouse",
+        title: "临时协助仓库复核",
+        status: "inactive",
+      },
+    });
+
+    snapshot = service.getSnapshot("U-ADMIN");
+    expect(snapshot.users.find((item) => item.id === user?.id)).toMatchObject({
+      role: "warehouse",
+      role_label: "仓库管理员",
+      status: "inactive",
+      title: "临时协助仓库复核",
+    });
+    expect(() => service.authenticateUser({ account: "planner", password: "Plan@2026" })).toThrow("账号已停用");
+  });
+
+  it("enforces database-backed role permission changes on business actions", async () => {
+    const service = await loadService();
+
+    let snapshot = service.getSnapshot("U-ADMIN");
+    expect(
+      snapshot.security.rolePermissions.find((item) => item.role === "purchasing" && item.action === "createPurchaseOrder"),
+    ).toMatchObject({
+      enabled: 1,
+      enabled_label: "启用",
+    });
+    expect(service.getSnapshot("U-PUR").security.currentPermissions).toContain("createPurchaseOrder");
+
+    service.performAction({
+      actorId: "U-ADMIN",
+      action: "upsertRolePermission",
+      payload: {
+        role: "purchasing",
+        action: "createPurchaseOrder",
+        enabled: false,
+        reason: "试点期间采购订单暂由管理员统一录入。",
+      },
+    });
+
+    snapshot = service.getSnapshot("U-ADMIN");
+    expect(
+      snapshot.security.rolePermissions.find((item) => item.role === "purchasing" && item.action === "createPurchaseOrder"),
+    ).toMatchObject({
+      enabled: 0,
+      enabled_label: "停用",
+      updated_by_name: "系统管理员-管理员",
+    });
+    expect(service.getSnapshot("U-PUR").security.currentPermissions).not.toContain("createPurchaseOrder");
+    expect(() =>
+      service.performAction({
+        actorId: "U-PUR",
+        action: "createPurchaseOrder",
+        payload: {},
+      }),
+    ).toThrow("采购员 无权执行该操作。");
+
+    service.performAction({
+      actorId: "U-ADMIN",
+      action: "upsertRolePermission",
+      payload: {
+        role: "purchasing",
+        action: "createPurchaseOrder",
+        enabled: true,
+        reason: "采购员已完成培训，恢复采购订单录入权限。",
+      },
+    });
+
+    snapshot = service.getSnapshot("U-PUR");
+    expect(snapshot.security.currentPermissions).toContain("createPurchaseOrder");
+    const supplier = snapshot.board.suppliers.find((item) => item.status === "active");
+    const material = snapshot.board.materials.find((item) => item.status === "active");
+    service.performAction({
+      actorId: "U-PUR",
+      action: "createPurchaseOrder",
+      payload: {
+        supplier_id: supplier?.id,
+        due_date: offsetDate(30),
+        lines: [{ material_id: material?.id, qty: "2", unit_cost: "36" }],
+      },
+    });
+    expect(service.getSnapshot("U-PUR").board.purchaseOrders[0]).toMatchObject({
+      supplier_id: supplier?.id,
+      status: "pending_approval",
+    });
+  });
+});
+
 describe("ERP service supplier admission, corrective action and reassessment closure", () => {
   it("blacklists a supplier, blocks purchasing, and restores admission after corrective reassessment", async () => {
     const service = await loadService();
