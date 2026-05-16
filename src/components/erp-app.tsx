@@ -5539,8 +5539,14 @@ function ProductionModule({
           { key: "previous_unit_cost", label: "原单位成本", render: formatCurrency },
           { key: "new_unit_cost", label: "新单位成本", render: formatCurrency },
           { key: "status_label", label: "状态", render: (value) => <StatusBadge value={String(value)} /> },
+          { key: "request_no", label: "审批单" },
+          { key: "approval_status_label", label: "审批状态", render: (value) => (value ? <StatusBadge value={String(value)} /> : "-") },
           { key: "created_by_name", label: "经办人" },
-          { key: "created_at", label: "入账时间", render: shortDate },
+          { key: "applied_by_name", label: "入账人" },
+          { key: "applied_at", label: "入账时间", render: shortDate },
+          { key: "reversal_no", label: "红冲单" },
+          { key: "reversed_by_name", label: "红冲人" },
+          { key: "reversed_at", label: "红冲时间", render: shortDate },
         ]}
       />
       <DataTable

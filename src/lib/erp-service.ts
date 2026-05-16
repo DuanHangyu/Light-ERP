@@ -784,7 +784,10 @@ function productionCostAdjustmentStatusLabel(status: string) {
   return (
     {
       applied: "已入账",
+      pending_approval: "待审批",
       pending_summary: "待成本归集",
+      rejected: "已驳回",
+      reversed: "已红冲",
     }[status] ?? status
   );
 }
@@ -889,6 +892,7 @@ function approvalSourceTypeLabel(sourceType: string) {
       purchase_order: "采购订单",
       purchase_arrival_discrepancy: "采购到货差异",
       production_plan: "生产计划发布",
+      production_cost_adjustment: "工单成本调整",
       supplier_admission_rule_change: "供应商准入规则变更",
       stocktake: "库存盘点",
       requisition: "领料单",
@@ -905,6 +909,7 @@ function approvalSourceTypeValue(value: string) {
       "purchase_order",
       "purchase_arrival_discrepancy",
       "production_plan",
+      "production_cost_adjustment",
       "supplier_admission_rule_change",
       "stocktake",
       "requisition",
@@ -2078,7 +2083,7 @@ export function getSnapshot(actorId = "U-SALES") {
   `).all() as Array<Record<string, unknown>>;
   const productionDeliveryWarnings = productionDeliveryWarningRows(productions);
 
-  const productionPlanVersions = database.prepare(`
+  const productionPlanVersions = (database.prepare(`
     SELECT ppv.*,
            locker.name AS locked_by_name,
            publisher.name AS published_by_name,
@@ -2091,7 +2096,7 @@ export function getSnapshot(actorId = "U-SALES") {
     LEFT JOIN users publisher ON publisher.id = ppv.published_by
     LEFT JOIN approval_requests ar ON ar.id = ppv.approval_request_id
     ORDER BY ppv.locked_at DESC
-  `).all().map((row) => {
+  `).all() as Array<Record<string, unknown>>).map((row) => {
     const item = row as Record<string, unknown>;
     return {
       ...item,
@@ -2608,10 +2613,13 @@ export function getSnapshot(actorId = "U-SALES") {
     ORDER BY pcs.aggregated_at DESC
   `).all() as Array<Record<string, unknown>>;
 
-  const productionCostAdjustments = database.prepare(`
+  const productionCostAdjustments: Array<Record<string, unknown>> = (database.prepare(`
     SELECT pca.*, po.prod_no, o.order_no, c.name AS customer_name,
            p.name AS product_name, p.unit, pcs.cost_no, exception.exception_no,
-           creator.name AS created_by_name
+           creator.name AS created_by_name,
+           ar.request_no, ar.status AS approval_status, ar.decision_note AS approval_note,
+           applier.name AS applied_by_name, reverser.name AS reversed_by_name,
+           dr.reversal_no
     FROM production_cost_adjustments pca
     JOIN production_orders po ON po.id = pca.production_order_id
     JOIN orders o ON o.id = pca.order_id
@@ -2619,13 +2627,18 @@ export function getSnapshot(actorId = "U-SALES") {
     JOIN products p ON p.id = o.product_id
     LEFT JOIN production_cost_summaries pcs ON pcs.id = pca.cost_summary_id
     LEFT JOIN production_material_adjustment_review_exceptions exception ON exception.id = pca.exception_id
+    LEFT JOIN approval_requests ar ON ar.id = pca.approval_request_id
     JOIN users creator ON creator.id = pca.created_by
+    LEFT JOIN users applier ON applier.id = pca.applied_by
+    LEFT JOIN users reverser ON reverser.id = pca.reversed_by
+    LEFT JOIN document_reversals dr ON dr.id = pca.reversal_id
     ORDER BY pca.created_at DESC
-  `).all().map((row) => {
+  `).all() as Array<Record<string, unknown>>).map((row) => {
     const item = row as Record<string, unknown>;
     return {
       ...item,
       status_label: productionCostAdjustmentStatusLabel(String(item.status)),
+      approval_status_label: item.approval_status ? approvalRequestStatusLabel(String(item.approval_status)) : "",
     };
   });
 
@@ -3458,6 +3471,19 @@ export function getSnapshot(actorId = "U-SALES") {
         original_status_label: "已发货",
         reversal_type: "sales_shipment",
         reversal_type_label: reversalTypeLabel("sales_shipment"),
+      })),
+    ...productionCostAdjustments
+      .filter((item) => String(item.status) === "applied")
+      .map((item) => ({
+        document_type: "production_cost_adjustment",
+        document_type_label: documentTypeLabel("production_cost_adjustment"),
+        document_id: item.id,
+        document_no: item.adjustment_no,
+        title: `${item.adjustment_no} / ${item.prod_no} / 调整金额 ${roundMoney(Number(item.adjustment_amount ?? 0))}`,
+        original_status: item.status,
+        original_status_label: productionCostAdjustmentStatusLabel(String(item.status)),
+        reversal_type: "production_cost_adjustment",
+        reversal_type_label: reversalTypeLabel("production_cost_adjustment"),
       })),
   ].filter((item) => !reversedKeys.has(`${item.document_type}:${item.document_id}`));
 
@@ -4420,6 +4446,7 @@ function documentTypeLabel(documentType: string) {
       purchase_arrival_notice: "到货通知单",
       warehouse_signoff: "仓库签收单",
       approval_request: "审批单",
+      production_cost_adjustment: "工单成本调整单",
       shipment: "发货单",
       delivery_note: "送货单",
       sales_return: "销售退货单",
@@ -4471,6 +4498,7 @@ function reversalTypeLabel(reversalType: string) {
     {
       purchase_inbound: "采购入库冲销",
       sales_shipment: "销售发货冲销",
+      production_cost_adjustment: "工单成本调整红冲",
     }[reversalType] ?? reversalType
   );
 }
@@ -8143,34 +8171,123 @@ function postProductionCostAdjustment(
     | undefined;
   const adjustmentId = uid("PCA");
   const adjustmentNo = serial(database, "production_cost_adjustments", "CBTZ");
-  if (!summary) {
+  const approvalRule = matchApprovalRule(database, "production_cost_adjustment", Math.abs(input.adjustmentAmount));
+  const previousTotalCost = summary ? roundMoney(Number(summary.total_cost ?? 0)) : 0;
+  const previousUnitCost = summary ? roundMoney(Number(summary.unit_cost ?? 0)) : 0;
+  const previewTotalCost = roundMoney(previousTotalCost + input.adjustmentAmount);
+  const previewUnitCost =
+    summary && Number(summary.finished_qty ?? 0) > 0 ? roundMoney(previewTotalCost / Number(summary.finished_qty)) : previousUnitCost;
+  const initialStatus = approvalRule ? "pending_approval" : "pending_summary";
+
+  database.prepare(`
+    INSERT INTO production_cost_adjustments (
+      id, adjustment_no, production_order_id, order_id, cost_summary_id, exception_id,
+      adjustment_amount, previous_total_cost, new_total_cost, previous_unit_cost, new_unit_cost,
+      status, adjustment_note, created_by, created_at
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    adjustmentId,
+    adjustmentNo,
+    input.productionId,
+    input.orderId,
+    summary?.id ?? "",
+    input.exceptionId,
+    input.adjustmentAmount,
+    previousTotalCost,
+    previewTotalCost,
+    previousUnitCost,
+    previewUnitCost,
+    initialStatus,
+    input.note,
+    input.actorId,
+    input.postedAt,
+  );
+  if (approvalRule) {
+    const approvalId = uid("OA");
+    const approvalNo = serial(database, "approval_requests", "SP");
     database.prepare(`
-      INSERT INTO production_cost_adjustments (
-        id, adjustment_no, production_order_id, order_id, cost_summary_id, exception_id,
-        adjustment_amount, previous_total_cost, new_total_cost, previous_unit_cost, new_unit_cost,
-        status, adjustment_note, created_by, created_at
+      INSERT INTO approval_requests (
+        id, request_no, type, title, applicant_id, status, amount,
+        reason, rule_id, approver_role, sla_hours, entity_type, entity_id,
+        created_at, decided_by, decided_at, decision_note
       )
-      VALUES (?, ?, ?, ?, '', ?, ?, 0, ?, 0, 0, 'pending_summary', ?, ?, ?)
+      VALUES (?, ?, '工单成本调整', ?, ?, 'pending', ?, ?, ?, ?, ?, 'production_cost_adjustment', ?, ?, NULL, NULL, NULL)
     `).run(
-      adjustmentId,
-      adjustmentNo,
-      input.productionId,
-      input.orderId,
-      input.exceptionId,
-      input.adjustmentAmount,
-      input.adjustmentAmount,
-      input.note,
+      approvalId,
+      approvalNo,
+      `工单成本调整审批 ${adjustmentNo}`,
       input.actorId,
+      Math.abs(input.adjustmentAmount),
+      `${input.note}；调整金额：${input.adjustmentAmount}`,
+      approvalRule.id,
+      approvalRule.approver_role,
+      approvalRule.sla_hours,
+      adjustmentId,
       input.postedAt,
     );
+    database
+      .prepare("UPDATE production_cost_adjustments SET approval_request_id = ? WHERE id = ?")
+      .run(approvalId, adjustmentId);
+    audit(database, input.actorId, "submitProductionCostAdjustmentApproval", "production_cost_adjustment", adjustmentId, `发起工单成本调整审批 ${approvalNo}：${adjustmentNo}`);
+    return;
+  }
+
+  if (!summary) {
     audit(database, input.actorId, "postProductionCostAdjustment", "production_cost_adjustment", adjustmentId, `登记待归集工单成本调整 ${adjustmentNo}`);
+    return;
+  }
+
+  applyProductionCostAdjustment(database, adjustmentId, input.actorId, input.postedAt);
+}
+
+function applyProductionCostAdjustment(
+  database: Database.Database,
+  adjustmentId: string,
+  actorId: string,
+  appliedAt: string,
+  costSummaryId?: string,
+) {
+  const adjustment = database.prepare("SELECT * FROM production_cost_adjustments WHERE id = ?").get(adjustmentId) as
+    | {
+        id: string;
+        adjustment_no: string;
+        production_order_id: string;
+        order_id: string;
+        cost_summary_id: string;
+        adjustment_amount: number;
+        status: string;
+      }
+    | undefined;
+  if (!adjustment) throw new Error("工单成本调整单不存在。");
+  if (adjustment.status === "applied") return;
+  if (adjustment.status === "reversed") throw new Error("工单成本调整单已红冲，不能重复入账。");
+  if (adjustment.status === "rejected") throw new Error("工单成本调整单已驳回，不能入账。");
+  if (!["pending_approval", "pending_summary"].includes(adjustment.status)) {
+    throw new Error("工单成本调整单状态不允许入账。");
+  }
+
+  const summary = database.prepare(`
+    SELECT *
+    FROM production_cost_summaries
+    WHERE id = ?
+       OR production_order_id = ?
+    ORDER BY CASE WHEN id = ? THEN 0 ELSE 1 END, aggregated_at DESC
+    LIMIT 1
+  `).get(costSummaryId || adjustment.cost_summary_id || "", adjustment.production_order_id, costSummaryId || adjustment.cost_summary_id || "") as
+    | { id: string; material_cost: number; total_cost: number; unit_cost: number; finished_qty: number }
+    | undefined;
+  if (!summary) {
+    database.prepare("UPDATE production_cost_adjustments SET status = 'pending_summary' WHERE id = ?").run(adjustment.id);
+    audit(database, actorId, "deferProductionCostAdjustment", "production_cost_adjustment", adjustment.id, `工单成本调整 ${adjustment.adjustment_no} 已审批，等待成本归集后入账`);
     return;
   }
 
   const previousTotalCost = roundMoney(Number(summary.total_cost ?? 0));
   const previousUnitCost = roundMoney(Number(summary.unit_cost ?? 0));
-  const newMaterialCost = roundMoney(Number(summary.material_cost ?? 0) + input.adjustmentAmount);
-  const newTotalCost = roundMoney(previousTotalCost + input.adjustmentAmount);
+  const amount = roundMoney(Number(adjustment.adjustment_amount ?? 0));
+  const newMaterialCost = roundMoney(Number(summary.material_cost ?? 0) + amount);
+  const newTotalCost = roundMoney(previousTotalCost + amount);
   const newUnitCost = Number(summary.finished_qty ?? 0) > 0 ? roundMoney(newTotalCost / Number(summary.finished_qty)) : previousUnitCost;
   database.prepare(`
     UPDATE production_cost_summaries
@@ -8180,31 +8297,20 @@ function postProductionCostAdjustment(
         status = 'adjusted',
         aggregated_at = ?
     WHERE id = ?
-  `).run(newMaterialCost, newTotalCost, newUnitCost, input.postedAt, summary.id);
+  `).run(newMaterialCost, newTotalCost, newUnitCost, appliedAt, summary.id);
   database.prepare(`
-    INSERT INTO production_cost_adjustments (
-      id, adjustment_no, production_order_id, order_id, cost_summary_id, exception_id,
-      adjustment_amount, previous_total_cost, new_total_cost, previous_unit_cost, new_unit_cost,
-      status, adjustment_note, created_by, created_at
-    )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'applied', ?, ?, ?)
-  `).run(
-    adjustmentId,
-    adjustmentNo,
-    input.productionId,
-    input.orderId,
-    summary.id,
-    input.exceptionId,
-    input.adjustmentAmount,
-    previousTotalCost,
-    newTotalCost,
-    previousUnitCost,
-    newUnitCost,
-    input.note,
-    input.actorId,
-    input.postedAt,
-  );
-  audit(database, input.actorId, "postProductionCostAdjustment", "production_cost_adjustment", adjustmentId, `补退料异常成本调整入账 ${adjustmentNo}：${input.adjustmentAmount}`);
+    UPDATE production_cost_adjustments
+    SET cost_summary_id = ?,
+        previous_total_cost = ?,
+        new_total_cost = ?,
+        previous_unit_cost = ?,
+        new_unit_cost = ?,
+        status = 'applied',
+        applied_by = ?,
+        applied_at = ?
+    WHERE id = ?
+  `).run(summary.id, previousTotalCost, newTotalCost, previousUnitCost, newUnitCost, actorId, appliedAt, adjustment.id);
+  audit(database, actorId, "applyProductionCostAdjustment", "production_cost_adjustment", adjustment.id, `工单成本调整入账 ${adjustment.adjustment_no}：${amount}`);
 }
 
 function applyPendingProductionCostAdjustments(
@@ -8218,34 +8324,9 @@ function applyPendingProductionCostAdjustments(
     FROM production_cost_adjustments
     WHERE production_order_id = ? AND status = 'pending_summary'
     ORDER BY created_at ASC
-  `).all(productionId) as Array<{ id: string; adjustment_amount: number }>;
+  `).all(productionId) as Array<{ id: string; created_by: string }>;
   pending.forEach((adjustment) => {
-    const summary = database.prepare("SELECT * FROM production_cost_summaries WHERE id = ?").get(costSummaryId) as
-      | { id: string; material_cost: number; total_cost: number; unit_cost: number; finished_qty: number }
-      | undefined;
-    if (!summary) return;
-    const previousTotalCost = roundMoney(Number(summary.total_cost ?? 0));
-    const previousUnitCost = roundMoney(Number(summary.unit_cost ?? 0));
-    const amount = roundMoney(Number(adjustment.adjustment_amount ?? 0));
-    const newMaterialCost = roundMoney(Number(summary.material_cost ?? 0) + amount);
-    const newTotalCost = roundMoney(previousTotalCost + amount);
-    const newUnitCost = Number(summary.finished_qty ?? 0) > 0 ? roundMoney(newTotalCost / Number(summary.finished_qty)) : previousUnitCost;
-    database.prepare(`
-      UPDATE production_cost_summaries
-      SET material_cost = ?, total_cost = ?, unit_cost = ?, status = 'adjusted', aggregated_at = ?
-      WHERE id = ?
-    `).run(newMaterialCost, newTotalCost, newUnitCost, appliedAt, summary.id);
-    database.prepare(`
-      UPDATE production_cost_adjustments
-      SET cost_summary_id = ?,
-          previous_total_cost = ?,
-          new_total_cost = ?,
-          previous_unit_cost = ?,
-          new_unit_cost = ?,
-          status = 'applied',
-          created_at = ?
-      WHERE id = ?
-    `).run(summary.id, previousTotalCost, newTotalCost, previousUnitCost, newUnitCost, appliedAt, adjustment.id);
+    applyProductionCostAdjustment(database, adjustment.id, adjustment.created_by, appliedAt, costSummaryId);
   });
 }
 
@@ -11943,6 +12024,29 @@ function decideApproval(
   if (approval.entity_type === "production_plan" && approval.entity_id) {
     decideProductionPlanApproval(database, actorId, approval.entity_id, status, note, decidedAt);
   }
+  if (approval.entity_type === "production_cost_adjustment" && approval.entity_id) {
+    if (status === "approved") {
+      applyProductionCostAdjustment(database, approval.entity_id, actorId, decidedAt);
+    } else {
+      database.prepare(`
+        UPDATE production_cost_adjustments
+        SET status = 'rejected',
+            adjustment_note = CASE
+              WHEN adjustment_note = '' THEN ?
+              ELSE adjustment_note || '；审批驳回：' || ?
+            END
+        WHERE id = ? AND status = 'pending_approval'
+      `).run(note, note, approval.entity_id);
+      audit(
+        database,
+        actorId,
+        "rejectProductionCostAdjustment",
+        "production_cost_adjustment",
+        approval.entity_id,
+        `驳回工单成本调整审批 ${approval.request_no}`,
+      );
+    }
+  }
   if (approval.entity_type === "supplier_admission_rule_change" && approval.entity_id) {
     decideSupplierAdmissionRuleChange(database, actorId, approval.entity_id, status, note, decidedAt);
   }
@@ -12643,7 +12747,7 @@ function voidBusinessDocument(database: Database.Database, actorId: string, docu
 }
 
 function reversalDocumentTypeValue(value: string) {
-  if (["purchase_order", "shipment"].includes(value)) return value;
+  if (["purchase_order", "shipment", "production_cost_adjustment"].includes(value)) return value;
   throw new Error("冲销单据类型不正确。");
 }
 
@@ -12750,7 +12854,70 @@ function reverseBusinessDocument(database: Database.Database, actorId: string, d
     return;
   }
 
+  if (documentType === "production_cost_adjustment") {
+    reverseProductionCostAdjustment(database, actorId, documentId, reason);
+    return;
+  }
+
   reverseShipment(database, actorId, documentId, reason);
+}
+
+function reverseProductionCostAdjustment(database: Database.Database, actorId: string, adjustmentId: string, reason: string) {
+  const adjustment = database.prepare(`
+    SELECT pca.*, pcs.material_cost, pcs.total_cost, pcs.unit_cost, pcs.finished_qty
+    FROM production_cost_adjustments pca
+    LEFT JOIN production_cost_summaries pcs ON pcs.id = pca.cost_summary_id
+    WHERE pca.id = ?
+  `).get(adjustmentId) as
+    | {
+        id: string;
+        adjustment_no: string;
+        cost_summary_id: string;
+        adjustment_amount: number;
+        status: string;
+        material_cost: number | null;
+        total_cost: number | null;
+        unit_cost: number | null;
+        finished_qty: number | null;
+      }
+    | undefined;
+  if (!adjustment) throw new Error("工单成本调整单不存在。");
+  if (adjustment.status !== "applied") throw new Error("工单成本调整单未入账或已处理，不能红冲。");
+  if (!adjustment.cost_summary_id || adjustment.total_cost == null) {
+    throw new Error("工单成本调整单缺少成本归集信息，不能红冲。");
+  }
+
+  const reversal = insertDocumentReversal(database, actorId, {
+    documentType: "production_cost_adjustment",
+    documentId: adjustment.id,
+    documentNo: adjustment.adjustment_no,
+    originalStatus: adjustment.status,
+    reversalType: "production_cost_adjustment",
+    reason,
+  });
+  const amount = roundMoney(Number(adjustment.adjustment_amount ?? 0));
+  const nextMaterialCost = roundMoney(Number(adjustment.material_cost ?? 0) - amount);
+  const nextTotalCost = roundMoney(Number(adjustment.total_cost ?? 0) - amount);
+  const nextUnitCost = Number(adjustment.finished_qty ?? 0) > 0 ? roundMoney(nextTotalCost / Number(adjustment.finished_qty)) : roundMoney(Number(adjustment.unit_cost ?? 0));
+  database.prepare(`
+    UPDATE production_cost_summaries
+    SET material_cost = ?,
+        total_cost = ?,
+        unit_cost = ?,
+        status = 'adjusted',
+        aggregated_at = ?
+    WHERE id = ?
+  `).run(nextMaterialCost, nextTotalCost, nextUnitCost, reversal.reversedAt, adjustment.cost_summary_id);
+  database.prepare(`
+    UPDATE production_cost_adjustments
+    SET status = 'reversed',
+        reversal_id = ?,
+        reversed_by = ?,
+        reversed_at = ?,
+        reversal_reason = ?
+    WHERE id = ?
+  `).run(reversal.reversalId, actorId, reversal.reversedAt, reason, adjustment.id);
+  audit(database, actorId, "reverseProductionCostAdjustment", "production_cost_adjustment", adjustment.id, `红冲工单成本调整 ${adjustment.adjustment_no}：${reason}`);
 }
 
 function reversePurchaseReceipt(database: Database.Database, actorId: string, purchaseOrderId: string, reason: string) {

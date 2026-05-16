@@ -810,9 +810,16 @@ function applySchema(database: Database.Database) {
       previous_unit_cost REAL NOT NULL DEFAULT 0,
       new_unit_cost REAL NOT NULL DEFAULT 0,
       status TEXT NOT NULL,
+      approval_request_id TEXT REFERENCES approval_requests(id),
       adjustment_note TEXT NOT NULL DEFAULT '',
       created_by TEXT NOT NULL REFERENCES users(id),
-      created_at TEXT NOT NULL
+      created_at TEXT NOT NULL,
+      applied_by TEXT REFERENCES users(id),
+      applied_at TEXT,
+      reversal_id TEXT REFERENCES document_reversals(id),
+      reversed_by TEXT REFERENCES users(id),
+      reversed_at TEXT,
+      reversal_reason TEXT NOT NULL DEFAULT ''
     );
 
     CREATE TABLE IF NOT EXISTS finished_batches (
@@ -3236,6 +3243,25 @@ function applyMigrations(database: Database.Database) {
         `);
       },
     },
+    {
+      id: "053_production_cost_adjustment_approval_reversal",
+      description: "工单成本调整审批与红冲规则字段",
+      up: () => {
+        ensureColumn(database, "production_cost_adjustments", "approval_request_id", "TEXT REFERENCES approval_requests(id)");
+        ensureColumn(database, "production_cost_adjustments", "applied_by", "TEXT REFERENCES users(id)");
+        ensureColumn(database, "production_cost_adjustments", "applied_at", "TEXT");
+        ensureColumn(database, "production_cost_adjustments", "reversal_id", "TEXT REFERENCES document_reversals(id)");
+        ensureColumn(database, "production_cost_adjustments", "reversed_by", "TEXT REFERENCES users(id)");
+        ensureColumn(database, "production_cost_adjustments", "reversed_at", "TEXT");
+        ensureColumn(database, "production_cost_adjustments", "reversal_reason", "TEXT NOT NULL DEFAULT ''");
+        database.exec(`
+          CREATE INDEX IF NOT EXISTS idx_production_cost_adjustments_status
+            ON production_cost_adjustments(status, created_at);
+          CREATE INDEX IF NOT EXISTS idx_production_cost_adjustments_approval
+            ON production_cost_adjustments(approval_request_id);
+        `);
+      },
+    },
   ];
 
   const applied = database
@@ -3700,6 +3726,17 @@ const defaultApprovalRules = [
     approverRole: "warehouse",
     slaHours: 12,
     description: "生产领料单由仓库复核 BOM、批次、FIFO 和替代料规则。",
+  },
+  {
+    id: "APR-PCA-HIGH",
+    ruleCode: "PCA-HIGH",
+    ruleName: "工单成本调整审批",
+    sourceType: "production_cost_adjustment",
+    minAmount: 500,
+    maxAmount: null,
+    approverRole: "manager",
+    slaHours: 24,
+    description: "补退料异常、复核差异等导致的高金额工单成本调整，需管理层审批后入账。",
   },
 ] as const;
 
