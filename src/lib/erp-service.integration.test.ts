@@ -997,6 +997,69 @@ function createPlanChangeImpactScenario(service: Awaited<ReturnType<typeof loadS
   };
 }
 
+function createMaterialAdjustmentReviewException(
+  service: Awaited<ReturnType<typeof loadService>>,
+  options: { costAdjustmentAmount?: string; suggestedQty?: string } = {},
+) {
+  const scenario = createPlanChangeImpactScenario(service);
+  const warehouseImpact = scenario.impacts.find((item) => item.impact_type === "material_requisition") as Record<string, unknown>;
+
+  service.performAction({
+    actorId: "U-WH",
+    action: "resolveProductionPlanChangeImpact",
+    entityId: String(warehouseImpact.id),
+    payload: {
+      adjustment_type: "supplement",
+      suggested_qty: options.suggestedQty ?? "2.5",
+      resolution_note: "仓库发现补料缺口，生成补料建议。",
+    },
+  });
+  const suggestionSnapshot = service.getSnapshot("U-PROD") as unknown as {
+    board: { productionMaterialAdjustmentSuggestions: Array<Record<string, unknown>> };
+  };
+  const suggestion = suggestionSnapshot.board.productionMaterialAdjustmentSuggestions.find(
+    (item) => item.impact_id === warehouseImpact.id,
+  ) as Record<string, unknown>;
+  service.performAction({
+    actorId: "U-PROD",
+    action: "confirmMaterialAdjustmentSuggestion",
+    entityId: String(suggestion.id),
+    payload: { confirmation_note: "生产确认补料数量，转正式补退料单执行。" },
+  });
+  const order = (service.getSnapshot("U-WH") as unknown as {
+    board: { productionMaterialAdjustmentOrders: Array<Record<string, unknown>> };
+  }).board.productionMaterialAdjustmentOrders.find((item) => item.suggestion_id === suggestion.id) as Record<string, unknown>;
+  service.performAction({
+    actorId: "U-WH",
+    action: "executeMaterialAdjustmentOrder",
+    entityId: String(order.id),
+    payload: {
+      material_id: "M-STEEL",
+      execution_date: "2026-07-04",
+      execution_note: "仓库完成补料执行，后续按异常金额调整工单成本。",
+    },
+  });
+  service.performAction({
+    actorId: "U-WH",
+    action: "reviewMaterialAdjustmentOrder",
+    entityId: String(order.id),
+    payload: {
+      review_result: "exception",
+      review_note: "补料执行成本需转生产复核并调整工单成本。",
+      exception_reason_type: "cost_mismatch",
+      exception_description: "补料成本与生产日报确认成本存在差异。",
+      owner_role: "production",
+      due_date: "2026-07-07",
+      cost_adjustment_amount: options.costAdjustmentAmount ?? "12.5",
+    },
+  });
+  const exception = (service.getSnapshot("U-PROD") as unknown as {
+    board: { productionMaterialAdjustmentReviewExceptions: Array<Record<string, unknown>> };
+  }).board.productionMaterialAdjustmentReviewExceptions.find((item) => item.order_id === order.id) as Record<string, unknown>;
+
+  return { scenario, warehouseImpact, suggestion, adjustmentOrder: order, exception };
+}
+
 describe("ERP service document attachment archive", () => {
   it("stores evidence files on the local data disk, records metadata, and includes them in cold backups", async () => {
     const service = await loadService();
@@ -6719,6 +6782,194 @@ describe("ERP service production plan lock approval and change notifications", (
       adjustment_count: 1,
       adjustment_amount: 10.5,
     });
+  });
+
+  it("requires approval for large production cost adjustments and supports red-offset reversal", async () => {
+    const service = await loadService();
+    const { scenario, exception } = createMaterialAdjustmentReviewException(service, { costAdjustmentAmount: "800" });
+
+    service.performAction({ actorId: "U-PROD", action: "requestInspection", entityId: String(scenario.production.id) });
+    const inspection = service.getSnapshot("U-QA").board.inspections.find(
+      (item) => item.production_order_id === scenario.production.id,
+    ) as Record<string, unknown>;
+    service.performAction({
+      actorId: "U-QA",
+      action: "completeInspection",
+      entityId: String(inspection.id),
+      payload: {
+        result: "qualified",
+        actual_qty: "9.5",
+        measured_data: "外观、尺寸和性能均符合标准。",
+      },
+    });
+    service.performAction({
+      actorId: "U-WH",
+      action: "receiveFinishedGoods",
+      entityId: String(scenario.production.id),
+      payload: { inbound_date: "2026-07-05", inbound_note: "入库前已留存高金额成本调整待审批。" },
+    });
+    const beforeSnapshot = service.getSnapshot("U-PROD") as unknown as {
+      board: { productionCostSummaries: Array<Record<string, unknown>> };
+    };
+    const costBefore = beforeSnapshot.board.productionCostSummaries.find(
+      (item) => item.production_order_id === scenario.production.id,
+    ) as Record<string, unknown>;
+
+    service.performAction({
+      actorId: "U-PROD",
+      action: "resolveMaterialAdjustmentReviewException",
+      entityId: String(exception.id),
+      payload: {
+        resolution_type: "cost_adjustment",
+        final_cost_adjustment_amount: "800",
+        resolution_note: "高金额补料异常需要管理层审批后再调整工单成本。",
+      },
+    });
+
+    const pendingSnapshot = service.getSnapshot("U-MGR") as unknown as {
+      board: {
+        approvalRequests: Array<Record<string, unknown>>;
+        productionCostSummaries: Array<Record<string, unknown>>;
+        productionCostAdjustments: Array<Record<string, unknown>>;
+      };
+    };
+    const pendingAdjustment = pendingSnapshot.board.productionCostAdjustments.find(
+      (item) => item.exception_id === exception.id,
+    ) as Record<string, unknown>;
+    const approval = pendingSnapshot.board.approvalRequests.find(
+      (item) => item.entity_type === "production_cost_adjustment" && item.entity_id === pendingAdjustment.id,
+    ) as Record<string, unknown>;
+    const pendingCost = pendingSnapshot.board.productionCostSummaries.find(
+      (item) => item.production_order_id === scenario.production.id,
+    ) as Record<string, unknown>;
+
+    expect(pendingAdjustment).toMatchObject({
+      adjustment_no: expect.stringMatching(/^CBTZ-/),
+      status: "pending_approval",
+      status_label: "待审批",
+      adjustment_amount: 800,
+      cost_summary_id: costBefore.id,
+      previous_total_cost: costBefore.total_cost,
+      new_total_cost: Number((Number(costBefore.total_cost) + 800).toFixed(2)),
+      request_no: expect.stringMatching(/^SP-/),
+      approval_status: "pending",
+      approval_status_label: "待审批",
+    });
+    expect(approval).toMatchObject({
+      request_no: pendingAdjustment.request_no,
+      title: expect.stringContaining(String(pendingAdjustment.adjustment_no)),
+      entity_type: "production_cost_adjustment",
+      entity_id: pendingAdjustment.id,
+      status: "pending",
+      amount: 800,
+      approver_role: "manager",
+    });
+    expect(pendingCost).toMatchObject({
+      id: costBefore.id,
+      material_cost: costBefore.material_cost,
+      total_cost: costBefore.total_cost,
+      unit_cost: costBefore.unit_cost,
+      adjustment_count: 0,
+      adjustment_amount: 0,
+    });
+
+    service.performAction({
+      actorId: "U-MGR",
+      action: "approveApproval",
+      entityId: String(approval.id),
+      payload: { approval_note: "同意按补退料复核异常单调整工单成本。" },
+    });
+
+    const approvedSnapshot = service.getSnapshot("U-MGR") as unknown as {
+      board: {
+        productionCostSummaries: Array<Record<string, unknown>>;
+        productionCostAdjustments: Array<Record<string, unknown>>;
+      };
+    };
+    const approvedAdjustment = approvedSnapshot.board.productionCostAdjustments.find(
+      (item) => item.id === pendingAdjustment.id,
+    ) as Record<string, unknown>;
+    const approvedCost = approvedSnapshot.board.productionCostSummaries.find(
+      (item) => item.production_order_id === scenario.production.id,
+    ) as Record<string, unknown>;
+    const expectedApprovedTotal = Number((Number(costBefore.total_cost) + 800).toFixed(2));
+    const expectedApprovedUnit = Number((expectedApprovedTotal / Number(costBefore.finished_qty)).toFixed(2));
+
+    expect(approvedAdjustment).toMatchObject({
+      status: "applied",
+      status_label: "已入账",
+      approval_status: "approved",
+      approval_status_label: "已同意",
+      new_total_cost: expectedApprovedTotal,
+      new_unit_cost: expectedApprovedUnit,
+    });
+    expect(approvedCost).toMatchObject({
+      material_cost: Number((Number(costBefore.material_cost) + 800).toFixed(2)),
+      total_cost: expectedApprovedTotal,
+      unit_cost: expectedApprovedUnit,
+      status: "adjusted",
+      adjustment_count: 1,
+      adjustment_amount: 800,
+    });
+
+    service.performAction({
+      actorId: "U-MGR",
+      action: "reverseBusinessDocument",
+      entityId: String(approvedAdjustment.id),
+      payload: {
+        document_type: "production_cost_adjustment",
+        reason: "成本调整审批后发现依据重复，按红冲规则回滚工单成本。",
+      },
+    });
+
+    const reversedSnapshot = service.getSnapshot("U-MGR") as unknown as {
+      board: {
+        documentReversals: Array<Record<string, unknown>>;
+        productionCostSummaries: Array<Record<string, unknown>>;
+        productionCostAdjustments: Array<Record<string, unknown>>;
+      };
+    };
+    const reversedAdjustment = reversedSnapshot.board.productionCostAdjustments.find(
+      (item) => item.id === approvedAdjustment.id,
+    ) as Record<string, unknown>;
+    const reversedCost = reversedSnapshot.board.productionCostSummaries.find(
+      (item) => item.production_order_id === scenario.production.id,
+    ) as Record<string, unknown>;
+    const reversal = reversedSnapshot.board.documentReversals.find(
+      (item) => item.document_type === "production_cost_adjustment" && item.document_id === approvedAdjustment.id,
+    ) as Record<string, unknown>;
+
+    expect(reversedAdjustment).toMatchObject({
+      status: "reversed",
+      status_label: "已红冲",
+      reversal_reason: "成本调整审批后发现依据重复，按红冲规则回滚工单成本。",
+    });
+    expect(reversal).toMatchObject({
+      reversal_no: expect.stringMatching(/^CX-/),
+      document_type: "production_cost_adjustment",
+      document_type_label: "工单成本调整单",
+      document_no: approvedAdjustment.adjustment_no,
+      reversal_type: "production_cost_adjustment",
+      reversal_type_label: "工单成本调整红冲",
+    });
+    expect(reversedCost).toMatchObject({
+      material_cost: costBefore.material_cost,
+      total_cost: costBefore.total_cost,
+      unit_cost: costBefore.unit_cost,
+      adjustment_count: 0,
+      adjustment_amount: 0,
+    });
+    expect(() =>
+      service.performAction({
+        actorId: "U-MGR",
+        action: "reverseBusinessDocument",
+        entityId: String(approvedAdjustment.id),
+        payload: {
+          document_type: "production_cost_adjustment",
+          reason: "重复红冲测试。",
+        },
+      }),
+    ).toThrow("该单据已冲销");
   });
 });
 
