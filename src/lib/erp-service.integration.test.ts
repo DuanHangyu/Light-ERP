@@ -6586,6 +6586,140 @@ describe("ERP service production plan lock approval and change notifications", (
       }),
     ).toThrow("补退料复核异常已关闭");
   });
+
+  it("applies resolved material adjustment review exceptions to production cost summaries", async () => {
+    const service = await loadService();
+    const scenario = createPlanChangeImpactScenario(service);
+    const warehouseImpact = scenario.impacts.find((item) => item.impact_type === "material_requisition") as Record<string, unknown>;
+
+    service.performAction({
+      actorId: "U-WH",
+      action: "resolveProductionPlanChangeImpact",
+      entityId: String(warehouseImpact.id),
+      payload: {
+        adjustment_type: "supplement",
+        suggested_qty: "2.5",
+        resolution_note: "仓库发现补料缺口，生成补料建议。",
+      },
+    });
+    const suggestionSnapshot = service.getSnapshot("U-PROD") as unknown as {
+      board: { productionMaterialAdjustmentSuggestions: Array<Record<string, unknown>> };
+    };
+    const suggestion = suggestionSnapshot.board.productionMaterialAdjustmentSuggestions.find(
+      (item) => item.impact_id === warehouseImpact.id,
+    ) as Record<string, unknown>;
+    service.performAction({
+      actorId: "U-PROD",
+      action: "confirmMaterialAdjustmentSuggestion",
+      entityId: String(suggestion.id),
+      payload: { confirmation_note: "生产确认补料数量，转正式补退料单执行。" },
+    });
+    const order = (service.getSnapshot("U-WH") as unknown as {
+      board: { productionMaterialAdjustmentOrders: Array<Record<string, unknown>> };
+    }).board.productionMaterialAdjustmentOrders.find((item) => item.suggestion_id === suggestion.id) as Record<string, unknown>;
+    service.performAction({
+      actorId: "U-WH",
+      action: "executeMaterialAdjustmentOrder",
+      entityId: String(order.id),
+      payload: {
+        material_id: "M-STEEL",
+        execution_date: "2026-07-04",
+        execution_note: "仓库完成补料执行，后续按异常金额调整工单成本。",
+      },
+    });
+    service.performAction({
+      actorId: "U-WH",
+      action: "reviewMaterialAdjustmentOrder",
+      entityId: String(order.id),
+      payload: {
+        review_result: "exception",
+        review_note: "补料执行成本需转生产复核并调整工单成本。",
+        exception_reason_type: "cost_mismatch",
+        exception_description: "补料成本与生产日报确认成本存在差异。",
+        owner_role: "production",
+        due_date: "2026-07-07",
+        cost_adjustment_amount: "12.5",
+      },
+    });
+    const exception = (service.getSnapshot("U-PROD") as unknown as {
+      board: { productionMaterialAdjustmentReviewExceptions: Array<Record<string, unknown>> };
+    }).board.productionMaterialAdjustmentReviewExceptions.find((item) => item.order_id === order.id) as Record<string, unknown>;
+
+    service.performAction({ actorId: "U-PROD", action: "requestInspection", entityId: String(scenario.production.id) });
+    const inspection = service.getSnapshot("U-QA").board.inspections.find(
+      (item) => item.production_order_id === scenario.production.id,
+    ) as Record<string, unknown>;
+    service.performAction({
+      actorId: "U-QA",
+      action: "completeInspection",
+      entityId: String(inspection.id),
+      payload: {
+        result: "qualified",
+        actual_qty: "9.5",
+        measured_data: "外观、尺寸和性能均符合标准。",
+      },
+    });
+    service.performAction({
+      actorId: "U-WH",
+      action: "receiveFinishedGoods",
+      entityId: String(scenario.production.id),
+      payload: { inbound_date: "2026-07-05", inbound_note: "入库前已留存补退料异常待生产确认。" },
+    });
+    const beforeSnapshot = service.getSnapshot("U-PROD") as unknown as {
+      board: { productionCostSummaries: Array<Record<string, unknown>> };
+    };
+    const costBefore = beforeSnapshot.board.productionCostSummaries.find(
+      (item) => item.production_order_id === scenario.production.id,
+    ) as Record<string, unknown>;
+
+    service.performAction({
+      actorId: "U-PROD",
+      action: "resolveMaterialAdjustmentReviewException",
+      entityId: String(exception.id),
+      payload: {
+        resolution_type: "cost_adjustment",
+        final_cost_adjustment_amount: "10.5",
+        resolution_note: "生产确认补料异常应调整工单材料成本 10.5 元。",
+      },
+    });
+
+    const afterSnapshot = service.getSnapshot("U-PROD") as unknown as {
+      board: {
+        productionCostSummaries: Array<Record<string, unknown>>;
+        productionCostAdjustments: Array<Record<string, unknown>>;
+      };
+    };
+    const costAfter = afterSnapshot.board.productionCostSummaries.find(
+      (item) => item.production_order_id === scenario.production.id,
+    ) as Record<string, unknown>;
+    const adjustment = afterSnapshot.board.productionCostAdjustments.find(
+      (item) => item.exception_id === exception.id,
+    ) as Record<string, unknown>;
+    const expectedTotalCost = Number((Number(costBefore.total_cost) + 10.5).toFixed(2));
+    const expectedUnitCost = Number((expectedTotalCost / Number(costBefore.finished_qty)).toFixed(2));
+
+    expect(adjustment).toMatchObject({
+      adjustment_no: expect.stringMatching(/^CBTZ-/),
+      exception_id: exception.id,
+      production_order_id: scenario.production.id,
+      cost_summary_id: costBefore.id,
+      status: "applied",
+      status_label: "已入账",
+      adjustment_amount: 10.5,
+      previous_total_cost: costBefore.total_cost,
+      new_total_cost: expectedTotalCost,
+      created_by_name: "生产主管-马工",
+    });
+    expect(costAfter).toMatchObject({
+      id: costBefore.id,
+      material_cost: Number((Number(costBefore.material_cost) + 10.5).toFixed(2)),
+      total_cost: expectedTotalCost,
+      unit_cost: expectedUnitCost,
+      status: "adjusted",
+      adjustment_count: 1,
+      adjustment_amount: 10.5,
+    });
+  });
 });
 
 describe("ERP service formal report center", () => {
