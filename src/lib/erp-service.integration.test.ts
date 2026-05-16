@@ -1756,6 +1756,117 @@ describe("ERP service document attachment archive", () => {
 });
 
 describe("ERP service formal go-live initialization", () => {
+  it("prevalidates master data imports and records row-level errors without writing dirty rows", async () => {
+    const service = await loadService();
+
+    const result = service.validateMasterDataRows({
+      actorId: "U-ADMIN",
+      type: "materials",
+      sourceName: "materials-bad.csv",
+      rows: [
+        { material_code: "M-NEW-VALID", name: "上线新增合规物料", unit: "kg", reorder_min_qty: 5 },
+        { material_code: "M-NEW-VALID", name: "重复编码物料", unit: "kg" },
+        { material_code: "", name: "缺编码物料", unit: "kg" },
+        { material_code: "M-BAD-QTY", name: "安全库存错误", unit: "kg", reorder_min_qty: -1 },
+      ],
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      importedRows: 4,
+      validRows: 1,
+      failedRows: 3,
+      status: "validation_failed",
+    });
+    expect(result.errors).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ rowNo: 2, fieldName: "material_code", message: expect.stringContaining("重复") }),
+        expect.objectContaining({ rowNo: 3, fieldName: "material_code", message: expect.stringContaining("缺少") }),
+        expect.objectContaining({ rowNo: 4, fieldName: "reorder_min_qty", message: expect.stringContaining("不能小于") }),
+      ]),
+    );
+
+    let snapshot = service.getSnapshot("U-ADMIN");
+    expect(snapshot.board.materials.find((item) => item.material_code === "M-NEW-VALID")).toBeUndefined();
+    expect(snapshot.board.initializationImports[0]).toMatchObject({
+      import_no: result.importNo,
+      type: "master-materials",
+      status: "validation_failed",
+      source_name: "materials-bad.csv",
+      valid_count: 1,
+      failed_count: 3,
+    });
+    expect(snapshot.board.initializationImportErrors).toHaveLength(3);
+
+    expect(() =>
+      service.importMasterDataRows({
+        actorId: "U-ADMIN",
+        type: "materials",
+        sourceName: "materials-bad.csv",
+        rows: [
+          { material_code: "M-NEW-VALID", name: "上线新增合规物料", unit: "kg", reorder_min_qty: 5 },
+          { material_code: "M-NEW-VALID", name: "重复编码物料", unit: "kg" },
+        ],
+      }),
+    ).toThrow("导入校验未通过");
+
+    snapshot = service.getSnapshot("U-ADMIN");
+    expect(snapshot.board.materials.find((item) => item.material_code === "M-NEW-VALID")).toBeUndefined();
+  });
+
+  it("blocks invalid opening balances before import and keeps auditable validation batches", async () => {
+    const service = await loadService();
+
+    const validation = service.validateOpeningDataRows({
+      actorId: "U-ADMIN",
+      type: "opening-payables",
+      sourceName: "opening-payables.csv",
+      rows: [
+        { supplier_code: "SUP-001", payable_no: "YF-OPEN-OK", total_amount: 4600, paid_amount: 600 },
+        { supplier_code: "SUP-001", payable_no: "YF-OPEN-BAD", total_amount: 1000, paid_amount: 1200 },
+        { supplier_code: "SUP-NOT-FOUND", payable_no: "YF-OPEN-MISS", total_amount: 1000, paid_amount: 0 },
+      ],
+    });
+
+    expect(validation).toMatchObject({
+      ok: false,
+      importedRows: 3,
+      validRows: 1,
+      failedRows: 2,
+      totalAmount: 4600,
+      status: "validation_failed",
+    });
+    expect(validation.errors).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ rowNo: 2, fieldName: "paid_amount", message: expect.stringContaining("不能大于") }),
+        expect.objectContaining({ rowNo: 3, fieldName: "supplier_code", message: expect.stringContaining("不存在") }),
+      ]),
+    );
+    expect(() =>
+      service.importOpeningDataRows({
+        actorId: "U-ADMIN",
+        type: "opening-payables",
+        sourceName: "opening-payables.csv",
+        rows: [
+          { supplier_code: "SUP-001", payable_no: "YF-OPEN-BAD", total_amount: 1000, paid_amount: 1200 },
+        ],
+      }),
+    ).toThrow("导入校验未通过");
+
+    const snapshot = service.getSnapshot("U-ADMIN");
+    expect(snapshot.board.payables.find((item) => item.payable_no === "YF-OPEN-BAD")).toBeUndefined();
+    expect(snapshot.board.initializationImports[0]).toMatchObject({
+      type: "opening-payables",
+      status: "validation_failed",
+      failed_count: 1,
+    });
+    expect(snapshot.board.initializationImportErrors[0]).toMatchObject({
+      import_no: snapshot.board.initializationImports[0].import_no,
+      row_no: 1,
+      field_name: "paid_amount",
+    });
+  });
+
   it("imports opening inventory, receivables, and payables with auditable initialization batches", async () => {
     const service = await loadService();
 
