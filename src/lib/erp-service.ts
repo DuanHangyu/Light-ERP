@@ -780,6 +780,15 @@ function materialAdjustmentExceptionResolutionLabel(type: string) {
   );
 }
 
+function productionCostAdjustmentStatusLabel(status: string) {
+  return (
+    {
+      applied: "已入账",
+      pending_summary: "待成本归集",
+    }[status] ?? status
+  );
+}
+
 function qualityInspectionWindowStatusLabel(status: string) {
   return (
     {
@@ -2581,15 +2590,44 @@ export function getSnapshot(actorId = "U-SALES") {
 
   const productionCostSummaries = database.prepare(`
     SELECT pcs.*, po.prod_no, o.order_no, c.name AS customer_name,
-           p.name AS product_name, p.unit, fgr.receipt_no
+           p.name AS product_name, p.unit, fgr.receipt_no,
+           COALESCE(adj.adjustment_count, 0) AS adjustment_count,
+           COALESCE(adj.adjustment_amount, 0) AS adjustment_amount
     FROM production_cost_summaries pcs
     JOIN production_orders po ON po.id = pcs.production_order_id
     JOIN orders o ON o.id = pcs.order_id
     JOIN customers c ON c.id = o.customer_id
     JOIN products p ON p.id = o.product_id
     JOIN finished_goods_receipts fgr ON fgr.id = pcs.receipt_id
+    LEFT JOIN (
+      SELECT cost_summary_id, COUNT(*) AS adjustment_count, ROUND(SUM(adjustment_amount), 2) AS adjustment_amount
+      FROM production_cost_adjustments
+      WHERE status = 'applied'
+      GROUP BY cost_summary_id
+    ) adj ON adj.cost_summary_id = pcs.id
     ORDER BY pcs.aggregated_at DESC
   `).all() as Array<Record<string, unknown>>;
+
+  const productionCostAdjustments = database.prepare(`
+    SELECT pca.*, po.prod_no, o.order_no, c.name AS customer_name,
+           p.name AS product_name, p.unit, pcs.cost_no, exception.exception_no,
+           creator.name AS created_by_name
+    FROM production_cost_adjustments pca
+    JOIN production_orders po ON po.id = pca.production_order_id
+    JOIN orders o ON o.id = pca.order_id
+    JOIN customers c ON c.id = o.customer_id
+    JOIN products p ON p.id = o.product_id
+    LEFT JOIN production_cost_summaries pcs ON pcs.id = pca.cost_summary_id
+    LEFT JOIN production_material_adjustment_review_exceptions exception ON exception.id = pca.exception_id
+    JOIN users creator ON creator.id = pca.created_by
+    ORDER BY pca.created_at DESC
+  `).all().map((row) => {
+    const item = row as Record<string, unknown>;
+    return {
+      ...item,
+      status_label: productionCostAdjustmentStatusLabel(String(item.status)),
+    };
+  });
 
   const finishedShipmentAllocations = database.prepare(`
     SELECT fsa.*, s.shipment_no, o.order_no, c.name AS customer_name,
@@ -3721,6 +3759,7 @@ export function getSnapshot(actorId = "U-SALES") {
       finishedBatches,
       finishedReceipts,
       productionCostSummaries,
+      productionCostAdjustments,
       finishedShipmentAllocations,
       shipments,
       salesReturns,
@@ -8020,15 +8059,18 @@ function resolveMaterialAdjustmentReviewException(
   rawPayload?: Record<string, unknown>,
 ) {
   const exception = database.prepare(`
-    SELECT exception.*, pmao.order_no
+    SELECT exception.*, pmao.order_no, pmao.production_order_id, po.order_id
     FROM production_material_adjustment_review_exceptions exception
     JOIN production_material_adjustment_orders pmao ON pmao.id = exception.order_id
+    JOIN production_orders po ON po.id = pmao.production_order_id
     WHERE exception.id = ?
   `).get(exceptionId) as
     | {
         id: string;
         exception_no: string;
         order_no: string;
+        production_order_id: string;
+        order_id: string;
         owner_role: Role;
         status: string;
         cost_adjustment_amount: number;
@@ -8060,7 +8102,151 @@ function resolveMaterialAdjustmentReviewException(
         resolved_at = ?
     WHERE id = ?
   `).run(resolutionType, resolutionNote, finalCostAdjustmentAmount, actorId, resolvedAt, exception.id);
+  if (resolutionType === "cost_adjustment" && finalCostAdjustmentAmount !== 0) {
+    postProductionCostAdjustment(database, {
+      actorId,
+      exceptionId: exception.id,
+      productionId: exception.production_order_id,
+      orderId: exception.order_id,
+      adjustmentAmount: finalCostAdjustmentAmount,
+      note: resolutionNote,
+      postedAt: resolvedAt,
+    });
+  }
   audit(database, actorId, "resolveMaterialAdjustmentReviewException", "production_material_adjustment_review_exception", exception.id, `关闭补退料复核异常 ${exception.exception_no}：${materialAdjustmentExceptionResolutionLabel(resolutionType)}`);
+}
+
+function postProductionCostAdjustment(
+  database: Database.Database,
+  input: {
+    actorId: string;
+    exceptionId: string;
+    productionId: string;
+    orderId: string;
+    adjustmentAmount: number;
+    note: string;
+    postedAt: string;
+  },
+) {
+  const existing = database.prepare("SELECT id FROM production_cost_adjustments WHERE exception_id = ?").get(input.exceptionId) as
+    | { id: string }
+    | undefined;
+  if (existing) return;
+  const summary = database.prepare("SELECT * FROM production_cost_summaries WHERE production_order_id = ?").get(input.productionId) as
+    | {
+        id: string;
+        material_cost: number;
+        total_cost: number;
+        unit_cost: number;
+        finished_qty: number;
+      }
+    | undefined;
+  const adjustmentId = uid("PCA");
+  const adjustmentNo = serial(database, "production_cost_adjustments", "CBTZ");
+  if (!summary) {
+    database.prepare(`
+      INSERT INTO production_cost_adjustments (
+        id, adjustment_no, production_order_id, order_id, cost_summary_id, exception_id,
+        adjustment_amount, previous_total_cost, new_total_cost, previous_unit_cost, new_unit_cost,
+        status, adjustment_note, created_by, created_at
+      )
+      VALUES (?, ?, ?, ?, '', ?, ?, 0, ?, 0, 0, 'pending_summary', ?, ?, ?)
+    `).run(
+      adjustmentId,
+      adjustmentNo,
+      input.productionId,
+      input.orderId,
+      input.exceptionId,
+      input.adjustmentAmount,
+      input.adjustmentAmount,
+      input.note,
+      input.actorId,
+      input.postedAt,
+    );
+    audit(database, input.actorId, "postProductionCostAdjustment", "production_cost_adjustment", adjustmentId, `登记待归集工单成本调整 ${adjustmentNo}`);
+    return;
+  }
+
+  const previousTotalCost = roundMoney(Number(summary.total_cost ?? 0));
+  const previousUnitCost = roundMoney(Number(summary.unit_cost ?? 0));
+  const newMaterialCost = roundMoney(Number(summary.material_cost ?? 0) + input.adjustmentAmount);
+  const newTotalCost = roundMoney(previousTotalCost + input.adjustmentAmount);
+  const newUnitCost = Number(summary.finished_qty ?? 0) > 0 ? roundMoney(newTotalCost / Number(summary.finished_qty)) : previousUnitCost;
+  database.prepare(`
+    UPDATE production_cost_summaries
+    SET material_cost = ?,
+        total_cost = ?,
+        unit_cost = ?,
+        status = 'adjusted',
+        aggregated_at = ?
+    WHERE id = ?
+  `).run(newMaterialCost, newTotalCost, newUnitCost, input.postedAt, summary.id);
+  database.prepare(`
+    INSERT INTO production_cost_adjustments (
+      id, adjustment_no, production_order_id, order_id, cost_summary_id, exception_id,
+      adjustment_amount, previous_total_cost, new_total_cost, previous_unit_cost, new_unit_cost,
+      status, adjustment_note, created_by, created_at
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'applied', ?, ?, ?)
+  `).run(
+    adjustmentId,
+    adjustmentNo,
+    input.productionId,
+    input.orderId,
+    summary.id,
+    input.exceptionId,
+    input.adjustmentAmount,
+    previousTotalCost,
+    newTotalCost,
+    previousUnitCost,
+    newUnitCost,
+    input.note,
+    input.actorId,
+    input.postedAt,
+  );
+  audit(database, input.actorId, "postProductionCostAdjustment", "production_cost_adjustment", adjustmentId, `补退料异常成本调整入账 ${adjustmentNo}：${input.adjustmentAmount}`);
+}
+
+function applyPendingProductionCostAdjustments(
+  database: Database.Database,
+  productionId: string,
+  costSummaryId: string,
+  appliedAt: string,
+) {
+  const pending = database.prepare(`
+    SELECT *
+    FROM production_cost_adjustments
+    WHERE production_order_id = ? AND status = 'pending_summary'
+    ORDER BY created_at ASC
+  `).all(productionId) as Array<{ id: string; adjustment_amount: number }>;
+  pending.forEach((adjustment) => {
+    const summary = database.prepare("SELECT * FROM production_cost_summaries WHERE id = ?").get(costSummaryId) as
+      | { id: string; material_cost: number; total_cost: number; unit_cost: number; finished_qty: number }
+      | undefined;
+    if (!summary) return;
+    const previousTotalCost = roundMoney(Number(summary.total_cost ?? 0));
+    const previousUnitCost = roundMoney(Number(summary.unit_cost ?? 0));
+    const amount = roundMoney(Number(adjustment.adjustment_amount ?? 0));
+    const newMaterialCost = roundMoney(Number(summary.material_cost ?? 0) + amount);
+    const newTotalCost = roundMoney(previousTotalCost + amount);
+    const newUnitCost = Number(summary.finished_qty ?? 0) > 0 ? roundMoney(newTotalCost / Number(summary.finished_qty)) : previousUnitCost;
+    database.prepare(`
+      UPDATE production_cost_summaries
+      SET material_cost = ?, total_cost = ?, unit_cost = ?, status = 'adjusted', aggregated_at = ?
+      WHERE id = ?
+    `).run(newMaterialCost, newTotalCost, newUnitCost, appliedAt, summary.id);
+    database.prepare(`
+      UPDATE production_cost_adjustments
+      SET cost_summary_id = ?,
+          previous_total_cost = ?,
+          new_total_cost = ?,
+          previous_unit_cost = ?,
+          new_unit_cost = ?,
+          status = 'applied',
+          created_at = ?
+      WHERE id = ?
+    `).run(summary.id, previousTotalCost, newTotalCost, previousUnitCost, newUnitCost, appliedAt, adjustment.id);
+  });
 }
 
 function approveMaterialRequisition(
@@ -8767,6 +8953,7 @@ function createProductionCostSummary(
     .prepare("SELECT id FROM production_cost_summaries WHERE production_order_id = ?")
     .get(input.productionId) as { id: string } | undefined;
   if (existing) return;
+  const costSummaryId = uid("PCS");
   database.prepare(`
     INSERT INTO production_cost_summaries (
       id, cost_no, production_order_id, order_id, receipt_id,
@@ -8775,7 +8962,7 @@ function createProductionCostSummary(
     )
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'closed', ?)
   `).run(
-    uid("PCS"),
+    costSummaryId,
     serial(database, "production_cost_summaries", "CB"),
     input.productionId,
     input.orderId,
@@ -8789,6 +8976,7 @@ function createProductionCostSummary(
     input.unitCost,
     input.aggregatedAt,
   );
+  applyPendingProductionCostAdjustments(database, input.productionId, costSummaryId, input.aggregatedAt);
 }
 
 function createShipment(database: Database.Database, actorId: string, productionId: string, rawPayload?: Record<string, unknown>) {

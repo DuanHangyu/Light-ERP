@@ -207,6 +207,7 @@ type Snapshot = {
     finishedBatches: Row[];
     finishedReceipts: Row[];
     productionCostSummaries: Row[];
+    productionCostAdjustments: Row[];
     finishedShipmentAllocations: Row[];
     shipments: Row[];
     salesReturns: Row[];
@@ -5510,12 +5511,36 @@ function ProductionModule({
           { key: "product_name", label: "产品" },
           { key: "material_cost", label: "材料成本", render: formatCurrency },
           { key: "process_cost", label: "加工成本", render: formatCurrency },
+          { key: "adjustment_amount", label: "成本调整", render: formatCurrency },
+          { key: "adjustment_count", label: "调整次数" },
           { key: "total_cost", label: "总成本", render: formatCurrency },
           { key: "unit_cost", label: "单位成本", render: formatCurrency },
           { key: "finished_qty", label: "成品数量", render: (value, row) => formatQty(value, row.unit) },
           { key: "transition_qty", label: "过渡料", render: (value, row) => formatQty(value, row.unit) },
           { key: "status", label: "状态", render: (value) => <StatusBadge value={String(value)} /> },
           { key: "aggregated_at", label: "归集时间", render: shortDate },
+        ]}
+      />
+      <DataTable
+        title="工单成本调整流水"
+        icon={FileCheck2}
+        rows={snapshot.board.productionCostAdjustments ?? []}
+        empty="暂无工单成本调整流水"
+        columns={[
+          { key: "adjustment_no", label: "调整单号" },
+          { key: "exception_no", label: "异常单" },
+          { key: "cost_no", label: "归集单" },
+          { key: "prod_no", label: "生产单" },
+          { key: "order_no", label: "订单号" },
+          { key: "product_name", label: "产品" },
+          { key: "adjustment_amount", label: "调整金额", render: formatCurrency },
+          { key: "previous_total_cost", label: "原总成本", render: formatCurrency },
+          { key: "new_total_cost", label: "新总成本", render: formatCurrency },
+          { key: "previous_unit_cost", label: "原单位成本", render: formatCurrency },
+          { key: "new_unit_cost", label: "新单位成本", render: formatCurrency },
+          { key: "status_label", label: "状态", render: (value) => <StatusBadge value={String(value)} /> },
+          { key: "created_by_name", label: "经办人" },
+          { key: "created_at", label: "入账时间", render: shortDate },
         ]}
       />
       <DataTable

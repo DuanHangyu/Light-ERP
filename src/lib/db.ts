@@ -797,6 +797,24 @@ function applySchema(database: Database.Database) {
       aggregated_at TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS production_cost_adjustments (
+      id TEXT PRIMARY KEY,
+      adjustment_no TEXT NOT NULL,
+      production_order_id TEXT NOT NULL REFERENCES production_orders(id),
+      order_id TEXT NOT NULL REFERENCES orders(id),
+      cost_summary_id TEXT NOT NULL DEFAULT '',
+      exception_id TEXT REFERENCES production_material_adjustment_review_exceptions(id),
+      adjustment_amount REAL NOT NULL,
+      previous_total_cost REAL NOT NULL DEFAULT 0,
+      new_total_cost REAL NOT NULL DEFAULT 0,
+      previous_unit_cost REAL NOT NULL DEFAULT 0,
+      new_unit_cost REAL NOT NULL DEFAULT 0,
+      status TEXT NOT NULL,
+      adjustment_note TEXT NOT NULL DEFAULT '',
+      created_by TEXT NOT NULL REFERENCES users(id),
+      created_at TEXT NOT NULL
+    );
+
     CREATE TABLE IF NOT EXISTS finished_batches (
       id TEXT PRIMARY KEY,
       product_id TEXT NOT NULL REFERENCES products(id),
@@ -3187,6 +3205,37 @@ function applyMigrations(database: Database.Database) {
         `);
       },
     },
+    {
+      id: "052_production_cost_adjustment_postings",
+      description: "工单成本调整流水与补退料异常过账",
+      up: () => {
+        database.exec(`
+          CREATE TABLE IF NOT EXISTS production_cost_adjustments (
+            id TEXT PRIMARY KEY,
+            adjustment_no TEXT NOT NULL,
+            production_order_id TEXT NOT NULL REFERENCES production_orders(id),
+            order_id TEXT NOT NULL REFERENCES orders(id),
+            cost_summary_id TEXT NOT NULL DEFAULT '',
+            exception_id TEXT REFERENCES production_material_adjustment_review_exceptions(id),
+            adjustment_amount REAL NOT NULL,
+            previous_total_cost REAL NOT NULL DEFAULT 0,
+            new_total_cost REAL NOT NULL DEFAULT 0,
+            previous_unit_cost REAL NOT NULL DEFAULT 0,
+            new_unit_cost REAL NOT NULL DEFAULT 0,
+            status TEXT NOT NULL,
+            adjustment_note TEXT NOT NULL DEFAULT '',
+            created_by TEXT NOT NULL REFERENCES users(id),
+            created_at TEXT NOT NULL
+          );
+          CREATE UNIQUE INDEX IF NOT EXISTS ux_production_cost_adjustments_no
+            ON production_cost_adjustments(adjustment_no);
+          CREATE UNIQUE INDEX IF NOT EXISTS ux_production_cost_adjustments_exception
+            ON production_cost_adjustments(exception_id);
+          CREATE INDEX IF NOT EXISTS idx_production_cost_adjustments_production
+            ON production_cost_adjustments(production_order_id, created_at);
+        `);
+      },
+    },
   ];
 
   const applied = database
@@ -3219,6 +3268,7 @@ function backfillDocumentSequences(database: Database.Database) {
     { table: "technical_dispositions", column: "disposition_no", prefix: "JS" },
     { table: "finished_goods_receipts", column: "receipt_no", prefix: "RK" },
     { table: "production_cost_summaries", column: "cost_no", prefix: "CB" },
+    { table: "production_cost_adjustments", column: "adjustment_no", prefix: "CBTZ" },
     { table: "shipments", column: "shipment_no", prefix: "FH" },
     { table: "receivables", column: "receivable_no", prefix: "YS" },
     { table: "purchase_orders", column: "purchase_no", prefix: "CG" },
@@ -3501,6 +3551,7 @@ export function resetDemoDatabase() {
     DELETE FROM finished_shipment_allocations;
     DELETE FROM shipments;
     DELETE FROM finished_batches;
+    DELETE FROM production_cost_adjustments;
     DELETE FROM production_cost_summaries;
     DELETE FROM finished_goods_receipts;
     DELETE FROM technical_dispositions;
