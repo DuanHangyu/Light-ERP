@@ -166,6 +166,9 @@ type Snapshot = {
     supplierAutoRuleCount: number;
     supplierAutoTriggerCount: number;
     supplierRuleChangePendingCount: number;
+    costAnomalyWarningEventCount: number;
+    costAnomalyWarningOpenCount: number;
+    costAnomalyWarningCriticalCount: number;
     processNodeCount: number;
     processPendingCount: number;
     processExceptionCount: number;
@@ -213,6 +216,11 @@ type Snapshot = {
     costAnomalyRemediationReviews: Row[];
     costAnomalyWarningRules: Row[];
     costAnomalyWarningEvents: Row[];
+    costAnomalyWarningDashboard: {
+      totals?: Row;
+      bySeverity?: Row[];
+      recentEvents?: Row[];
+    };
     materials: Row[];
     batches: Row[];
     inventoryAging: Row[];
@@ -499,6 +507,7 @@ const statusClass: Record<string, string> = {
   已生成整改: "bg-blue-50 text-blue-700 ring-blue-200",
   仅记录事件: "bg-slate-100 text-slate-700 ring-slate-200",
   仅记录: "bg-slate-100 text-slate-700 ring-slate-200",
+  成本异常预警: "bg-rose-50 text-rose-700 ring-rose-200",
   待复评: "bg-blue-50 text-blue-700 ring-blue-200",
   复评驳回: "bg-rose-50 text-rose-700 ring-rose-200",
   复评通过: "bg-emerald-50 text-emerald-700 ring-emerald-200",
@@ -732,6 +741,16 @@ function alertActionPayload(alert: Row, actorId: string) {
   if (action === "approveMaterialRequisition" || action === "approveStocktake" || action === "approveApproval") {
     return {
       approval_note: "经营预警中心快速处理：同意按当前业务流程继续推进。",
+    };
+  }
+  if (action === "markCostAnomalyRemediationReady") {
+    return {
+      result_note: "经营预警中心触发：已完成成本异常原因复核、纠正措施和预防措施确认，提交复核。",
+    };
+  }
+  if (action === "closeCostAnomalyRemediation") {
+    return {
+      result_note: "经营预警中心复核：成本异常整改资料完整，关闭预警闭环。",
     };
   }
   return undefined;
@@ -2350,6 +2369,9 @@ function OverviewModule({
           </Panel>
 
           <AlertCenterPanel snapshot={snapshot} actorId={actorId} busy={busy} runAction={runAction} />
+          {["manager", "finance", "admin"].includes(currentUser?.role ?? "") ? (
+            <CostAnomalyWarningDashboardPanel snapshot={snapshot} />
+          ) : null}
 
           {["production", "admin"].includes(currentUser?.role ?? "") ? (
             <BomImportPanel busy={busy} fileInputRef={fileInputRef} uploadBom={uploadBom} />
@@ -11167,6 +11189,64 @@ function AlertCenterPanel({
   );
 }
 
+function CostAnomalyWarningDashboardPanel({ snapshot }: { snapshot: Snapshot }) {
+  const dashboard = snapshot.board.costAnomalyWarningDashboard ?? {};
+  const totals = dashboard.totals ?? {};
+  const recentEvents = dashboard.recentEvents ?? [];
+  const bySeverity = dashboard.bySeverity ?? [];
+
+  return (
+    <Panel title="成本异常预警看板" icon={AlertTriangle} action={`${Number(totals.open_count ?? 0)} 项待处理`}>
+      <div className="space-y-4">
+        <div className="grid grid-cols-2 gap-2">
+          <MiniMetric label="预警总数" value={`${Number(totals.total_count ?? 0)} 条`} />
+          <MiniMetric label="未闭环" value={`${Number(totals.open_count ?? 0)} 条`} />
+          <MiniMetric label="紧急预警" value={`${Number(totals.critical_count ?? 0)} 条`} />
+          <MiniMetric label="未决金额" value={formatCurrency(totals.unresolved_amount)} />
+        </div>
+
+        {bySeverity.length ? (
+          <div className="grid gap-2 sm:grid-cols-2">
+            {bySeverity.map((row) => (
+              <div key={String(row.severity)} className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2">
+                <div className="flex items-center justify-between gap-2">
+                  <StatusBadge value={String(row.severity_label ?? row.severity)} />
+                  <span className="text-xs font-semibold text-slate-500">{Number(row.count ?? 0)} 条</span>
+                </div>
+                <div className="mt-1 text-xs text-slate-500">未闭环 {Number(row.open_count ?? 0)} 条</div>
+              </div>
+            ))}
+          </div>
+        ) : null}
+
+        <div className="divide-y divide-slate-100 rounded-md border border-slate-200">
+          {recentEvents.length === 0 ? (
+            <EmptyText text="暂无成本异常预警" />
+          ) : (
+            recentEvents.slice(0, 4).map((event) => (
+              <div key={String(event.id)} className="px-3 py-3">
+                <div className="flex items-center justify-between gap-3">
+                  <span className="min-w-0 truncate text-sm font-semibold text-slate-900">
+                    {String(event.event_no)} / {String(event.rule_code)}
+                  </span>
+                  <StatusBadge value={String(event.severity_label ?? event.severity)} />
+                </div>
+                <p className="mt-1 line-clamp-2 text-xs leading-5 text-slate-500">
+                  {String(event.prod_no ?? "-")} / {String(event.material_name ?? event.product_name ?? "-")} / {String(event.trigger_reason ?? "-")}
+                </p>
+                <div className="mt-2 flex flex-wrap gap-2 text-[11px] font-medium text-slate-500">
+                  <span>整改：{String(event.remediation_no ?? "未生成")}</span>
+                  <span>状态：{String(event.remediation_status_label ?? "-")}</span>
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+      </div>
+    </Panel>
+  );
+}
+
 function LifecycleTile({
   group,
 }: {
@@ -12129,6 +12209,7 @@ function SummaryStrip({ snapshot }: { snapshot: Snapshot }) {
       <Metric label="低库存" value={`${snapshot.summary.lowStockCount} 项`} icon={ShieldCheck} tone="rose" />
       <Metric label="积压库存" value={`${snapshot.summary.overstockCount} 项`} icon={Warehouse} tone="rose" />
       <Metric label="经营预警" value={`${snapshot.summary.alertCount} 条 / 未读 ${snapshot.summary.unreadAlertCount}`} icon={BellRing} tone="rose" />
+      <Metric label="成本预警" value={`${snapshot.summary.costAnomalyWarningOpenCount} 项 / 紧急 ${snapshot.summary.costAnomalyWarningCriticalCount}`} icon={AlertTriangle} tone="rose" />
       <Metric label="待审批" value={`${snapshot.summary.pendingApprovalCount} 单`} icon={FileCheck2} tone="amber" />
       <Metric label="配方试算" value={`${snapshot.summary.formulaCount} 次`} icon={Calculator} tone="violet" />
       <Metric label="我的待办" value={`${snapshot.summary.pendingTasks} 项`} icon={ClipboardList} tone="slate" />

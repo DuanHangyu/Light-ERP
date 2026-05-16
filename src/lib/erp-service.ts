@@ -1758,6 +1758,7 @@ const alertTypes = [
   "quality_yield_warning",
   "mrp_shortage",
   "system_health_remediation_due",
+  "cost_anomaly_warning",
 ] as const;
 const alertMessageStatuses = ["unread", "read", "dismissed", "handled"] as const;
 
@@ -1773,6 +1774,7 @@ function alertTypeLabel(alertType: string) {
       quality_yield_warning: "收率预警",
       mrp_shortage: "MRP缺料建议",
       system_health_remediation_due: "上线整改到期",
+      cost_anomaly_warning: "成本异常预警",
     }[alertType] ?? alertType
   );
 }
@@ -1945,6 +1947,7 @@ function alertCenterRows(input: {
   productionDeliveryWarnings?: Array<Record<string, unknown>>;
   mrpRequirementRuns?: Array<Record<string, unknown>>;
   systemHealthRemediations?: Array<Record<string, unknown>>;
+  costAnomalyWarningEvents?: Array<Record<string, unknown>>;
   operatingParameters: OperatingParameters;
 }): Array<Record<string, unknown>> {
   const generatedAt = now();
@@ -2150,6 +2153,42 @@ function alertCenterRows(input: {
         action: String(remediation.status) === "ready_for_review" ? "closeSystemHealthRemediation" : "markSystemHealthRemediationReady",
         action_label: String(remediation.status) === "ready_for_review" ? "复核关闭" : "提交复核",
         generated_at: generatedAt,
+      });
+    });
+
+  (input.costAnomalyWarningEvents ?? [])
+    .filter((event) => String(event.remediation_status ?? "") !== "closed")
+    .forEach((event) => {
+      const remediationStatus = String(event.remediation_status ?? "");
+      const hasRemediation = Boolean(event.remediation_id);
+      const action =
+        hasRemediation && remediationStatus === "ready_for_review"
+          ? "closeCostAnomalyRemediation"
+          : hasRemediation && ["pending", "rejected", ""].includes(remediationStatus)
+            ? "markCostAnomalyRemediationReady"
+            : "";
+      rows.push({
+        id: `alert-cost-anomaly-warning-${event.id}`,
+        alert_type: "cost_anomaly_warning",
+        alert_type_label: "成本异常预警",
+        severity: event.severity ?? "medium",
+        module_label: "报表中心",
+        owner_role: event.owner_role ?? "production",
+        owner_role_label: event.owner_role_label ?? roleLabel(String(event.owner_role ?? "production")),
+        title: `成本异常预警 ${event.event_no ?? event.rule_code}`,
+        detail: `${event.prod_no ?? "-"} / ${event.product_name ?? "-"} / ${event.material_name ?? "未指定物料"}，${event.trigger_reason ?? ""}`,
+        entity_type: hasRemediation ? "production_cost_anomaly_remediation" : "production_cost_anomaly_warning_event",
+        entity_id: hasRemediation ? event.remediation_id : event.id,
+        warning_event_id: event.id,
+        event_no: event.event_no,
+        rule_code: event.rule_code,
+        rule_name: event.rule_name,
+        remediation_no: event.remediation_no,
+        adjustment_no: event.adjustment_no,
+        adjustment_amount: event.adjustment_amount,
+        action,
+        action_label: action === "closeCostAnomalyRemediation" ? "复核关闭" : action ? "提交整改" : "查看预警",
+        generated_at: event.triggered_at ?? generatedAt,
       });
     });
 
@@ -2818,6 +2857,7 @@ export function getSnapshot(actorId = "U-SALES") {
   const costAnomalyAnalytics = costAnomalyAnalyticsRows(database);
   const costAnomalyWarningRules = costAnomalyWarningRuleRows(database);
   const costAnomalyWarningEvents = costAnomalyWarningEventRows(database);
+  const costAnomalyWarningDashboard = costAnomalyWarningDashboardRows(costAnomalyWarningEvents);
 
   const finishedShipmentAllocations = database.prepare(`
     SELECT fsa.*, s.shipment_no, o.order_no, c.name AS customer_name,
@@ -3773,6 +3813,7 @@ export function getSnapshot(actorId = "U-SALES") {
     productionDeliveryWarnings,
     mrpRequirementRuns,
     systemHealthRemediations,
+    costAnomalyWarningEvents,
     operatingParameters,
   });
   const alertCenter = enrichAlertCenterRows({
@@ -3859,6 +3900,7 @@ export function getSnapshot(actorId = "U-SALES") {
     supplierQualificationCertificates,
     supplierAnnualReviewDue,
     costAnomalyRemediations,
+    costAnomalyWarningEvents,
   });
   const storage = getStorageSummary();
   const systemHealthChecks = buildSystemHealthChecks({
@@ -3920,6 +3962,9 @@ export function getSnapshot(actorId = "U-SALES") {
       supplierAutoRuleCount,
       supplierAutoTriggerCount,
       supplierRuleChangePendingCount,
+      costAnomalyWarningEventCount: Number((costAnomalyWarningDashboard.totals as Record<string, unknown>).total_count ?? 0),
+      costAnomalyWarningOpenCount: Number((costAnomalyWarningDashboard.totals as Record<string, unknown>).open_count ?? 0),
+      costAnomalyWarningCriticalCount: Number((costAnomalyWarningDashboard.totals as Record<string, unknown>).critical_count ?? 0),
       processNodeCount: processFlowSummary.node_count,
       processPendingCount: processFlowSummary.pending_total,
       processExceptionCount: processFlowSummary.exception_total,
@@ -3963,6 +4008,7 @@ export function getSnapshot(actorId = "U-SALES") {
       costAnomalyRemediationReviews,
       costAnomalyWarningRules,
       costAnomalyWarningEvents,
+      costAnomalyWarningDashboard,
       materials,
       batches,
       inventoryAging,
@@ -5308,6 +5354,8 @@ function costAnomalyWarningEventRows(database: Database.Database): Array<Record<
            rule.severity,
            rule.owner_id,
            owner.name AS owner_name,
+           owner.role AS owner_role,
+           owner.role_label AS owner_role_label,
            pca.adjustment_no,
            pca.adjustment_amount,
            pca.status AS adjustment_status,
@@ -5341,6 +5389,42 @@ function costAnomalyWarningEventRows(database: Database.Database): Array<Record<
     adjustment_status_label: productionCostAdjustmentStatusLabel(String(row.adjustment_status)),
     remediation_status_label: row.remediation_status ? costAnomalyRemediationStatusLabel(String(row.remediation_status)) : "",
   }));
+}
+
+function costAnomalyWarningDashboardRows(events: Array<Record<string, unknown>>) {
+  const openEvents = events.filter((event) => String(event.remediation_status ?? "") !== "closed");
+  const bySeverityMap = new Map<string, Record<string, unknown>>();
+  events.forEach((event) => {
+    const severity = String(event.severity ?? "medium");
+    const current =
+      bySeverityMap.get(severity) ??
+      ({
+        severity,
+        severity_label: costAnomalySeverityLabel(severity),
+        count: 0,
+        open_count: 0,
+        adjustment_amount: 0,
+      } satisfies Record<string, unknown>);
+    current.count = Number(current.count ?? 0) + 1;
+    if (String(event.remediation_status ?? "") !== "closed") current.open_count = Number(current.open_count ?? 0) + 1;
+    current.adjustment_amount = roundMoney(Number(current.adjustment_amount ?? 0) + Math.abs(Number(event.adjustment_amount ?? 0)));
+    bySeverityMap.set(severity, current);
+  });
+  const bySeverity = Array.from(bySeverityMap.values()).sort(
+    (a, b) => (alertSeverityRank[String(a.severity)] ?? 9) - (alertSeverityRank[String(b.severity)] ?? 9),
+  );
+  return {
+    totals: {
+      total_count: events.length,
+      open_count: openEvents.length,
+      critical_count: events.filter((event) => String(event.severity) === "critical").length,
+      high_count: events.filter((event) => String(event.severity) === "high").length,
+      remediation_count: events.filter((event) => event.remediation_id).length,
+      unresolved_amount: roundMoney(openEvents.reduce((sum, event) => sum + Math.abs(Number(event.adjustment_amount ?? 0)), 0)),
+    },
+    bySeverity,
+    recentEvents: events.slice(0, 8),
+  };
 }
 
 function buildSystemHealthChecksFromDatabase(database: Database.Database, remediations: Array<Record<string, unknown>> = []) {
@@ -5507,8 +5591,23 @@ function buildTasks(
     supplierQualificationCertificates?: Array<Record<string, unknown>>;
     supplierAnnualReviewDue?: Array<Record<string, unknown>>;
     costAnomalyRemediations?: Array<Record<string, unknown>>;
+    costAnomalyWarningEvents?: Array<Record<string, unknown>>;
   },
 ): Task[] {
+  const costAnomalyWarningNoticeTasks = (data.costAnomalyWarningEvents ?? [])
+    .filter((item) => String(item.remediation_status ?? "") !== "closed" && ["manager", "finance", "admin"].includes(user.role))
+    .slice(0, 5)
+    .map((item) => ({
+      id: `task-cost-anomaly-warning-${item.id}`,
+      title: `成本异常预警 ${item.event_no}`,
+      detail: `${item.rule_name} / ${item.prod_no ?? "-"} / ${item.trigger_reason ?? ""}`,
+      entityType: "cost_anomaly_warning",
+      entityId: `alert-cost-anomaly-warning-${item.id}`,
+      action: "markAlertRead",
+      tone: ["critical", "high"].includes(String(item.severity)) ? ("rose" as const) : ("amber" as const),
+      primaryLabel: "标记已读",
+      payload: { alert_type: "cost_anomaly_warning" },
+    }));
   const costAnomalyOwnerTasks = (data.costAnomalyRemediations ?? [])
     .filter((item) => String(item.owner_id) === user.id && ["pending", "rejected"].includes(String(item.status)))
     .slice(0, 6)
@@ -5539,7 +5638,7 @@ function buildTasks(
       primaryLabel: "关闭整改",
       payload: { result_note: "整改资料完整，成本异常闭环。" },
     }));
-  const costAnomalyTasks = [...costAnomalyOwnerTasks, ...costAnomalyReviewTasks];
+  const costAnomalyTasks = [...costAnomalyWarningNoticeTasks, ...costAnomalyOwnerTasks, ...costAnomalyReviewTasks];
   const remediationOwnerTasks = (data.systemHealthRemediations ?? [])
     .filter((remediation) => String(remediation.owner_id) === user.id && ["pending", "rejected"].includes(String(remediation.status)))
     .map((remediation) => ({
@@ -12756,6 +12855,7 @@ function alertTypeFromKey(alertKey: string, explicitType?: string) {
   if (alertKey.startsWith("alert-yield-")) return "quality_yield_warning";
   if (alertKey.startsWith("alert-mrp-")) return "mrp_shortage";
   if (alertKey.startsWith("alert-remediation-")) return "system_health_remediation_due";
+  if (alertKey.startsWith("alert-cost-anomaly-warning-")) return "cost_anomaly_warning";
   throw new Error("预警消息编号不正确。");
 }
 
