@@ -6161,7 +6161,7 @@ function buildTasks(
         .map((production) => ({
           id: `task-${production.id}`,
           title: `完工请验 ${production.prod_no}`,
-          detail: `${production.machine ?? "M-01"} / ${production.owner ?? "马工"}`,
+          detail: `${production.machine ?? "未指定机台"} / ${production.owner ?? "未指定负责人"}`,
           entityType: "production",
           entityId: String(production.id),
           action: "requestInspection",
@@ -6690,7 +6690,7 @@ export function performAction(input: ActionInput) {
         receivePurchaseOrder(database, input.actorId, mustEntity(input.entityId));
         break;
       case "recordPayablePayment":
-        recordPayablePayment(database, input.actorId, mustEntity(input.entityId));
+        recordPayablePayment(database, input.actorId, mustEntity(input.entityId), input.payload);
         break;
       case "recordReceivableReceipt":
         recordReceivableReceipt(database, input.actorId, mustEntity(input.entityId), input.payload);
@@ -7479,8 +7479,8 @@ function scheduleAndGenerateRequisition(
     "计划生产日期",
     new Date(Date.now() + 1000 * 60 * 60 * 24 * 2).toISOString().slice(0, 10),
   );
-  const machine = payloadText(payload, "machine", "机台", false) || "CNC-02";
-  const owner = payloadText(payload, "owner", "负责人", false) || "马工";
+  const machine = payloadText(payload, "machine", "机台", false) || "未指定机台";
+  const owner = payloadText(payload, "owner", "负责人", false) || "未指定负责人";
   const shift = payloadText(payload, "shift", "班次", false) || "白班";
   const scheduleNote = payloadText(payload, "schedule_note", "排产备注", false);
   const requisitionNote = payloadText(payload, "requisition_note", "领料说明", false) || "按系统计算需求量领料，仓库默认 FIFO 发料。";
@@ -12563,19 +12563,29 @@ function receivePurchaseOrder(database: Database.Database, actorId: string, purc
   audit(database, actorId, "receivePurchaseOrder", "purchase_order", purchase.id, `采购入库 ${purchase.purchase_no}，生成应付 ${payableNo}`);
 }
 
-function recordPayablePayment(database: Database.Database, actorId: string, payableId: string) {
+function recordPayablePayment(
+  database: Database.Database,
+  actorId: string,
+  payableId: string,
+  rawPayload?: Record<string, unknown>,
+) {
+  const payload = rawPayload && typeof rawPayload === "object" ? rawPayload : {};
   const payable = database.prepare("SELECT * FROM payables WHERE id = ?").get(payableId) as
     | { id: string; payable_no: string; total_amount: number; paid_amount: number; balance_amount: number; status: string }
     | undefined;
   if (!payable || payable.status === "paid") throw new Error("应付账款不存在或已结清。");
-  const amount = roundMoney(Math.min(payable.balance_amount, payable.paid_amount > 0 ? payable.balance_amount : payable.total_amount * 0.5));
+  const amount = roundMoney(payloadPositiveNumber(payload, "amount", "付款金额", payable.balance_amount));
+  if (amount > payable.balance_amount) throw new Error("付款金额不能大于应付余额。");
+  const method = payloadText(payload, "method", "付款方式", false) || "银行转账";
+  const note = payloadText(payload, "note", "备注", false) || "登记付款";
+  const paidAt = payloadDate(payload, "paid_at", "付款日期", new Date().toISOString().slice(0, 10));
   const paidAmount = roundMoney(payable.paid_amount + amount);
   const balanceAmount = calculateBalance({ totalAmount: payable.total_amount, settledAmount: paidAmount });
   const status = calculateLedgerStatus({ totalAmount: payable.total_amount, settledAmount: paidAmount });
   database.prepare(`
     INSERT INTO payable_payments (id, payable_id, amount, method, note, paid_at)
-    VALUES (?, ?, ?, '银行转账', ?, ?)
-  `).run(uid("APP"), payable.id, amount, "演示登记付款", now());
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run(uid("APP"), payable.id, amount, method, note, paidAt);
   database.prepare(`
     UPDATE payables
     SET paid_amount = ?, balance_amount = ?, status = ?, settled_at = ?

@@ -1070,13 +1070,11 @@ export function ErpApp() {
             {activeModule === "overview" ? (
               <OverviewModule
                 snapshot={snapshot}
-                currentUser={currentUser}
                 busy={busy}
-                fileInputRef={fileInputRef}
                 lifecycleRows={lifecycleRows}
                 runAction={runAction}
-                uploadBom={uploadBom}
                 actorId={actorId}
+                onOpenModule={setActiveModule}
               />
             ) : null}
             {activeModule === "process" ? <ProcessCockpitModule snapshot={snapshot} onOpenModule={setActiveModule} /> : null}
@@ -1104,8 +1102,6 @@ export function ErpApp() {
                 busy={busy}
                 runAction={runAction}
                 openDetail={setDetail}
-                onSnapshot={setSnapshot}
-                onError={setError}
               />
             ) : null}
             {activeModule === "production" ? (
@@ -1439,9 +1435,10 @@ function SystemModule({
   onError: (message: string) => void;
 }) {
   const isAdmin = snapshot.currentUser.role === "admin";
+  const [showAllHealthChecks, setShowAllHealthChecks] = useState(false);
   const [passwordForm, setPasswordForm] = useState({
     current_password: "",
-    new_password: "Welcome@2026",
+    new_password: "",
   });
   const [userForm, setUserForm] = useState({
     user_id: "",
@@ -1450,7 +1447,7 @@ function SystemModule({
     role: "sales",
     title: "",
     status: "active",
-    new_password: "Welcome@2026",
+    new_password: "",
   });
   const firstPermission = snapshot.security.rolePermissions.find(
     (item) => item.role === "purchasing" && item.action === "createPurchaseOrder",
@@ -1751,7 +1748,10 @@ function SystemModule({
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {snapshot.board.systemHealthChecks.slice(0, 8).map((check) => {
+              {(showAllHealthChecks
+                ? snapshot.board.systemHealthChecks
+                : snapshot.board.systemHealthChecks.slice(0, 8)
+              ).map((check) => {
                 const count = Number(check.count ?? 0);
                 const remediationId = String(check.remediation_id ?? "");
                 const remediationStatus = String(check.remediation_status ?? "none");
@@ -1825,6 +1825,17 @@ function SystemModule({
               })}
             </tbody>
           </table>
+          {snapshot.board.systemHealthChecks.length > 8 ? (
+            <button
+              type="button"
+              onClick={() => setShowAllHealthChecks((current) => !current)}
+              className="mt-2 text-xs font-semibold text-blue-600 hover:text-blue-800"
+            >
+              {showAllHealthChecks
+                ? "收起，只看前 8 项"
+                : `共 ${snapshot.board.systemHealthChecks.length} 项检查，查看全部 →`}
+            </button>
+          ) : null}
         </div>
       </Panel>
       <DataTable
@@ -2024,6 +2035,9 @@ function SystemModule({
                       <span className="shrink-0 font-semibold text-slate-900">{String(setting.setting_value)}</span>
                     </div>
                   ))}
+                  {group.length > 3 ? (
+                    <p className="pt-1 text-[11px] text-slate-400">其余 {group.length - 3} 项见下方「系统参数台账」</p>
+                  ) : null}
                 </div>
               </div>
             );
@@ -2639,22 +2653,18 @@ function SystemModule({
 
 function OverviewModule({
   snapshot,
-  currentUser,
   busy,
-  fileInputRef,
   lifecycleRows,
   runAction,
-  uploadBom,
   actorId,
+  onOpenModule,
 }: {
   snapshot: Snapshot;
-  currentUser?: User;
   busy: string | null;
-  fileInputRef: React.RefObject<HTMLInputElement | null>;
   lifecycleRows: Array<{ name: string; rows: Row[]; label: string; status: string }>;
   runAction: (task: ActionRequest) => Promise<void>;
-  uploadBom: () => Promise<void>;
   actorId: string;
+  onOpenModule: (module: ModuleKey) => void;
 }) {
   return (
     <>
@@ -2675,13 +2685,6 @@ function OverviewModule({
           </Panel>
 
           <AlertCenterPanel snapshot={snapshot} actorId={actorId} busy={busy} runAction={runAction} />
-          {["manager", "finance", "admin"].includes(currentUser?.role ?? "") ? (
-            <CostAnomalyWarningDashboardPanel snapshot={snapshot} />
-          ) : null}
-
-          {["production", "admin"].includes(currentUser?.role ?? "") ? (
-            <BomImportPanel busy={busy} fileInputRef={fileInputRef} uploadBom={uploadBom} />
-          ) : null}
         </div>
 
         <div className="min-w-0 space-y-5">
@@ -2699,24 +2702,22 @@ function OverviewModule({
             <ProductionChart snapshot={snapshot} />
           </div>
 
-          <LedgerPanel
-            actorId={actorId}
-            receivables={snapshot.board.receivables}
-            payables={snapshot.board.payables}
-            purchaseOrders={snapshot.board.purchaseOrders}
-            suppliers={snapshot.board.suppliers}
-          />
-
-          <InventoryTable actorId={actorId} materials={snapshot.board.materials} />
+          <Panel title="业务台账入口" icon={ArrowRight} action="明细台账在各业务模块">
+            <div className="grid gap-3 md:grid-cols-2">
+              <InlineActionButton label="应收应付 / 收付款 → 财务台账" onClick={() => onOpenModule("finance")} />
+              <InlineActionButton label="实时库存 / 批次追溯 → 采购仓储" onClick={() => onOpenModule("inventory")} />
+              <InlineActionButton label="成品批次 / 检验 → 质检收率" onClick={() => onOpenModule("quality")} />
+              <InlineActionButton label="附件 / 导出 / 冷备份 → 本地归档" onClick={() => onOpenModule("archive")} />
+            </div>
+            <p className="mt-3 text-xs text-slate-500">
+              应收 {formatCurrency(snapshot.summary.receivableBalance)} / 应付 {formatCurrency(snapshot.summary.payableBalance)} / 库存总值 {formatCurrency(snapshot.summary.inventoryValue)}，经营总览只保留关键指标，录入与台账明细请进入对应模块处理。
+            </p>
+          </Panel>
         </div>
 
         <div className="min-w-0 space-y-5">
           <InventoryValueChart snapshot={snapshot} />
           <YieldChart snapshot={snapshot} />
-          <BatchPanel finishedBatches={snapshot.board.finishedBatches} inspections={snapshot.board.inspections} />
-          <ArchivePanel snapshot={snapshot} />
-          <ActivityPanel title="导出记录" icon={Download} rows={snapshot.board.documentExports} mode="document" />
-          <ActivityPanel title="审计日志" icon={ShieldCheck} rows={snapshot.board.auditLogs} mode="audit" />
         </div>
       </section>
     </>
@@ -3669,50 +3670,46 @@ function SalesModule({
   busy,
   runAction,
   openDetail,
-  onSnapshot,
-  onError,
 }: {
   snapshot: Snapshot;
   actorId: string;
   busy: string | null;
   runAction: (task: ActionRequest) => Promise<void>;
   openDetail: (detail: DetailState) => void;
-  onSnapshot: (snapshot: Snapshot) => void;
-  onError: (message: string) => void;
 }) {
   const activeCustomers = snapshot.board.customers.filter((item) => item.status === "active");
   const activeProducts = snapshot.board.products.filter((item) => item.status === "active");
   const [quoteForm, setQuoteForm] = useState<Record<string, string>>({
     customer_id: String(activeCustomers[0]?.id ?? ""),
     product_id: String(activeProducts[0]?.id ?? ""),
-    qty: "100",
+    qty: "",
     margin_rate: String(activeProducts[0]?.default_margin ?? 0.2),
   });
   const [orderForm, setOrderForm] = useState<Record<string, string>>({
     due_date: new Date(Date.now() + 1000 * 60 * 60 * 24 * 14).toISOString().slice(0, 10),
-    special_requirements: "客户要求批次可追溯，随货提供检验记录",
-    customer_po_no: "PO-CUST-20260615",
-    sales_contract_no: "HT-2026-001",
-    delivery_address: "上海市浦东新区张江路 88 号",
-    consignee: "刘经理",
-    contact_phone: "138-0000-2026",
+    special_requirements: "",
+    customer_po_no: "",
+    sales_contract_no: "",
+    delivery_address: "",
+    consignee: "",
+    contact_phone: "",
     payment_terms_days: "30",
-    remark: "正式订单录入",
+    remark: "",
   });
   const shipReadyProductions = snapshot.board.productions.filter((item) =>
     ["in_stock", "partial_shipped"].includes(String(item.status)),
   );
   const [shipmentForm, setShipmentForm] = useState<Record<string, string>>({
     production_id: String(shipReadyProductions[0]?.id ?? ""),
-    shipped_qty: "1",
+    shipped_qty: "",
     shipped_at: new Date().toISOString().slice(0, 10),
-    delivery_address: "上海市浦东新区张江路 88 号",
-    consignee: "刘经理",
-    contact_phone: "138-0000-2026",
-    logistics_company: "顺丰专线",
-    vehicle_no: "沪A-ERP01",
+    delivery_address: "",
+    consignee: "",
+    contact_phone: "",
+    logistics_company: "",
+    vehicle_no: "",
     tracking_no: "",
-    remark: "正式发货",
+    remark: "",
   });
   const firstReturnCandidate = snapshot.board.salesReturnCandidates[0];
   const [returnForm, setReturnForm] = useState<Record<string, string>>({
@@ -3720,18 +3717,19 @@ function SalesModule({
     return_qty: String(firstReturnCandidate?.returnable_qty ?? "1"),
     received_at: new Date().toISOString().slice(0, 10),
     disposition: "return_to_stock",
-    reason: "客户反馈包装破损，要求退货退款并补发。",
-    note: "实物已退回仓库，外观复核后可补发。",
+    reason: "",
+    note: "",
   });
   const firstReplacementCandidate = snapshot.board.replacementShipmentCandidates[0];
   const [replacementForm, setReplacementForm] = useState<Record<string, string>>({
     sales_return_id: String(firstReplacementCandidate?.id ?? ""),
     shipped_at: new Date().toISOString().slice(0, 10),
-    logistics_company: "顺丰专线",
+    logistics_company: "",
     tracking_no: "",
     remark: "售后补开发货单，不重复生成应收。",
   });
   const [deliveryPreview, setDeliveryPreview] = useState<FormalPrintDocument | null>(null);
+  const [pendingConvertQuoteId, setPendingConvertQuoteId] = useState("");
   const canSell = ["sales", "admin"].includes(snapshot.currentUser.role);
   const canShip = ["assistant", "admin"].includes(snapshot.currentUser.role);
   const canReturn = ["assistant", "warehouse", "admin"].includes(snapshot.currentUser.role);
@@ -3853,7 +3851,10 @@ function SalesModule({
           )}
         </Panel>
 
-        <Panel title="正式订单录入项" icon={ClipboardList} action="用于已确认报价">
+        <Panel title="正式订单录入项" icon={ClipboardList} action="「转订单」时随单提交">
+          <p className="mb-3 rounded-md bg-blue-50 px-3 py-2 text-xs font-medium text-blue-800">
+            本面板没有单独提交按钮：在下方「报价单」列表点击「转订单」时，此处填写的交付、收货与合同信息会作为订单信息一并提交。请先填写，再执行转订单。
+          </p>
           <div className="grid gap-3 md:grid-cols-3">
             <MasterInput label="交付日期" type="date" value={orderForm.due_date} onChange={(value) => setOrderField("due_date", value)} />
             <MasterInput label="客户订单号" value={orderForm.customer_po_no} onChange={(value) => setOrderField("customer_po_no", value)} />
@@ -3911,18 +3912,29 @@ function SalesModule({
                   );
                 }
                 if (row.status === "confirmed") {
+                  const isPendingConvert = pendingConvertQuoteId === String(row.id);
                   return (
-                    <InlineActionButton
-                      label="转订单"
-                      busy={busy === `createOrder-${String(row.id)}-primary`}
-                      onClick={() =>
-                        void runAction({
-                          action: "createOrder",
-                          entityId: String(row.id),
-                          payload: orderForm,
-                        })
-                      }
-                    />
+                    <div className="flex gap-2">
+                      <InlineActionButton
+                        label={isPendingConvert ? "确认转订单" : "转订单"}
+                        busy={busy === `createOrder-${String(row.id)}-primary`}
+                        onClick={() => {
+                          if (!isPendingConvert) {
+                            setPendingConvertQuoteId(String(row.id));
+                            return;
+                          }
+                          setPendingConvertQuoteId("");
+                          void runAction({
+                            action: "createOrder",
+                            entityId: String(row.id),
+                            payload: orderForm,
+                          });
+                        }}
+                      />
+                      {isPendingConvert ? (
+                        <InlineActionButton label="取消" onClick={() => setPendingConvertQuoteId("")} />
+                      ) : null}
+                    </div>
                   );
                 }
                 return <span className="text-xs text-slate-400">-</span>;
@@ -4440,152 +4452,6 @@ function printAlignClass(align?: "left" | "right" | "center") {
   return "text-left";
 }
 
-function DeliveryNotePreviewModal({
-  preview,
-  onClose,
-}: {
-  preview: DeliveryNotePreview | null;
-  onClose: () => void;
-}) {
-  if (!preview) return null;
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-slate-950/55 px-4 py-6">
-      <div className="w-full max-w-[calc(210mm+48px)]">
-        <div className="no-print mb-3 flex items-center justify-between rounded-lg border border-slate-200 bg-white px-4 py-3 shadow-xl">
-          <div>
-            <p className="text-sm font-semibold text-slate-950">送货单打印预览</p>
-            <p className="mt-1 text-xs text-slate-500">{preview.header.documentNo} / A4 正式版式</p>
-          </div>
-          <div className="flex gap-2">
-            <button
-              type="button"
-              onClick={() => window.print()}
-              className="inline-flex h-9 items-center gap-2 rounded-md bg-blue-600 px-3 text-sm font-semibold text-white hover:bg-blue-700"
-            >
-              <Printer className="h-4 w-4" />
-              打印
-            </button>
-            <button
-              type="button"
-              onClick={onClose}
-              className="grid h-9 w-9 place-items-center rounded-md border border-slate-200 text-slate-500 hover:border-blue-300 hover:text-blue-700"
-              aria-label="关闭送货单预览"
-            >
-              <X className="h-4 w-4" />
-            </button>
-          </div>
-        </div>
-
-        <section className="delivery-note-print-surface mx-auto min-h-[297mm] w-[210mm] max-w-full bg-white px-[16mm] py-[14mm] text-slate-950 shadow-2xl">
-          <header className="border-b-2 border-slate-950 pb-5">
-            <div className="flex items-start justify-between gap-6">
-              <div>
-                <p className="text-[13px] font-semibold tracking-[0.18em] text-blue-700">LOCAL ERP DELIVERY DOCUMENT</p>
-                <h1 className="mt-2 text-[24px] font-bold tracking-normal">{preview.header.companyName}</h1>
-                <p className="mt-2 text-[12px] text-slate-500">生产流转系统自动生成，适用于送货、签收、对账和内部归档</p>
-              </div>
-              <div className="shrink-0 rounded-sm border-2 border-blue-700 px-5 py-2 text-center text-blue-700">
-                <p className="text-[12px] font-semibold">{preview.header.statusText}</p>
-                <p className="mt-1 text-[20px] font-bold">{preview.header.title}</p>
-              </div>
-            </div>
-            <div className="mt-5 grid grid-cols-3 gap-3 text-[12px]">
-              <PrintField label="单据编号" value={preview.header.documentNo} strong />
-              <PrintField label="发货日期" value={preview.header.documentDate} strong />
-              <PrintField label="打印日期" value={new Date().toISOString().slice(0, 10)} />
-            </div>
-          </header>
-
-          <section className="mt-5 grid grid-cols-2 gap-4 text-[12px]">
-            <div className="border border-slate-300">
-              <PrintSectionTitle title="客户与订单" />
-              <div className="grid grid-cols-2 gap-px bg-slate-200">
-                <PrintGridCell label="客户名称" value={preview.parties.customerName} wide />
-                <PrintGridCell label="销售订单" value={preview.parties.orderNo} />
-                <PrintGridCell label="客户单号" value={preview.parties.customerPoNo} />
-                <PrintGridCell label="销售合同" value={preview.parties.salesContractNo} wide />
-              </div>
-            </div>
-            <div className="border border-slate-300">
-              <PrintSectionTitle title="收货与物流" />
-              <div className="grid grid-cols-2 gap-px bg-slate-200">
-                <PrintGridCell label="收货人" value={preview.logistics.consignee} />
-                <PrintGridCell label="联系电话" value={preview.logistics.phone} />
-                <PrintGridCell label="物流公司" value={preview.logistics.logisticsCompany} />
-                <PrintGridCell label="车牌号" value={preview.logistics.vehicleNo} />
-                <PrintGridCell label="物流单号" value={preview.logistics.trackingNo} wide />
-                <PrintGridCell label="送货地址" value={preview.logistics.deliveryAddress} wide />
-              </div>
-            </div>
-          </section>
-
-          <section className="mt-5">
-            <PrintSectionTitle title="货品明细" />
-            <table className="w-full border-collapse text-[12px]">
-              <thead>
-                <tr className="bg-slate-100">
-                  {["序号", "产品名称", "规格型号", "批次号", "数量", "单位", "备注"].map((label) => (
-                    <th key={label} className="border border-slate-400 px-2 py-2 text-left font-semibold">
-                      {label}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {preview.lines.map((line) => (
-                  <tr key={line.lineNo}>
-                    <td className="border border-slate-300 px-2 py-3">{line.lineNo}</td>
-                    <td className="border border-slate-300 px-2 py-3 font-semibold">{line.productName}</td>
-                    <td className="border border-slate-300 px-2 py-3">{line.spec}</td>
-                    <td className="border border-slate-300 px-2 py-3">{line.batchNo}</td>
-                    <td className="border border-slate-300 px-2 py-3 text-right font-semibold">{line.qty}</td>
-                    <td className="border border-slate-300 px-2 py-3">{line.unit}</td>
-                    <td className="border border-slate-300 px-2 py-3">{line.remark}</td>
-                  </tr>
-                ))}
-                {Array.from({ length: Math.max(4 - preview.lines.length, 0) }).map((_, index) => (
-                  <tr key={`blank-${index}`}>
-                    <td className="border border-slate-300 px-2 py-3 text-slate-300">{preview.lines.length + index + 1}</td>
-                    <td className="border border-slate-300 px-2 py-3">&nbsp;</td>
-                    <td className="border border-slate-300 px-2 py-3">&nbsp;</td>
-                    <td className="border border-slate-300 px-2 py-3">&nbsp;</td>
-                    <td className="border border-slate-300 px-2 py-3">&nbsp;</td>
-                    <td className="border border-slate-300 px-2 py-3">&nbsp;</td>
-                    <td className="border border-slate-300 px-2 py-3">&nbsp;</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </section>
-
-          <section className="mt-5 rounded-sm border border-slate-300 bg-slate-50 px-3 py-3 text-[12px] leading-6 text-slate-700">
-            <p className="font-semibold text-slate-950">签收说明</p>
-            {preview.notes.map((note) => (
-              <p key={note}>{note}</p>
-            ))}
-          </section>
-
-          <section className="mt-8 grid grid-cols-4 gap-4 text-[12px]">
-            {preview.signatures.map((signature) => (
-              <div key={signature.label}>
-                <div className="h-14 border-b border-slate-400" />
-                <p className="mt-2 font-semibold">{signature.label}</p>
-                <p className="mt-1 text-slate-500">{signature.hint}</p>
-              </div>
-            ))}
-          </section>
-
-          <footer className="mt-8 flex items-center justify-between border-t border-slate-300 pt-3 text-[11px] text-slate-500">
-            <span>第一联：客户签收联 / 第二联：公司存根联</span>
-            <span>系统留痕编号：{preview.header.documentNo}</span>
-          </footer>
-        </section>
-      </div>
-    </div>
-  );
-}
-
 function PrintField({ label, value, strong }: { label: string; value: string; strong?: boolean }) {
   return (
     <div className="border border-slate-300 px-3 py-2">
@@ -4605,144 +4471,6 @@ function PrintGridCell({ label, value, wide }: { label: string; value: string; w
       <p className="text-[11px] text-slate-500">{label}</p>
       <p className="mt-1 min-h-5 font-semibold text-slate-950">{value}</p>
     </div>
-  );
-}
-
-function ProductionDocumentPreviewModal({
-  preview,
-  onClose,
-}: {
-  preview: FormalDocumentPreview | null;
-  onClose: () => void;
-}) {
-  if (!preview) return null;
-  const lineKeys = preview.lines.length > 0 ? Object.keys(preview.lines[0]) : [];
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-slate-950/55 px-4 py-6">
-      <div className="w-full max-w-[calc(210mm+48px)]">
-        <div className="no-print mb-3 flex items-center justify-between rounded-lg border border-slate-200 bg-white px-4 py-3 shadow-xl">
-          <div>
-            <p className="text-sm font-semibold text-slate-950">{preview.header.title}打印预览</p>
-            <p className="mt-1 text-xs text-slate-500">{preview.header.documentNo} / A4 正式版式</p>
-          </div>
-          <div className="flex gap-2">
-            <button
-              type="button"
-              onClick={() => window.print()}
-              className="inline-flex h-9 items-center gap-2 rounded-md bg-blue-600 px-3 text-sm font-semibold text-white hover:bg-blue-700"
-            >
-              <Printer className="h-4 w-4" />
-              打印
-            </button>
-            <button
-              type="button"
-              onClick={onClose}
-              className="grid h-9 w-9 place-items-center rounded-md border border-slate-200 text-slate-500 hover:border-blue-300 hover:text-blue-700"
-              aria-label="关闭生产单据预览"
-            >
-              <X className="h-4 w-4" />
-            </button>
-          </div>
-        </div>
-
-        <section className="delivery-note-print-surface mx-auto min-h-[297mm] w-[210mm] max-w-full bg-white px-[16mm] py-[14mm] text-slate-950 shadow-2xl">
-          <header className="border-b-2 border-slate-950 pb-5">
-            <div className="flex items-start justify-between gap-6">
-              <div>
-                <p className="text-[13px] font-semibold tracking-[0.18em] text-blue-700">LOCAL ERP BUSINESS DOCUMENT</p>
-                <h1 className="mt-2 text-[24px] font-bold tracking-normal">{preview.header.companyName}</h1>
-                <p className="mt-2 text-[12px] text-slate-500">订单驱动的业务流转单据，自动记录审批、批次、成本和追溯信息</p>
-              </div>
-              <div className="shrink-0 rounded-sm border-2 border-blue-700 px-5 py-2 text-center text-blue-700">
-                <p className="text-[12px] font-semibold">{preview.header.statusText}</p>
-                <p className="mt-1 text-[20px] font-bold">{preview.header.title}</p>
-              </div>
-            </div>
-            <div className="mt-5 grid grid-cols-3 gap-3 text-[12px]">
-              <PrintField label="单据编号" value={preview.header.documentNo} strong />
-              <PrintField label="单据日期" value={preview.header.documentDate} strong />
-              <PrintField label="打印日期" value={new Date().toISOString().slice(0, 10)} />
-            </div>
-          </header>
-
-          <section className="mt-5 border border-slate-300">
-            <PrintSectionTitle title="基本信息" />
-            <div className="grid grid-cols-3 gap-px bg-slate-200 text-[12px]">
-              {preview.fields.map((field) => (
-                <PrintGridCell key={field.label} label={field.label} value={field.value} wide={field.value.length > 22} />
-              ))}
-            </div>
-          </section>
-
-          {preview.lines.length > 0 ? (
-            <section className="mt-5">
-              <PrintSectionTitle title="明细行" />
-              <table className="w-full border-collapse text-[12px]">
-                <thead>
-                  <tr className="bg-slate-100">
-                    {lineKeys.map((key) => (
-                      <th key={key} className="border border-slate-400 px-2 py-2 text-left font-semibold">
-                        {productionPrintColumnLabel(key)}
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {preview.lines.map((line, index) => (
-                    <tr key={String(line.lineNo ?? index)}>
-                      {lineKeys.map((key) => (
-                        <td key={key} className="border border-slate-300 px-2 py-3">
-                          {String(line[key] ?? "")}
-                        </td>
-                      ))}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </section>
-          ) : null}
-
-          <section className="mt-5 rounded-sm border border-slate-300 bg-slate-50 px-3 py-3 text-[12px] leading-6 text-slate-700">
-            <p className="font-semibold text-slate-950">执行说明</p>
-            {preview.notes.map((note) => (
-              <p key={note}>{note}</p>
-            ))}
-          </section>
-
-          <section className="mt-8 grid grid-cols-4 gap-4 text-[12px]">
-            {preview.signatures.map((signature) => (
-              <div key={signature.label}>
-                <div className="h-14 border-b border-slate-400" />
-                <p className="mt-2 font-semibold">{signature.label}</p>
-                <p className="mt-1 text-slate-500">{signature.hint}</p>
-              </div>
-            ))}
-          </section>
-        </section>
-      </div>
-    </div>
-  );
-}
-
-function productionPrintColumnLabel(key: string) {
-  return (
-    {
-      lineNo: "序号",
-      materialCode: "物料编码",
-      materialName: "物料名称",
-      requiredQty: "需求量",
-      unit: "单位",
-      usage: "用途",
-      remark: "备注",
-      bomMaterial: "BOM物料",
-      issuedMaterial: "实际出库物料",
-      batchNo: "批次",
-      qty: "数量",
-      unitCost: "批次成本",
-      amount: "金额",
-      mode: "发料模式",
-    }[key] ?? detailColumnLabel(key)
   );
 }
 
@@ -4789,7 +4517,7 @@ function buildMachineLoadRows(productions: Row[]): Row[] {
     .sort((a, b) => String(a.planned_date).localeCompare(String(b.planned_date)) || String(a.machine).localeCompare(String(b.machine)));
 }
 
-function buildProductionCalendar(productions: Row[], fallbackMachines: string[]) {
+function buildProductionCalendar(productions: Row[], fallbackMachines: string[], machineLimit = 6) {
   const scheduled = productions
     .filter((production) => production.planned_date)
     .sort(
@@ -4799,12 +4527,13 @@ function buildProductionCalendar(productions: Row[], fallbackMachines: string[])
         String(a.prod_no ?? "").localeCompare(String(b.prod_no ?? "")),
     );
   const dates = Array.from(new Set(scheduled.map((production) => String(production.planned_date).slice(0, 10))));
-  const machines = Array.from(
+  const allMachines = Array.from(
     new Set([
       ...scheduled.map((production) => String(production.machine ?? "").trim() || "未指定机台"),
       ...fallbackMachines.filter(Boolean),
     ]),
-  ).slice(0, 6);
+  );
+  const machines = machineLimit > 0 ? allMachines.slice(0, machineLimit) : allMachines;
   const rows = dates.map((date) => {
     const cells = machines.map((machine) => {
       const cellProductions = scheduled.filter(
@@ -4836,7 +4565,7 @@ function buildProductionCalendar(productions: Row[], fallbackMachines: string[])
       riskCount: cells.reduce((sum, cell) => sum + cell.riskCount, 0),
     };
   });
-  return { dates, machines, rows };
+  return { dates, machines, rows, totalMachines: allMachines.length };
 }
 
 function ProductionModule({
@@ -4883,8 +4612,8 @@ function ProductionModule({
   const [scheduleForm, setScheduleForm] = useState<Record<string, string>>({
     production_id: String(instructedProductions[0]?.id ?? ""),
     planned_date: new Date(Date.now() + 1000 * 60 * 60 * 24 * 2).toISOString().slice(0, 10),
-    machine: "CNC-02",
-    owner: "马工",
+    machine: "",
+    owner: "",
     shift: "白班",
     schedule_note: "按订单交期优先安排。",
     requisition_note: "按系统计算需求量领料，仓库默认 FIFO 发料。",
@@ -4892,8 +4621,8 @@ function ProductionModule({
   const [rescheduleForm, setRescheduleForm] = useState<Record<string, string>>({
     production_id: String(scheduleChangeCandidates[0]?.id ?? ""),
     planned_date: String(scheduleChangeCandidates[0]?.planned_date ?? new Date(Date.now() + 1000 * 60 * 60 * 24).toISOString().slice(0, 10)),
-    machine: String(scheduleChangeCandidates[0]?.machine ?? "CNC-02"),
-    owner: String(scheduleChangeCandidates[0]?.owner ?? "马工"),
+    machine: String(scheduleChangeCandidates[0]?.machine ?? ""),
+    owner: String(scheduleChangeCandidates[0]?.owner ?? ""),
     shift: String(scheduleChangeCandidates[0]?.shift ?? "白班"),
     schedule_note: String(scheduleChangeCandidates[0]?.schedule_note ?? "按最新交付优先级调整排产。"),
     change_reason: "生产资源或订单交期变化，按正式排产变更流程留痕。",
@@ -4935,7 +4664,8 @@ function ProductionModule({
   const deliveryWarnings = snapshot.board.productionDeliveryWarnings ?? [];
   const planningIdSet = new Set(planningRows.map((item) => String(item.id)));
   const visibleDeliveryWarnings = deliveryWarnings.filter((item) => planningIdSet.has(String(item.production_order_id)));
-  const productionCalendar = buildProductionCalendar(planningRows, machineOptions);
+  const [showAllCalendarMachines, setShowAllCalendarMachines] = useState(false);
+  const productionCalendar = buildProductionCalendar(planningRows, machineOptions, showAllCalendarMachines ? 0 : 6);
   const productionPlanFilterLabel = [
     planningStatusFilter === "all" ? "状态：全部" : `状态：${productionStatusLabel(planningStatusFilter)}`,
     planningMachineFilter === "all" ? "机台：全部" : `机台：${planningMachineFilter}`,
@@ -5086,6 +4816,7 @@ function ProductionModule({
     await runAction({
       action: "reviewMaterialAdjustmentOrder",
       entityId: String(order.id),
+      variant: "exception",
       payload: {
         review_result: "exception",
         review_note: `${currentUser?.role_label ?? "仓库"}复核发现补退料成本或批次存在异常，转生产责任岗位处理。`,
@@ -5248,6 +4979,17 @@ function ProductionModule({
         ) : (
           <EmptyText text="暂无已排产生产单，完成排产后将按日期和机台自动生成日历视图。" />
         )}
+        {productionCalendar.totalMachines > 6 ? (
+          <button
+            type="button"
+            onClick={() => setShowAllCalendarMachines((current) => !current)}
+            className="mt-2 text-xs font-semibold text-blue-600 hover:text-blue-800"
+          >
+            {showAllCalendarMachines
+              ? "收起，只看前 6 台机台"
+              : `共 ${productionCalendar.totalMachines} 台机台，查看全部 →`}
+          </button>
+        ) : null}
       </Panel>
       <Panel title="生产计划锁版 / 审批发布" icon={FileCheck2} action={canSchedule ? "锁版后进入审批中心" : "只读"}>
         {canSchedule ? (
@@ -5444,7 +5186,7 @@ function ProductionModule({
                   {String(row.review_status) === "pending_review" && canIssue ? (
                     <InlineActionButton
                       label="异常"
-                      busy={busy === `reviewMaterialAdjustmentOrder-${String(row.id)}-primary`}
+                      busy={busy === `reviewMaterialAdjustmentOrder-${String(row.id)}-exception`}
                       onClick={() => void reviewMaterialAdjustmentException(row)}
                     />
                   ) : null}
@@ -6147,6 +5889,16 @@ function WarehouseIssueDesk({
       },
     });
   };
+  const rejectSelected = async () => {
+    if (!selectedReq) return;
+    await runAction({
+      action: "rejectMaterialRequisition",
+      entityId: String(selectedReq.id),
+      payload: {
+        approval_note: issueForm.approval_note,
+      },
+    });
+  };
   const issueSelected = async (variant?: string) => {
     if (!selectedReq) return;
     await runAction({
@@ -6206,6 +5958,12 @@ function WarehouseIssueDesk({
                 busy={busy === `approveMaterialRequisition-${String(selectedReq.id)}-primary`}
                 disabled={!canApproveSelected}
                 onClick={() => void approveSelected()}
+              />
+              <InlineActionButton
+                label="驳回领料单"
+                busy={busy === `rejectMaterialRequisition-${String(selectedReq.id)}-primary`}
+                disabled={!canApproveSelected}
+                onClick={() => void rejectSelected()}
               />
               <InlineActionButton
                 label="FIFO 发料"
@@ -8722,15 +8480,11 @@ function InventoryModule({
             key: "id",
             label: "操作",
             render: (value, row) =>
-              canPurchase && row.status !== "paid" ? (
-                <InlineActionButton
-                  label="登记付款"
-                  busy={busy === `recordPayablePayment-${String(value)}-primary`}
-                  onClick={() => void runAction({ action: "recordPayablePayment", entityId: String(value) })}
-                />
+              row.status !== "paid" ? (
+                <span className="text-xs text-slate-400">请在「财务台账」登记付款</span>
               ) : (
                 <span className="text-xs text-slate-400">-</span>
-                ),
+              ),
           },
           {
             key: "payable_detail",
@@ -9462,8 +9216,19 @@ function FinanceModule({
     openReceivables.find((item) => String(item.id) === receiptForm.receivable_id) ?? openReceivables[0];
   const selectedRefundReturn =
     refundableReturns.find((item) => String(item.id) === refundForm.sales_return_id) ?? refundableReturns[0];
+  const openPayables = snapshot.board.payables.filter((item) => item.status !== "paid");
+  const [paymentForm, setPaymentForm] = useState<Record<string, string>>({
+    payable_id: String(openPayables[0]?.id ?? ""),
+    amount: String(openPayables[0]?.balance_amount ?? ""),
+    method: "银行转账",
+    paid_at: new Date().toISOString().slice(0, 10),
+    note: "供应商付款登记",
+  });
+  const selectedPayable =
+    openPayables.find((item) => String(item.id) === paymentForm.payable_id) ?? openPayables[0];
   const setReceiptField = (key: string, value: string) => setReceiptForm((current) => ({ ...current, [key]: value }));
   const setRefundField = (key: string, value: string) => setRefundForm((current) => ({ ...current, [key]: value }));
+  const setPaymentField = (key: string, value: string) => setPaymentForm((current) => ({ ...current, [key]: value }));
   const submitReceipt = async () => {
     if (!selectedReceivable) return;
     await runAction({
@@ -9478,6 +9243,14 @@ function FinanceModule({
       action: "recordCustomerRefund",
       entityId: String(selectedRefundReturn.id),
       payload: refundForm,
+    });
+  };
+  const submitPayment = async () => {
+    if (!selectedPayable) return;
+    await runAction({
+      action: "recordPayablePayment",
+      entityId: String(selectedPayable.id),
+      payload: paymentForm,
     });
   };
   return (
@@ -9556,6 +9329,41 @@ function FinanceModule({
           </div>
         ) : (
           <EmptyText text={refundableReturns.length === 0 ? "暂无待退款退货单。" : "请切换财务或管理员登记退款。"} />
+        )}
+      </Panel>
+      <Panel title="正式付款登记" icon={Download} action={canSettle ? "金额可拆分" : "只读"}>
+        {canSettle && selectedPayable ? (
+          <div className="grid gap-3 lg:grid-cols-[2fr_1fr_1fr_1fr_1fr_auto] lg:items-end">
+            <MasterSelect
+              label="应付单"
+              value={String(selectedPayable.id)}
+              onChange={(value) => {
+                const next = openPayables.find((item) => String(item.id) === value);
+                setPaymentForm((current) => ({
+                  ...current,
+                  payable_id: value,
+                  amount: String(next?.balance_amount ?? current.amount),
+                }));
+              }}
+            >
+              {openPayables.map((payable) => (
+                <option key={String(payable.id)} value={String(payable.id)}>
+                  {String(payable.payable_no)} / {String(payable.supplier_name)} / 余额 {formatCurrency(payable.balance_amount)}
+                </option>
+              ))}
+            </MasterSelect>
+            <MasterInput label="付款金额" type="number" value={paymentForm.amount} onChange={(value) => setPaymentField("amount", value)} />
+            <MasterInput label="付款日期" type="date" value={paymentForm.paid_at} onChange={(value) => setPaymentField("paid_at", value)} />
+            <MasterInput label="付款方式" value={paymentForm.method} onChange={(value) => setPaymentField("method", value)} />
+            <MasterInput label="备注" value={paymentForm.note} onChange={(value) => setPaymentField("note", value)} />
+            <MasterSubmitButton
+              busy={busy === `recordPayablePayment-${String(selectedPayable.id)}-primary`}
+              label="登记付款"
+              onClick={submitPayment}
+            />
+          </div>
+        ) : (
+          <EmptyText text={openPayables.length === 0 ? "暂无未结清应付账款" : "请切换财务、采购或管理员登记付款。"} />
         )}
       </Panel>
       <div className="grid gap-5 xl:grid-cols-2">
@@ -9643,9 +9451,20 @@ function FinanceModule({
               render: (value, row) =>
                 canSettle && row.status !== "paid" ? (
                   <InlineActionButton
-                    label="登记付款"
+                    label="付全款"
                     busy={busy === `recordPayablePayment-${String(value)}-primary`}
-                    onClick={() => void runAction({ action: "recordPayablePayment", entityId: String(value) })}
+                    onClick={() =>
+                      void runAction({
+                        action: "recordPayablePayment",
+                        entityId: String(value),
+                        payload: {
+                          amount: String(row.balance_amount ?? ""),
+                          method: "银行转账",
+                          paid_at: new Date().toISOString().slice(0, 10),
+                          note: "快速付全款",
+                        },
+                      })
+                    }
                   />
                 ) : (
                   <span className="text-xs text-slate-400">-</span>
@@ -11240,7 +11059,7 @@ function ArchiveModule({
       { type: "payable", label: "应付账款", rows: snapshot.board.payables, no: "payable_no" },
     ];
     return groups.flatMap((group) =>
-      group.rows.slice(0, 8).map((row) => ({
+      group.rows.map((row) => ({
         type: group.type,
         label: `${group.label} / ${String(row[group.no] ?? row.id)}`,
         id: String(row.id ?? ""),
@@ -11248,6 +11067,12 @@ function ArchiveModule({
       })),
     );
   }, [snapshot]);
+  const [entityQuery, setEntityQuery] = useState("");
+  const filteredAttachmentEntities = useMemo(() => {
+    const keyword = entityQuery.trim().toLowerCase();
+    if (!keyword) return attachmentEntities;
+    return attachmentEntities.filter((entity) => entity.label.toLowerCase().includes(keyword));
+  }, [attachmentEntities, entityQuery]);
   const firstEntity = attachmentEntities[0];
   const [attachmentForm, setAttachmentForm] = useState<Record<string, string>>({
     entityKey: firstEntity ? `${firstEntity.type}|${firstEntity.id}|${firstEntity.no}` : "other||其他归档",
@@ -11293,6 +11118,11 @@ function ArchiveModule({
       <div className="grid gap-5 xl:grid-cols-[420px_1fr]">
         <Panel title="附件凭证归档" icon={Upload} action="本地数据盘">
           <div className="grid gap-3">
+            <MasterInput
+              label={`搜索关联单据（共 ${attachmentEntities.length} 张，输入单号或类型筛选）`}
+              value={entityQuery}
+              onChange={setEntityQuery}
+            />
             <MasterSelect
               label="关联单据"
               value={attachmentForm.entityKey}
@@ -11307,7 +11137,7 @@ function ArchiveModule({
                 }));
               }}
             >
-              {attachmentEntities.map((entity) => (
+              {filteredAttachmentEntities.map((entity) => (
                 <option key={`${entity.type}-${entity.id}`} value={`${entity.type}|${entity.id}|${entity.no}`}>
                   {entity.label}
                 </option>
@@ -11471,7 +11301,8 @@ function AlertCenterPanel({
   runAction: (task: ActionRequest) => Promise<void>;
 }) {
   const alerts = snapshot.board.alertCenter ?? [];
-  const visibleAlerts = alerts.slice(0, 6);
+  const [showAllAlerts, setShowAllAlerts] = useState(false);
+  const visibleAlerts = showAllAlerts ? alerts : alerts.slice(0, 6);
   const severityClass: Record<string, string> = {
     critical: "border-red-200 bg-red-50/80",
     high: "border-rose-200 bg-rose-50/70",
@@ -11579,69 +11410,15 @@ function AlertCenterPanel({
             );
           })
         )}
-        {alerts.length > visibleAlerts.length ? (
-          <p className="rounded-md bg-slate-50 px-3 py-2 text-xs font-medium text-slate-500">
-            还有 {alerts.length - visibleAlerts.length} 条预警，可在对应模块继续处理。
-          </p>
+        {alerts.length > 6 ? (
+          <button
+            type="button"
+            onClick={() => setShowAllAlerts((current) => !current)}
+            className="w-full rounded-md bg-slate-50 px-3 py-2 text-center text-xs font-semibold text-blue-600 hover:bg-blue-50 hover:text-blue-800"
+          >
+            {showAllAlerts ? "收起，只看前 6 条" : `还有 ${alerts.length - 6} 条预警，展开全部 ${alerts.length} 条 →`}
+          </button>
         ) : null}
-      </div>
-    </Panel>
-  );
-}
-
-function CostAnomalyWarningDashboardPanel({ snapshot }: { snapshot: Snapshot }) {
-  const dashboard = snapshot.board.costAnomalyWarningDashboard ?? {};
-  const totals = dashboard.totals ?? {};
-  const recentEvents = dashboard.recentEvents ?? [];
-  const bySeverity = dashboard.bySeverity ?? [];
-
-  return (
-    <Panel title="成本异常预警看板" icon={AlertTriangle} action={`${Number(totals.open_count ?? 0)} 项待处理`}>
-      <div className="space-y-4">
-        <div className="grid grid-cols-2 gap-2">
-          <MiniMetric label="预警总数" value={`${Number(totals.total_count ?? 0)} 条`} />
-          <MiniMetric label="未闭环" value={`${Number(totals.open_count ?? 0)} 条`} />
-          <MiniMetric label="紧急预警" value={`${Number(totals.critical_count ?? 0)} 条`} />
-          <MiniMetric label="未决金额" value={formatCurrency(totals.unresolved_amount)} />
-        </div>
-
-        {bySeverity.length ? (
-          <div className="grid gap-2 sm:grid-cols-2">
-            {bySeverity.map((row) => (
-              <div key={String(row.severity)} className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2">
-                <div className="flex items-center justify-between gap-2">
-                  <StatusBadge value={String(row.severity_label ?? row.severity)} />
-                  <span className="text-xs font-semibold text-slate-500">{Number(row.count ?? 0)} 条</span>
-                </div>
-                <div className="mt-1 text-xs text-slate-500">未闭环 {Number(row.open_count ?? 0)} 条</div>
-              </div>
-            ))}
-          </div>
-        ) : null}
-
-        <div className="divide-y divide-slate-100 rounded-md border border-slate-200">
-          {recentEvents.length === 0 ? (
-            <EmptyText text="暂无成本异常预警" />
-          ) : (
-            recentEvents.slice(0, 4).map((event) => (
-              <div key={String(event.id)} className="px-3 py-3">
-                <div className="flex items-center justify-between gap-3">
-                  <span className="min-w-0 truncate text-sm font-semibold text-slate-900">
-                    {String(event.event_no)} / {String(event.rule_code)}
-                  </span>
-                  <StatusBadge value={String(event.severity_label ?? event.severity)} />
-                </div>
-                <p className="mt-1 line-clamp-2 text-xs leading-5 text-slate-500">
-                  {String(event.prod_no ?? "-")} / {String(event.material_name ?? event.product_name ?? "-")} / {String(event.trigger_reason ?? "-")}
-                </p>
-                <div className="mt-2 flex flex-wrap gap-2 text-[11px] font-medium text-slate-500">
-                  <span>整改：{String(event.remediation_no ?? "未生成")}</span>
-                  <span>状态：{String(event.remediation_status_label ?? "-")}</span>
-                </div>
-              </div>
-            ))
-          )}
-        </div>
       </div>
     </Panel>
   );
@@ -11672,89 +11449,6 @@ function LifecycleTile({
           ))
         )}
       </div>
-    </div>
-  );
-}
-
-function LedgerPanel({
-  actorId,
-  receivables,
-  payables,
-  purchaseOrders,
-  suppliers,
-}: {
-  actorId: string;
-  receivables: Row[];
-  payables: Row[];
-  purchaseOrders: Row[];
-  suppliers: Row[];
-}) {
-  const download = (type: string) => {
-    window.location.href = `/api/export?actorId=${encodeURIComponent(actorId)}&type=${type}&format=xlsx`;
-  };
-
-  return (
-    <div className="grid gap-5 xl:grid-cols-2">
-      <Panel title="应收台账" icon={Download} actionButton={{ label: "台账", onClick: () => download("ledger") }}>
-        <LedgerList
-          empty="暂无应收"
-          rows={receivables}
-          numberKey="receivable_no"
-          nameKey="customer_name"
-          balanceKey="balance_amount"
-        />
-      </Panel>
-
-      <Panel title="采购与应付" icon={Boxes} actionButton={{ label: "采购对账", onClick: () => download("purchase-statement") }}>
-        <LedgerList
-          empty="暂无应付"
-          rows={payables}
-          numberKey="payable_no"
-          nameKey="supplier_name"
-          balanceKey="balance_amount"
-        />
-        <div className="mt-3 border-t border-slate-100 pt-3">
-          {purchaseOrders.slice(0, 2).map((item) => (
-            <div key={String(item.id)} className="flex items-center justify-between gap-3 py-1 text-sm">
-              <span className="min-w-0 truncate font-medium text-slate-700">{String(item.purchase_no)}</span>
-              <span className="text-slate-500">{formatCurrency(item.total_amount)}</span>
-            </div>
-          ))}
-          <p className="mt-2 text-xs leading-5 text-slate-500">供应商：{suppliers.map((item) => String(item.name)).join("、")}</p>
-        </div>
-      </Panel>
-    </div>
-  );
-}
-
-function LedgerList({
-  rows,
-  empty,
-  numberKey,
-  nameKey,
-  balanceKey,
-}: {
-  rows: Row[];
-  empty: string;
-  numberKey: string;
-  nameKey: string;
-  balanceKey: string;
-}) {
-  if (rows.length === 0) return <EmptyText text={empty} />;
-
-  return (
-    <div className="divide-y divide-slate-100">
-      {rows.slice(0, 4).map((item) => (
-        <div key={String(item.id)} className="py-3 first:pt-0 last:pb-0">
-          <div className="flex items-center justify-between gap-3">
-            <span className="min-w-0 truncate text-sm font-semibold text-slate-900">{String(item[numberKey])}</span>
-            <StatusBadge value={String(item.status)} />
-          </div>
-          <p className="mt-1 text-sm text-slate-500">
-            {String(item[nameKey])} / 余额 {formatCurrency(item[balanceKey])} / 账龄 {String(item.age_days ?? 0)} 天
-          </p>
-        </div>
-      ))}
     </div>
   );
 }
