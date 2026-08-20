@@ -29,6 +29,7 @@ import { hashPassword, hashSessionToken, randomSessionToken, verifyPassword } fr
 import { createParallelLedger, freezeParallelLedger, unfreezeParallelLedger, archiveParallelLedger, discardParallelLedger, addParallelAdjustment, removeParallelAdjustment, buildParallelSnapshotData, seedParallelDemoData } from "./parallel-ledger-service";
 import { runParallelCalculation } from "./parallel-calculation-engine";
 import { confirmParallelSuggestion, previewParallelMerge } from "./parallel-impact-service";
+import { submitParallelMerge, approveParallelMerge, rejectParallelMerge, publishParallelMerge } from "./parallel-merge-service";
 
 export type Role =
   | "sales"
@@ -254,6 +255,10 @@ const roleActionMap: Record<string, Role[]> = {
   parallelLedgerRecalculate: ["manager", "admin", "finance"],
   parallelLedgerConfirmSuggestion: ["manager", "admin", "finance"],
   parallelLedgerMergePreview: ["manager", "admin", "finance"],
+  parallelLedgerSubmitMerge: ["manager", "admin", "finance"],
+  parallelLedgerApproveMerge: ["manager", "admin"],
+  parallelLedgerRejectMerge: ["manager", "admin"],
+  parallelLedgerPublishMerge: ["manager", "admin", "finance"],
 };
 
 const actionLabels: Record<string, string> = {
@@ -6871,6 +6876,18 @@ export function performAction(input: ActionInput) {
       case "parallelLedgerMergePreview":
         previewParallelMerge(database, input.actorId, mustEntity(input.entityId));
         break;
+      case "parallelLedgerSubmitMerge":
+        submitParallelMerge(database, input.actorId, mustEntity(input.entityId));
+        break;
+      case "parallelLedgerApproveMerge":
+        approveParallelMerge(database, input.actorId, mustEntity(input.entityId), input.payload ?? {});
+        break;
+      case "parallelLedgerRejectMerge":
+        rejectParallelMerge(database, input.actorId, mustEntity(input.entityId), input.payload ?? {});
+        break;
+      case "parallelLedgerPublishMerge":
+        publishParallelMerge(database, input.actorId, mustEntity(input.entityId));
+        break;
     }
   })();
 
@@ -12765,7 +12782,7 @@ function submitApproval(database: Database.Database, actorId: string, rawPayload
   audit(database, actorId, "submitApproval", "approval", approvalId, `发起审批 ${approvalNo}：${title}`);
 }
 
-function decideApproval(
+export function decideApproval(
   database: Database.Database,
   actorId: string,
   approvalId: string,

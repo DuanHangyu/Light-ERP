@@ -268,12 +268,14 @@ export type ParallelSnapshotData = {
   gaps: Array<Record<string, unknown>>;
   suggestions: Array<Record<string, unknown>>;
   mergeConflicts: Array<Record<string, unknown>>;
+  mergeRequests: Array<Record<string, unknown>>;
+  mergeItems: Array<Record<string, unknown>>;
 };
 
 export function buildParallelSnapshotData(database: Database.Database, actorId: string): ParallelSnapshotData {
   const ledgers = listParallelLedgersForUser(database, actorId);
   if (ledgers.length === 0) {
-    return { ledgers: [], adjustments: [], adjustmentLines: [], runs: [], costProjections: [], inventoryProjections: [], materialAllocations: [], impacts: [], gaps: [], suggestions: [], mergeConflicts: [] };
+    return { ledgers: [], adjustments: [], adjustmentLines: [], runs: [], costProjections: [], inventoryProjections: [], materialAllocations: [], impacts: [], gaps: [], suggestions: [], mergeConflicts: [], mergeRequests: [], mergeItems: [] };
   }
   const ledgerIds = ledgers.map((l) => l.id);
   const placeholders = ledgerIds.map(() => "?").join(",");
@@ -298,5 +300,8 @@ export function buildParallelSnapshotData(database: Database.Database, actorId: 
     suggestions.push(...(database.prepare(`SELECT * FROM parallel_suggestions WHERE ledger_id IN (${placeholders}) ORDER BY status`).all(...ledgerIds) as Array<Record<string, unknown>>));
   }
   const mergeConflicts = database.prepare(`SELECT c.* FROM parallel_merge_conflicts c JOIN parallel_merge_requests m ON m.id = c.merge_request_id WHERE m.ledger_id IN (${placeholders}) ORDER BY c.resolved_at`).all(...ledgerIds) as Array<Record<string, unknown>>;
-  return { ledgers, adjustments, adjustmentLines, runs, costProjections, inventoryProjections, materialAllocations, impacts, gaps, suggestions, mergeConflicts };
+  const mergeRequests = database.prepare(`SELECT * FROM parallel_merge_requests WHERE ledger_id IN (${placeholders}) ORDER BY submitted_at DESC`).all(...ledgerIds) as Array<Record<string, unknown>>;
+  const mergeRequestIds = mergeRequests.map((r) => String(r.id));
+  const mergeItems: Array<Record<string, unknown>> = mergeRequestIds.length === 0 ? [] : (database.prepare(`SELECT * FROM parallel_merge_items WHERE merge_request_id IN (${mergeRequestIds.map(() => "?").join(",")}) ORDER BY sequence_no`).all(...mergeRequestIds) as Array<Record<string, unknown>>);
+  return { ledgers, adjustments, adjustmentLines, runs, costProjections, inventoryProjections, materialAllocations, impacts, gaps, suggestions, mergeConflicts, mergeRequests, mergeItems };
 }

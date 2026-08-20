@@ -48,7 +48,7 @@ export type MergeDiff = {
 export function previewParallelMerge(database: Database.Database, actorId: string, ledgerId: string): MergeDiff {
   const ledger = database.prepare("SELECT * FROM parallel_ledgers WHERE id = ?").get(ledgerId) as { id: string; ledger_code: string; status: string; working_version: number; base_as_of: string; base_revision: string | null } | undefined;
   if (!ledger) throw new Error("平行账套不存在。");
-  if (ledger.status !== "frozen") throw new Error("只有已冻结账套可以预览合并。");
+  if (!["frozen", "merge_pending", "merge_rejected"].includes(ledger.status)) throw new Error("只有已冻结或待发布的账套可以预览合并。");
 
   const snapshotRows = database.prepare("SELECT entity_type, entity_id, content_hash, payload_json FROM parallel_entity_snapshots WHERE ledger_id = ?").all(ledgerId) as Array<{ entity_type: string; entity_id: string; content_hash: string; payload_json: string }>;
   const conflicts: MergeDiff["conflicts"] = [];

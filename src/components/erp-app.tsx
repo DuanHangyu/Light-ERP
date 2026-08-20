@@ -330,6 +330,8 @@ type Snapshot = {
     gaps: Row[];
     suggestions: Row[];
     mergeConflicts: Row[];
+    mergeRequests: Row[];
+    mergeItems: Row[];
   };
 };
 
@@ -12833,7 +12835,7 @@ function ParallelLedgerModule({
   const [selectedId, setSelectedId] = useState<string>("");
   const [showCreate, setShowCreate] = useState(false);
   const [showAdjust, setShowAdjust] = useState(false);
-  const [subTab, setSubTab] = useState<"overview" | "adjust" | "impact" | "gap" | "diff" | "export">("overview");
+  const [subTab, setSubTab] = useState<"overview" | "adjust" | "impact" | "gap" | "diff" | "export" | "merge">("overview");
   const [createForm, setCreateForm] = useState({ name: "", purpose: "经营数据测算", base_as_of: new Date().toISOString().slice(0, 10), scope_type: "company", merge_allowed: 1, seed_demo: false });
   const [adjustForm, setAdjustForm] = useState({ adjustment_type: "bom_ratio", effective_at: new Date().toISOString().slice(0, 10), reason: "", reference_id: "P-PAL-DEMO", linesText: '[{"entity_type":"product","entity_id":"P-PAL-DEMO","field_code":"qty_per","target_material_id":"M-PAL-A","quantity":0.6},{"entity_type":"product","entity_id":"P-PAL-DEMO","field_code":"qty_per","target_material_id":"M-PAL-B","quantity":0.2}]' });
 
@@ -12847,6 +12849,9 @@ function ParallelLedgerModule({
   const gaps = parallel.gaps.filter((g) => String(g.run_id) === runId);
   const suggestions = parallel.suggestions.filter((s) => String(s.ledger_id) === selectedId);
   const conflicts = parallel.mergeConflicts.filter((c) => true);
+  const ledgerMergeRequest = parallel.mergeRequests.find((m) => String(m.ledger_id) === selectedId) as Row | undefined;
+  const mergeItems = ledgerMergeRequest ? parallel.mergeItems.filter((i) => String(i.merge_request_id) === String(ledgerMergeRequest.id)) : [];
+  const canApproveMerge = ["manager", "admin"].includes(snapshot.currentUser.role);
 
   const downloadExport = (type: string) => {
     if (!selectedId) return;
@@ -12921,12 +12926,22 @@ function ParallelLedgerModule({
         <button type="button" disabled={busy?.startsWith("parallelLedger")} onClick={() => void runAction({ action: "parallelLedgerFreeze", entityId: selectedId })} className="rounded-md border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:border-blue-300 disabled:opacity-50">冻结版本</button>
         <button type="button" disabled={busy?.startsWith("parallelLedger")} onClick={() => void runAction({ action: "parallelLedgerUnfreeze", entityId: selectedId })} className="rounded-md border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:border-blue-300 disabled:opacity-50">解冻修改</button>
         <button type="button" disabled={busy?.startsWith("parallelLedger")} onClick={() => void runAction({ action: "parallelLedgerMergePreview", entityId: selectedId })} className="rounded-md border border-blue-300 bg-blue-50 px-3 py-1.5 text-xs font-semibold text-blue-700 hover:bg-blue-100 disabled:opacity-50">合并预览</button>
+        <button type="button" disabled={busy?.startsWith("parallelLedger") || status !== "frozen"} onClick={() => void runAction({ action: "parallelLedgerSubmitMerge", entityId: selectedId })} className="rounded-md border border-indigo-300 bg-indigo-50 px-3 py-1.5 text-xs font-semibold text-indigo-700 hover:bg-indigo-100 disabled:opacity-50">提交合并</button>
+        {ledgerMergeRequest && String(ledgerMergeRequest.status) === "merge_pending" && canApproveMerge ? (
+          <>
+            <button type="button" disabled={busy?.startsWith("parallelLedger")} onClick={() => void runAction({ action: "parallelLedgerApproveMerge", entityId: String(ledgerMergeRequest.id) })} className="rounded-md border border-emerald-300 bg-emerald-50 px-3 py-1.5 text-xs font-semibold text-emerald-700 hover:bg-emerald-100 disabled:opacity-50">同意合并</button>
+            <button type="button" disabled={busy?.startsWith("parallelLedger")} onClick={() => void runAction({ action: "parallelLedgerRejectMerge", entityId: String(ledgerMergeRequest.id), payload: { approval_note: "驳回" } })} className="rounded-md border border-rose-200 bg-rose-50 px-3 py-1.5 text-xs font-semibold text-rose-700 hover:bg-rose-50 disabled:opacity-50">驳回合并</button>
+          </>
+        ) : null}
+        {ledgerMergeRequest && String(ledgerMergeRequest.status) === "approved" ? (
+          <button type="button" disabled={busy?.startsWith("parallelLedger")} onClick={() => void runAction({ action: "parallelLedgerPublishMerge", entityId: String(ledgerMergeRequest.id) })} className="rounded-md bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-700 disabled:opacity-50">发布到正式账套</button>
+        ) : null}
         <button type="button" disabled={busy?.startsWith("parallelLedger")} onClick={() => void runAction({ action: "parallelLedgerArchive", entityId: selectedId })} className="rounded-md border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 disabled:opacity-50">归档</button>
         <button type="button" disabled={busy?.startsWith("parallelLedger")} onClick={() => void runAction({ action: "parallelLedgerDiscard", entityId: selectedId })} className="rounded-md border border-rose-200 bg-rose-50 px-3 py-1.5 text-xs font-semibold text-rose-700 disabled:opacity-50">放弃方案</button>
       </div>
 
       <div className="flex flex-wrap gap-2 border-b border-slate-200">
-        {([["overview", "总览"], ["adjust", "调整工作区"], ["impact", "影响分析"], ["gap", "缺口与建议"], ["diff", "差异对比"], ["export", "报表导出"]] as const).map(([key, label]) => (
+        {([["overview", "总览"], ["adjust", "调整工作区"], ["impact", "影响分析"], ["gap", "缺口与建议"], ["diff", "差异对比"], ["export", "报表导出"], ["merge", "合并中心"]] as const).map(([key, label]) => (
           <button key={key} type="button" onClick={() => setSubTab(key)} className={`border-b-2 px-3 py-2 text-sm font-medium ${subTab === key ? "border-blue-600 text-blue-700" : "border-transparent text-slate-500 hover:text-slate-700"}`}>{label}</button>
         ))}
       </div>
@@ -13014,6 +13029,27 @@ function ParallelLedgerModule({
           <div className="mt-3 grid grid-cols-2 gap-2 md:grid-cols-4">
             {PARALLEL_EXPORTS.map((item) => <button key={item.type} type="button" onClick={() => downloadExport(item.type)} className="rounded-md border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 hover:border-blue-300 hover:text-blue-700">{item.label}</button>)}
           </div>
+        </div>
+      ) : null}
+
+      {subTab === "merge" ? (
+        <div className="space-y-4">
+          <div className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+            <h3 className="text-sm font-semibold text-slate-900">合并申请</h3>
+            {ledgerMergeRequest ? (
+              <dl className="mt-3 grid grid-cols-2 gap-2 text-sm md:grid-cols-4">
+                <KeyValue label="合并单号" value={String(ledgerMergeRequest.merge_no)} />
+                <KeyValue label="状态" value={String(ledgerMergeRequest.status)} />
+                <KeyValue label="幂等键" value={String(ledgerMergeRequest.idempotency_key ?? "")} />
+                <KeyValue label="提交人" value={String(ledgerMergeRequest.submitted_by ?? "")} />
+                <KeyValue label="审批人" value={String(ledgerMergeRequest.approved_by ?? "—")} />
+                <KeyValue label="发布人" value={String(ledgerMergeRequest.published_by ?? "—")} />
+                {ledgerMergeRequest.failure_reason ? <div className="col-span-2 text-rose-600">失败原因：{String(ledgerMergeRequest.failure_reason)}</div> : null}
+              </dl>
+            ) : <EmptyText text="尚未提交合并。请先冻结版本并接受建议后，点击「提交合并」。" />}
+          </div>
+          <DataTable title="纠错单据包" icon={FileCheck2} rows={mergeItems} columns={[{ key: "sequence_no", label: "序号" }, { key: "document_type", label: "单据类型" }, { key: "action_type", label: "动作" }, { key: "publish_status", label: "发布状态" }, { key: "published_document_id", label: "正式单据号", render: (v) => (v ? String(v) : "—") }]} empty="无纠错单据" />
+          {conflicts.length > 0 ? <DataTable title="合并冲突" icon={AlertTriangle} rows={conflicts} columns={[{ key: "entity_type", label: "对象类型" }, { key: "entity_id", label: "对象" }, { key: "conflict_type", label: "冲突类型" }]} /> : null}
         </div>
       ) : null}
     </div>
