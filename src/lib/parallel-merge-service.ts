@@ -5,7 +5,7 @@ import { requireParallelPermission } from "./parallel-ledger-service";
 
 function assertLedger(database: Database.Database, ledgerId: string, actorId: string) {
   const ledger = database.prepare("SELECT * FROM parallel_ledgers WHERE id = ?").get(ledgerId) as
-    | { id: string; ledger_code: string; status: string; working_version: number; base_revision: string | null; base_as_of: string }
+    | { id: string; ledger_code: string; status: string; working_version: number; base_revision: string | null; base_as_of: string; merge_allowed: number }
     | undefined;
   if (!ledger) throw new Error("平行账套不存在。");
   const member = database.prepare("SELECT owner_user_id FROM parallel_ledgers WHERE id = ?").get(ledgerId) as { owner_user_id: string };
@@ -14,6 +14,31 @@ function assertLedger(database: Database.Database, ledgerId: string, actorId: st
     if (!ok) throw new Error("您不是该平行账套的成员，无权操作。");
   }
   return ledger;
+}
+
+function adjustmentDocumentType(adjustmentType: string) {
+  if (["bom_ratio", "material_substitute"].includes(adjustmentType)) return "bom_change";
+  if (["inventory_qty", "batch_adjust"].includes(adjustmentType)) return "inventory_adjustment";
+  if (["purchase_price", "purchase_qty"].includes(adjustmentType)) return "purchase_plan_adjustment";
+  if (["issue_qty", "production_qty"].includes(adjustmentType)) return "production_adjustment";
+  if (adjustmentType === "process_fee_loss") return "product_cost_adjustment";
+  return "effective_date_adjustment";
+}
+
+function activeAdjustmentItems(database: Database.Database, ledgerId: string) {
+  const adjustments = database
+    .prepare("SELECT * FROM parallel_adjustments WHERE ledger_id = ? AND status = 'active' ORDER BY created_at, id")
+    .all(ledgerId) as Array<Record<string, unknown>>;
+  return adjustments.map((adjustment) => {
+    const lines = database
+      .prepare("SELECT * FROM parallel_adjustment_lines WHERE adjustment_id = ? ORDER BY id")
+      .all(String(adjustment.id)) as Array<Record<string, unknown>>;
+    return {
+      id: String(adjustment.id),
+      documentType: adjustmentDocumentType(String(adjustment.adjustment_type)),
+      payload: { ...adjustment, lines },
+    };
+  });
 }
 
 function acceptedSuggestions(database: Database.Database, ledgerId: string) {
@@ -25,6 +50,7 @@ function acceptedSuggestions(database: Database.Database, ledgerId: string) {
 export function submitParallelMerge(database: Database.Database, actorId: string, ledgerId: string): { mergeRequestId: string } {
   const ledger = assertLedger(database, ledgerId, actorId);
   requireParallelPermission(database, actorId, ledgerId, "submit_merge");
+  if (!Number(ledger.merge_allowed)) throw new Error("该平行账套为仅测算方案，不允许合并到正式账套。");
   if (ledger.status !== "frozen") throw new Error("只有已冻结账套可以提交合并申请。请先冻结版本。");
 
   // 提交前必须重新测算，确保结果为最新
@@ -38,7 +64,16 @@ export function submitParallelMerge(database: Database.Database, actorId: string
   if (preview.blocking) throw new Error(`存在 ${preview.conflicts.length} 个阻断冲突，请先解决冲突或重新基线后再提交合并。`);
 
   const suggestions = acceptedSuggestions(database, ledgerId);
-  if (suggestions.length === 0) throw new Error("没有已接受的建议，无法生成纠错单据包。请先在「缺口与建议」中接受建议。");
+  const unresolvedGapCount = (database.prepare(`
+    SELECT COUNT(*) AS count
+    FROM parallel_gaps g
+    JOIN parallel_calculation_runs r ON r.id = g.run_id
+    WHERE r.ledger_id = ? AND r.stale = 0 AND g.blocking = 1
+      AND g.resolution_status NOT IN ('suggested', 'resolved')
+  `).get(ledgerId) as { count: number }).count;
+  if (unresolvedGapCount > 0) throw new Error(`仍有 ${unresolvedGapCount} 个阻断缺口未确认处理，不能提交合并。`);
+  const adjustmentItems = activeAdjustmentItems(database, ledgerId);
+  if (suggestions.length === 0 && adjustmentItems.length === 0) throw new Error("当前账套没有可发布的调整或纠错建议。");
 
   const mergeRequestId = uid("PMR");
   const mergeNo = serial(database, "parallel_merge_requests", "PHB");
@@ -62,7 +97,6 @@ export function submitParallelMerge(database: Database.Database, actorId: string
   let sequence = 1;
   for (const suggestion of suggestions) {
     const payload = JSON.parse(suggestion.payload_json) as Record<string, unknown>;
-    const isPurchase = suggestion.document_type === "purchase_requisition";
     insertItem.run(
       uid("PMI"),
       mergeRequestId,
@@ -70,8 +104,20 @@ export function submitParallelMerge(database: Database.Database, actorId: string
       suggestion.document_type,
       "parallel_suggestion",
       suggestion.id,
-      isPurchase ? "new" : "advisory",
+      "new",
       JSON.stringify({ ...payload, suggestion_id: suggestion.id, gap_id: suggestion.gap_id }),
+    );
+  }
+  for (const adjustment of adjustmentItems) {
+    insertItem.run(
+      uid("PMI"),
+      mergeRequestId,
+      sequence++,
+      adjustment.documentType,
+      "parallel_adjustment",
+      adjustment.id,
+      "new",
+      JSON.stringify(adjustment.payload),
     );
   }
 
@@ -89,7 +135,7 @@ export function submitParallelMerge(database: Database.Database, actorId: string
       `平行账套合并审批 ${mergeNo}`,
       actorId,
       totalAmount,
-      `账套 ${ledger.ledger_code} 合并发布：${suggestions.length} 个纠错单据，预估金额 ${totalAmount}`,
+      `账套 ${ledger.ledger_code} 合并发布：${suggestions.length + adjustmentItems.length} 个纠错单据，预估金额 ${totalAmount}`,
       approvalRule?.id ?? null,
       approvalRule?.approver_role ?? "manager",
       approvalRule?.sla_hours ?? 24,
@@ -98,7 +144,7 @@ export function submitParallelMerge(database: Database.Database, actorId: string
     );
 
   database.prepare("UPDATE parallel_ledgers SET status = 'merge_pending', updated_at = ? WHERE id = ?").run(submittedAt, ledgerId);
-  audit(database, actorId, "parallelLedgerSubmitMerge", "parallel_merge", mergeRequestId, `提交合并 ${mergeNo}：${suggestions.length} 个纠错单据，审批 ${approvalNo}`);
+  audit(database, actorId, "parallelLedgerSubmitMerge", "parallel_merge", mergeRequestId, `提交合并 ${mergeNo}：${suggestions.length + adjustmentItems.length} 个纠错单据，审批 ${approvalNo}`);
   return { mergeRequestId };
 }
 
@@ -112,12 +158,50 @@ export function approveParallelMerge(database: Database.Database, actorId: strin
   const ledgerId = mergeRequestIdToLedgerId(database, mergeRequestId);
   assertLedger(database, ledgerId, actorId);
   requireParallelPermission(database, actorId, ledgerId, "approve_merge");
+  const mergeRequest = database.prepare("SELECT submitted_by FROM parallel_merge_requests WHERE id = ?").get(mergeRequestId) as { submitted_by: string | null } | undefined;
+  if (mergeRequest?.submitted_by === actorId) throw new Error("合并申请人不能审批自己的申请，请由另一名授权管理人员复核。");
   const approval = findApprovalForMerge(database, mergeRequestId);
   if (approval.status !== "pending") throw new Error(`审批单状态为 ${approval.status}，不能重复审批。`);
   decideApproval(database, actorId, approval.id, "approved", payload);
   const decidedAt = now();
   database.prepare("UPDATE parallel_merge_requests SET approved_by = ?, approved_at = ?, status = 'approved' WHERE id = ?").run(actorId, decidedAt, mergeRequestId);
   audit(database, actorId, "parallelLedgerApproveMerge", "parallel_merge", mergeRequestId, `同意合并审批 ${approval.request_no}`);
+}
+
+function publishFormalCorrectionOrder(
+  database: Database.Database,
+  actorId: string,
+  ledgerId: string,
+  mergeRequestId: string,
+  item: MergeItem,
+  payload: Record<string, unknown>,
+) {
+  const correctionId = uid("FCO");
+  const correctionNo = serial(database, "formal_correction_orders", "JZ");
+  const firstLine = Array.isArray(payload.lines) ? (payload.lines[0] as Record<string, unknown> | undefined) : undefined;
+  const targetEntityType = String(firstLine?.entity_type ?? payload.reference_type ?? "");
+  const targetEntityId = String(firstLine?.entity_id ?? payload.reference_id ?? "");
+  database.prepare(`
+    INSERT INTO formal_correction_orders (
+      id, correction_no, correction_type, source_type, source_ledger_id,
+      source_merge_request_id, source_merge_item_id, target_entity_type,
+      target_entity_id, payload_json, status, created_by, created_at
+    ) VALUES (?, ?, ?, 'parallel_merge', ?, ?, ?, ?, ?, ?, 'pending_execution', ?, ?)
+  `).run(
+    correctionId,
+    correctionNo,
+    item.document_type,
+    ledgerId,
+    mergeRequestId,
+    item.id,
+    targetEntityType,
+    targetEntityId,
+    JSON.stringify(payload),
+    actorId,
+    now(),
+  );
+  audit(database, actorId, "parallelMergePublishCorrection", "formal_correction_order", correctionId, `平行账套发布正式纠错单 ${correctionNo}：${item.document_type}`);
+  return correctionId;
 }
 
 export function rejectParallelMerge(database: Database.Database, actorId: string, mergeRequestId: string, payload: Record<string, unknown>) {
@@ -198,9 +282,12 @@ export function publishParallelMerge(database: Database.Database, actorId: strin
         const docId = publishPurchaseRequisition(database, actorId, ledgerId, payload);
         database.prepare("UPDATE parallel_merge_items SET publish_status = 'published', published_document_id = ? WHERE id = ?").run(docId, item.id);
         publishedCount += 1;
+      } else if (item.action_type === "new") {
+        const docId = publishFormalCorrectionOrder(database, actorId, ledgerId, mergeRequestId, item, payload);
+        database.prepare("UPDATE parallel_merge_items SET publish_status = 'published', published_document_id = ? WHERE id = ?").run(docId, item.id);
+        publishedCount += 1;
       } else {
-        database.prepare("UPDATE parallel_merge_items SET publish_status = 'advisory', published_document_id = NULL WHERE id = ?").run(item.id);
-        advisoryCount += 1;
+        throw new Error(`不支持的合并动作：${item.action_type}/${item.document_type}`);
       }
     }
     const publishedAt = now();

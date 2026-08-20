@@ -1,6 +1,6 @@
 import type Database from "better-sqlite3";
 import { audit, getUser, now, serial, uid } from "./erp-service";
-import { captureFormalSnapshot, previewSnapshot } from "./parallel-snapshot-service";
+import { captureFormalSnapshot, ensureMaterialSnapshot, previewSnapshot } from "./parallel-snapshot-service";
 import { runParallelCalculation } from "./parallel-calculation-engine";
 import {
   ADJUSTMENT_TYPE_LABELS,
@@ -27,6 +27,36 @@ function numberOr(payload: Record<string, unknown> | undefined, key: string, fal
   if (value == null || value === "") return fallback;
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+const SCOPE_TABLES: Record<string, string> = {
+  material: "materials",
+  product: "products",
+  order: "orders",
+  production_order: "production_orders",
+};
+
+function validateScopeEntities(
+  database: Database.Database,
+  scopeType: string,
+  entities: Array<Record<string, unknown>>,
+) {
+  if (scopeType === "company") return [];
+  const table = SCOPE_TABLES[scopeType];
+  if (!table) throw new Error(`不支持的测算范围：${scopeType}`);
+  const normalized = entities
+    .map((entity) => ({
+      scope_entity_type: String(entity.scope_entity_type ?? scopeType),
+      scope_entity_id: String(entity.scope_entity_id ?? "").trim(),
+      include_children: Number(entity.include_children ?? 1),
+    }))
+    .filter((entity) => entity.scope_entity_type === scopeType && entity.scope_entity_id);
+  if (normalized.length === 0) throw new Error("请选择至少一个具体测算对象。");
+  for (const entity of normalized) {
+    const exists = database.prepare(`SELECT 1 FROM ${table} WHERE id = ?`).get(entity.scope_entity_id);
+    if (!exists) throw new Error(`测算范围中的对象不存在：${entity.scope_entity_id}`);
+  }
+  return normalized;
 }
 
 function assertLedger(database: Database.Database, ledgerId: string, actorId: string): ParallelLedgerRow {
@@ -143,10 +173,14 @@ export function createParallelLedger(database: Database.Database, actorId: strin
   const purpose = text(payload, "purpose", "用途说明", false) || "经营数据测算";
   const baseAsOf = text(payload, "base_as_of", "基准日期", false) || new Date().toISOString().slice(0, 10);
   const scopeType = text(payload, "scope_type", "范围类型", false) || "company";
-  const mergeAllowed = numberOr(payload, "merge_allowed", 1);
+  const mergeAllowed = numberOr(payload, "merge_allowed", 1) ? 1 : 0;
   const allowedUserIds = Array.isArray(payload.allowed_user_ids) ? (payload.allowed_user_ids as unknown[]).map(String) : [];
-  const scopeEntities = Array.isArray(payload.scope_entities) ? (payload.scope_entities as Array<Record<string, unknown>>) : [];
-  if (payload.seed_demo) seedParallelDemoData(database);
+  const rawScopeEntities = Array.isArray(payload.scope_entities) ? (payload.scope_entities as Array<Record<string, unknown>>) : [];
+  const scopeEntities = validateScopeEntities(database, scopeType, rawScopeEntities);
+  if (payload.seed_demo) {
+    if (process.env.ERP_SEED_MODE === "production") throw new Error("生产数据模式禁止向正式账套注入演示资料。");
+    seedParallelDemoData(database);
+  }
 
   const ledgerId = uid("PL");
   const ledgerCode = serial(database, "parallel_ledgers", "PX");
@@ -169,11 +203,11 @@ export function createParallelLedger(database: Database.Database, actorId: strin
       .run(uid("PLM"), ledgerId, userId, actorId, createdAt);
   }
   for (const entity of scopeEntities) {
-    const entityType = String(entity.scope_entity_type ?? "company");
-    const entityId = String(entity.scope_entity_id ?? "ALL");
+    const entityType = entity.scope_entity_type;
+    const entityId = entity.scope_entity_id;
     database
       .prepare("INSERT INTO parallel_ledger_scopes (id, ledger_id, scope_entity_type, scope_entity_id, include_children, created_at) VALUES (?, ?, ?, ?, ?, ?)")
-      .run(uid("PLS"), ledgerId, entityType, entityId, Number(entity.include_children ?? 0), createdAt);
+      .run(uid("PLS"), ledgerId, entityType, entityId, entity.include_children, createdAt);
   }
 
   const { count } = captureFormalSnapshot(database, ledgerId);
@@ -218,6 +252,82 @@ export function discardParallelLedger(database: Database.Database, actorId: stri
   audit(database, actorId, "parallelLedgerDiscard", "parallel_ledger", ledgerId, `放弃平行账套 ${ledger.ledger_code}`);
 }
 
+export function rebaseParallelLedger(database: Database.Database, actorId: string, ledgerId: string) {
+  const ledger = assertLedger(database, ledgerId, actorId);
+  requireParallelPermission(database, actorId, ledgerId, "adjust");
+  if (!["frozen", "merge_rejected", "conflicted"].includes(ledger.status)) {
+    throw new Error("只有已冻结、合并驳回或存在冲突的账套可以重新建立基线。");
+  }
+  const rebasedAt = now();
+  const nextVersion = ledger.working_version + 1;
+  const tx = database.transaction(() => {
+    database.prepare("UPDATE parallel_merge_requests SET status = 'superseded', failure_reason = COALESCE(failure_reason, '账套已重新建立基线') WHERE ledger_id = ? AND status IN ('merge_pending', 'approved', 'rejected')").run(ledgerId);
+    database.prepare("DELETE FROM parallel_entity_snapshots WHERE ledger_id = ?").run(ledgerId);
+    captureFormalSnapshot(database, ledgerId);
+    database.prepare("UPDATE parallel_calculation_runs SET stale = 1 WHERE ledger_id = ?").run(ledgerId);
+    database.prepare(`
+      UPDATE parallel_ledgers
+      SET status = 'draft', working_version = ?, base_revision = ?, frozen_at = NULL,
+          last_merge_preview_json = '{}', last_merge_preview_at = NULL, updated_at = ?
+      WHERE id = ?
+    `).run(nextVersion, `formal-${rebasedAt}`, rebasedAt, ledgerId);
+  });
+  tx();
+  audit(database, actorId, "parallelLedgerRebase", "parallel_ledger", ledgerId, `重新建立平行账套基线 ${ledger.ledger_code}，版本 v${nextVersion}`);
+}
+
+const MEMBER_PERMISSION_KEYS: ParallelPermission[] = [
+  "view", "adjust", "recalculate", "export", "freeze", "submit_merge",
+  "approve_merge", "publish_merge", "archive", "discard", "admin",
+];
+
+export function upsertParallelLedgerMember(
+  database: Database.Database,
+  actorId: string,
+  ledgerId: string,
+  payload: Record<string, unknown>,
+) {
+  const ledger = assertLedger(database, ledgerId, actorId);
+  requireParallelPermission(database, actorId, ledgerId, "admin");
+  const userId = text(payload, "user_id", "成员");
+  if (userId === ledger.owner_user_id) throw new Error("账套负责人权限由系统维护，不能在成员列表中降级。");
+  const user = database.prepare("SELECT id, status FROM users WHERE id = ?").get(userId) as { id: string; status: string } | undefined;
+  if (!user || user.status !== "active") throw new Error("请选择有效的启用用户。");
+  const memberRole = text(payload, "member_role", "成员角色", false) || "viewer";
+  const permissions = Object.fromEntries(MEMBER_PERMISSION_KEYS.map((permission) => [permission, Number(Boolean(payload[permission]))]));
+  permissions.view = 1;
+  const grantedAt = now();
+  database.prepare(`
+    INSERT INTO parallel_ledger_members (
+      id, ledger_id, user_id, member_role, can_view, can_adjust, can_recalculate,
+      can_export, can_freeze, can_submit_merge, can_approve_merge,
+      can_publish_merge, can_archive, can_discard, can_admin, granted_by, granted_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(ledger_id, user_id) DO UPDATE SET
+      member_role = excluded.member_role,
+      can_view = excluded.can_view,
+      can_adjust = excluded.can_adjust,
+      can_recalculate = excluded.can_recalculate,
+      can_export = excluded.can_export,
+      can_freeze = excluded.can_freeze,
+      can_submit_merge = excluded.can_submit_merge,
+      can_approve_merge = excluded.can_approve_merge,
+      can_publish_merge = excluded.can_publish_merge,
+      can_archive = excluded.can_archive,
+      can_discard = excluded.can_discard,
+      can_admin = excluded.can_admin,
+      granted_by = excluded.granted_by,
+      granted_at = excluded.granted_at
+  `).run(
+    uid("PLM"), ledgerId, userId, memberRole,
+    permissions.view, permissions.adjust, permissions.recalculate, permissions.export,
+    permissions.freeze, permissions.submit_merge, permissions.approve_merge,
+    permissions.publish_merge, permissions.archive, permissions.discard,
+    permissions.admin, actorId, grantedAt,
+  );
+  audit(database, actorId, "parallelLedgerUpsertMember", "parallel_ledger_member", userId, `配置平行账套 ${ledger.ledger_code} 成员权限：${memberRole}`);
+}
+
 export function addParallelAdjustment(database: Database.Database, actorId: string, ledgerId: string, payload: Record<string, unknown>): { adjustmentId: string } {
   const ledger = assertLedger(database, ledgerId, actorId);
   requireParallelPermission(database, actorId, ledgerId, "adjust");
@@ -228,6 +338,29 @@ export function addParallelAdjustment(database: Database.Database, actorId: stri
   const reason = text(payload, "reason", "调整原因", false) || ADJUSTMENT_TYPE_LABELS[adjustmentType];
   const referenceType = text(payload, "reference_type", "关联类型", false) || null;
   const referenceId = text(payload, "reference_id", "关联编号", false) || null;
+
+  const lines = Array.isArray(payload.lines) ? (payload.lines as Array<Record<string, unknown>>) : [];
+  if (lines.length === 0) throw new Error("调整项至少需要一行有效明细。");
+  for (const line of lines) {
+    const entityType = String(line.entity_type ?? "");
+    const entityId = String(line.entity_id ?? "");
+    const fieldCode = String(line.field_code ?? "");
+    if (!entityType || !entityId || !fieldCode) throw new Error("调整明细缺少业务对象或调整字段。");
+    for (const key of ["quantity", "unit_price"] as const) {
+      if (line[key] == null || line[key] === "") continue;
+      const value = Number(line[key]);
+      if (!Number.isFinite(value) || value < 0) throw new Error(`调整明细的${key === "quantity" ? "数量" : "单价"}必须是非负数字。`);
+    }
+    const materialIds = [line.source_material_id, line.target_material_id]
+      .filter((value): value is string => typeof value === "string" && Boolean(value));
+    if (entityType === "material" && entityId) materialIds.push(entityId);
+    for (const materialId of new Set(materialIds)) ensureMaterialSnapshot(database, ledgerId, materialId);
+    if (["product", "production_order", "material_batch"].includes(entityType)) {
+      const snapshotType = entityType;
+      const exists = database.prepare("SELECT 1 FROM parallel_entity_snapshots WHERE ledger_id = ? AND entity_type = ? AND entity_id = ?").get(ledgerId, snapshotType, entityId);
+      if (!exists) throw new Error(`调整对象不在当前平行账套范围内：${entityType}/${entityId}`);
+    }
+  }
 
   const adjustmentId = uid("PAD");
   const adjustmentNo = serial(database, "parallel_adjustments", "PT");
@@ -241,7 +374,6 @@ export function addParallelAdjustment(database: Database.Database, actorId: stri
   database.prepare("UPDATE parallel_ledgers SET working_version = ?, status = 'draft', updated_at = ? WHERE id = ?").run(nextVersion, createdAt, ledgerId);
   database.prepare("UPDATE parallel_calculation_runs SET stale = 1 WHERE ledger_id = ?").run(ledgerId);
 
-  const lines = Array.isArray(payload.lines) ? (payload.lines as Array<Record<string, unknown>>) : [];
   const insertLine = database.prepare(
     "INSERT INTO parallel_adjustment_lines (id, adjustment_id, entity_type, entity_id, field_code, before_value, after_value, delta_value, source_material_id, target_material_id, quantity, unit_price, remark) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
   );
@@ -300,6 +432,7 @@ export function listParallelAdjustmentLines(database: Database.Database, adjustm
 
 export type ParallelSnapshotData = {
   ledgers: ParallelLedgerRow[];
+  members: Array<Record<string, unknown>>;
   adjustments: ParallelAdjustmentRow[];
   adjustmentLines: ParallelAdjustmentLineRow[];
   runs: Array<Record<string, unknown>>;
@@ -312,15 +445,17 @@ export type ParallelSnapshotData = {
   mergeConflicts: Array<Record<string, unknown>>;
   mergeRequests: Array<Record<string, unknown>>;
   mergeItems: Array<Record<string, unknown>>;
+  publishedCorrections: Array<Record<string, unknown>>;
 };
 
 export function buildParallelSnapshotData(database: Database.Database, actorId: string): ParallelSnapshotData {
   const ledgers = listParallelLedgersForUser(database, actorId);
   if (ledgers.length === 0) {
-    return { ledgers: [], adjustments: [], adjustmentLines: [], runs: [], costProjections: [], inventoryProjections: [], materialAllocations: [], impacts: [], gaps: [], suggestions: [], mergeConflicts: [], mergeRequests: [], mergeItems: [] };
+    return { ledgers: [], members: [], adjustments: [], adjustmentLines: [], runs: [], costProjections: [], inventoryProjections: [], materialAllocations: [], impacts: [], gaps: [], suggestions: [], mergeConflicts: [], mergeRequests: [], mergeItems: [], publishedCorrections: [] };
   }
   const ledgerIds = ledgers.map((l) => l.id);
   const placeholders = ledgerIds.map(() => "?").join(",");
+  const members = database.prepare(`SELECT m.*, u.name AS user_name, u.role_label FROM parallel_ledger_members m JOIN users u ON u.id = m.user_id WHERE m.ledger_id IN (${placeholders}) ORDER BY m.granted_at`).all(...ledgerIds) as Array<Record<string, unknown>>;
   const adjustments = database.prepare(`SELECT * FROM parallel_adjustments WHERE ledger_id IN (${placeholders}) ORDER BY created_at`).all(...ledgerIds) as ParallelAdjustmentRow[];
   const adjustmentIds = adjustments.map((a) => a.id);
   const adjustmentLines: ParallelAdjustmentLineRow[] = adjustmentIds.length === 0 ? [] : (database.prepare(`SELECT * FROM parallel_adjustment_lines WHERE adjustment_id IN (${adjustmentIds.map(() => "?").join(",")}) ORDER BY id`).all(...adjustmentIds) as ParallelAdjustmentLineRow[]);
@@ -342,8 +477,18 @@ export function buildParallelSnapshotData(database: Database.Database, actorId: 
     suggestions.push(...(database.prepare(`SELECT * FROM parallel_suggestions WHERE ledger_id IN (${placeholders}) ORDER BY status`).all(...ledgerIds) as Array<Record<string, unknown>>));
   }
   const mergeConflicts = database.prepare(`SELECT c.* FROM parallel_merge_conflicts c JOIN parallel_merge_requests m ON m.id = c.merge_request_id WHERE m.ledger_id IN (${placeholders}) ORDER BY c.resolved_at`).all(...ledgerIds) as Array<Record<string, unknown>>;
+  const previewRows = database.prepare(`SELECT id, last_merge_preview_json, last_merge_preview_at FROM parallel_ledgers WHERE id IN (${placeholders})`).all(...ledgerIds) as Array<{ id: string; last_merge_preview_json?: string; last_merge_preview_at?: string | null }>;
+  for (const row of previewRows) {
+    try {
+      const preview = JSON.parse(row.last_merge_preview_json || "{}") as { conflicts?: Array<Record<string, unknown>> };
+      for (const conflict of preview.conflicts ?? []) mergeConflicts.push({ ...conflict, ledger_id: row.id, previewed_at: row.last_merge_preview_at ?? null });
+    } catch {
+      // Ignore a legacy or partially written preview; the next preview replaces it.
+    }
+  }
   const mergeRequests = database.prepare(`SELECT * FROM parallel_merge_requests WHERE ledger_id IN (${placeholders}) ORDER BY submitted_at DESC`).all(...ledgerIds) as Array<Record<string, unknown>>;
   const mergeRequestIds = mergeRequests.map((r) => String(r.id));
   const mergeItems: Array<Record<string, unknown>> = mergeRequestIds.length === 0 ? [] : (database.prepare(`SELECT * FROM parallel_merge_items WHERE merge_request_id IN (${mergeRequestIds.map(() => "?").join(",")}) ORDER BY sequence_no`).all(...mergeRequestIds) as Array<Record<string, unknown>>);
-  return { ledgers, adjustments, adjustmentLines, runs, costProjections, inventoryProjections, materialAllocations, impacts, gaps, suggestions, mergeConflicts, mergeRequests, mergeItems };
+  const publishedCorrections = database.prepare(`SELECT * FROM formal_correction_orders WHERE source_ledger_id IN (${placeholders}) ORDER BY created_at DESC`).all(...ledgerIds) as Array<Record<string, unknown>>;
+  return { ledgers, members, adjustments, adjustmentLines, runs, costProjections, inventoryProjections, materialAllocations, impacts, gaps, suggestions, mergeConflicts, mergeRequests, mergeItems, publishedCorrections };
 }

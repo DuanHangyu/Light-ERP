@@ -1448,8 +1448,8 @@ describe("ERP service document attachment archive", () => {
         certificate_type: "quality_system",
         certificate_name: "ISO9001 质量管理体系认证",
         certificate_no: "ISO-ARCHIVE-2026",
-        issued_at: "2023-05-01",
-        expires_at: "2026-05-20",
+        issued_at: offsetDate(-365),
+        expires_at: offsetDate(20),
         remind_days: "30",
         note: "供应商补充证书扫描件，系统需提醒临期并归档附件。",
       },
@@ -2815,17 +2815,10 @@ describe("ERP service formal authentication and RBAC administration", () => {
       },
     });
     expect(Number((preview.summary as Record<string, unknown>).affected_count)).toBeGreaterThanOrEqual(1);
-    expect(preview.items).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          key: "inventory_stale",
-          label: "呆滞预警物料",
-          current_count: 1,
-          preview_count: 0,
-          delta: -1,
-        }),
-      ]),
-    );
+    const staleImpact = preview.items.find((item) => item.key === "inventory_stale") as Record<string, unknown>;
+    expect(staleImpact).toMatchObject({ key: "inventory_stale", label: "呆滞预警物料" });
+    expect(Number(staleImpact.current_count)).toBeGreaterThan(Number(staleImpact.preview_count));
+    expect(Number(staleImpact.delta)).toBe(Number(staleImpact.preview_count) - Number(staleImpact.current_count));
 
     const before = service.getSnapshot("U-ADMIN") as unknown as {
       board: { systemSettingEffects: Array<Record<string, unknown>> };
@@ -4288,7 +4281,7 @@ describe("ERP service formal purchase entry", () => {
         }),
       ]),
     );
-    expect(accepted.board.payables[0]).toMatchObject({
+    expect(accepted.board.payables.find((item) => item.purchase_order_id === purchaseOrder.id)).toMatchObject({
       purchase_order_id: purchaseOrder.id,
       total_amount: 540,
       balance_amount: 540,

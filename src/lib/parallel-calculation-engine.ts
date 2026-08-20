@@ -45,8 +45,13 @@ type AdjustedModel = {
   productionOrders: Array<NumberRow>;
   orders: Map<string, NumberRow>;
   projectedPurchasePrices: Map<string, number>;
+  projectedPurchaseQuantities: Map<string, number>;
   inventoryOverrides: Map<string, number>;
+  batchOverrides: Map<string, number>;
   processFeeOverrides: Map<string, number>;
+  lossRateOverrides: Map<string, number>;
+  productionQtyOverrides: Map<string, number>;
+  issueQtyOverrides: Map<string, number>;
   bomComponentOverrides: Map<string, number>;
   bomAddedComponents: Array<{ productId: string; materialId: string; qtyPer: number; isPrimary: boolean }>;
   bomRemovedComponents: Array<{ productId: string; materialId: string }>;
@@ -62,8 +67,13 @@ function buildModel(store: SnapshotStore): AdjustedModel {
     productionOrders: [...store.productionOrders],
     orders: new Map(store.orders.map((o) => [str(o, "id"), o])),
     projectedPurchasePrices: new Map(),
+    projectedPurchaseQuantities: new Map(),
     inventoryOverrides: new Map(),
+    batchOverrides: new Map(),
     processFeeOverrides: new Map(),
+    lossRateOverrides: new Map(),
+    productionQtyOverrides: new Map(),
+    issueQtyOverrides: new Map(),
     bomComponentOverrides: new Map(),
     bomAddedComponents: [],
     bomRemovedComponents: [],
@@ -88,16 +98,47 @@ function applyAdjustments(model: AdjustedModel, adjustments: ParallelAdjustmentR
           if (materialId && price != null && Number.isFinite(price)) model.projectedPurchasePrices.set(materialId, price);
         }
         break;
+      case "purchase_qty":
+        for (const line of adjLines) {
+          const materialId = line.target_material_id ?? line.entity_id;
+          const qty = line.quantity ?? (line.after_value ? Number(line.after_value) : undefined);
+          if (materialId && qty != null && Number.isFinite(qty) && qty >= 0) model.projectedPurchaseQuantities.set(materialId, qty);
+          if (materialId && line.unit_price != null && Number.isFinite(line.unit_price)) model.projectedPurchasePrices.set(materialId, line.unit_price);
+        }
+        break;
       case "inventory_qty":
         for (const line of adjLines) {
           const qty = line.quantity ?? (line.after_value ? Number(line.after_value) : undefined);
           if (line.entity_id && qty != null && Number.isFinite(qty)) model.inventoryOverrides.set(line.entity_id, qty);
         }
         break;
+      case "batch_adjust":
+        for (const line of adjLines) {
+          const qty = line.quantity ?? (line.after_value ? Number(line.after_value) : undefined);
+          if (line.entity_id && qty != null && Number.isFinite(qty) && qty >= 0) model.batchOverrides.set(line.entity_id, qty);
+        }
+        break;
+      case "issue_qty":
+        for (const line of adjLines) {
+          const materialId = line.target_material_id ?? line.source_material_id;
+          const qty = line.quantity ?? (line.after_value ? Number(line.after_value) : undefined);
+          if (line.entity_id && materialId && qty != null && Number.isFinite(qty) && qty >= 0) {
+            model.issueQtyOverrides.set(`${line.entity_id}:${materialId}`, qty);
+          }
+        }
+        break;
+      case "production_qty":
+        for (const line of adjLines) {
+          const qty = line.quantity ?? (line.after_value ? Number(line.after_value) : undefined);
+          if (line.entity_id && qty != null && Number.isFinite(qty) && qty > 0) model.productionQtyOverrides.set(line.entity_id, qty);
+        }
+        break;
       case "process_fee_loss":
         for (const line of adjLines) {
-          const fee = line.unit_price ?? (line.after_value ? Number(line.after_value) : undefined);
-          if (line.entity_id && fee != null && Number.isFinite(fee)) model.processFeeOverrides.set(line.entity_id, fee);
+          const value = line.unit_price ?? (line.after_value ? Number(line.after_value) : undefined);
+          if (!line.entity_id || value == null || !Number.isFinite(value)) continue;
+          if (line.field_code === "loss_rate") model.lossRateOverrides.set(line.entity_id, value);
+          else model.processFeeOverrides.set(line.entity_id, value);
         }
         break;
       case "bom_ratio":
@@ -105,9 +146,11 @@ function applyAdjustments(model: AdjustedModel, adjustments: ParallelAdjustmentR
           const targetMaterial = line.target_material_id;
           const newQty = line.quantity ?? (line.after_value ? Number(line.after_value) : undefined);
           if (targetMaterial && newQty != null && Number.isFinite(newQty)) {
-            model.bomComponentOverrides.set(targetMaterial, newQty);
             const productId = line.entity_id;
-            if (productId) model.bomAddedComponents.push({ productId, materialId: targetMaterial, qtyPer: newQty, isPrimary: false });
+            if (productId) {
+              model.bomComponentOverrides.set(`${productId}:${targetMaterial}`, newQty);
+              model.bomAddedComponents.push({ productId, materialId: targetMaterial, qtyPer: newQty, isPrimary: false });
+            }
           }
         }
         break;
@@ -126,29 +169,31 @@ function effectiveMaterialId(model: AdjustedModel, materialId: string): string {
   return model.substituteMap.get(materialId) ?? materialId;
 }
 
-function activeBomLinesForProduct(model: AdjustedModel, productId: string): BomLineInput[] {
-  const lines = model.bomLines.filter((line) => str(line, "parent_product_id") === productId);
-  const removed = new Set(model.bomRemovedComponents.filter((r) => r.productId === productId).map((r) => r.materialId));
+function activeBomLines(model: AdjustedModel): BomLineInput[] {
   const inputs: BomLineInput[] = [];
   const seen = new Set<string>();
-  for (const line of lines) {
+  for (const line of model.bomLines) {
+    const parentProductId = str(line, "parent_product_id");
     const componentId = str(line, "component_id");
-    if (removed.has(componentId)) continue;
-    const effective = effectiveMaterialId(model, componentId);
-    const override = model.bomComponentOverrides.get(effective);
+    const removed = model.bomRemovedComponents.some((item) => item.productId === parentProductId && item.materialId === componentId);
+    if (removed) continue;
+    const componentType = str(line, "component_type", "material") as "material" | "product";
+    const effective = componentType === "material" ? effectiveMaterialId(model, componentId) : componentId;
+    const override = model.bomComponentOverrides.get(`${parentProductId}:${effective}`);
     inputs.push({
-      parentProductId: productId,
-      componentType: str(line, "component_type", "material") as "material" | "product",
+      parentProductId,
+      componentType,
       componentId: effective,
       qtyPer: override != null ? override : num(line, "qty_per", 0),
       isPrimary: Boolean(num(line, "is_primary", 0)),
     });
-    seen.add(effective);
+    seen.add(`${parentProductId}:${effective}`);
   }
-  for (const added of model.bomAddedComponents.filter((a) => a.productId === productId)) {
-    if (seen.has(added.materialId)) continue;
-    inputs.push({ parentProductId: productId, componentType: "material", componentId: added.materialId, qtyPer: added.qtyPer, isPrimary: added.isPrimary });
-    seen.add(added.materialId);
+  for (const added of model.bomAddedComponents) {
+    const key = `${added.productId}:${added.materialId}`;
+    if (seen.has(key)) continue;
+    inputs.push({ parentProductId: added.productId, componentType: "material", componentId: added.materialId, qtyPer: added.qtyPer, isPrimary: added.isPrimary });
+    seen.add(key);
   }
   return inputs;
 }
@@ -158,7 +203,11 @@ function batchesForMaterial(model: AdjustedModel, materialId: string): FifoBatch
   if (override != null) return [{ batchId: `override-${materialId}`, availableQty: override, receivedAt: "1970-01-01T00:00:00.000Z" }];
   return model.materialBatches
     .filter((batch) => str(batch, "material_id") === materialId && num(batch, "qty") > 0)
-    .map((batch) => ({ batchId: str(batch, "id"), availableQty: num(batch, "qty"), receivedAt: str(batch, "received_at", "") }));
+    .map((batch) => ({
+      batchId: str(batch, "id"),
+      availableQty: model.batchOverrides.get(str(batch, "id")) ?? num(batch, "qty"),
+      receivedAt: str(batch, "received_at", ""),
+    }));
 }
 
 function batchUnitCost(model: AdjustedModel, batchId: string, materialId: string): number {
@@ -211,10 +260,18 @@ function computeBaseline(model: AdjustedModel, productionOrder: NumberRow): { ma
   const productId = str(order, "product_id");
   const orderQty = num(order, "qty", 0);
   const product = model.products.get(productId);
+  const baselineLines: BomLineInput[] = model.bomLines.map((line) => ({
+    parentProductId: str(line, "parent_product_id"),
+    componentType: str(line, "component_type", "material") as "material" | "product",
+    componentId: str(line, "component_id"),
+    qtyPer: num(line, "qty_per", 0),
+    isPrimary: Boolean(num(line, "is_primary", 0)),
+  }));
+  const expansion = expandBom({ rootProductId: productId, quantity: orderQty, lines: baselineLines });
   let materialCost = 0;
-  for (const line of model.bomLines.filter((l) => str(l, "parent_product_id") === productId)) {
-    const material = model.materials.get(str(line, "component_id"));
-    materialCost = roundMoney(materialCost + orderQty * num(line, "qty_per", 0) * num(material, "average_cost", 0));
+  for (const demand of expansion.materials) {
+    const material = model.materials.get(demand.materialId);
+    materialCost = roundMoney(materialCost + demand.requiredQty * num(material, "average_cost", 0));
   }
   const processingCost = roundMoney(num(product, "process_fee", 0) * orderQty);
   return { materialCost, processingCost, total: roundMoney(materialCost + processingCost) };
@@ -268,48 +325,83 @@ export function runParallelCalculation(
     const gapByMaterial = new Map<string, GapResult>();
     const issuedByMaterial = new Map<string, number>();
     const projectedInbound = new Map<string, { qty: number; price: number }>();
+    const sharedBatchPool = new Map<string, FifoBatch[]>();
+    for (const materialId of model.materials.keys()) sharedBatchPool.set(materialId, batchesForMaterial(model, materialId));
 
-    for (const productionOrder of model.productionOrders) {
+    const addProjectedInbound = (materialId: string, qty: number, price: number) => {
+      if (qty <= 0) return;
+      const current = projectedInbound.get(materialId);
+      if (!current) projectedInbound.set(materialId, { qty: roundQty(qty), price });
+      else {
+        const nextQty = roundQty(current.qty + qty);
+        const nextPrice = nextQty > 0 ? roundMoney((current.qty * current.price + qty * price) / nextQty) : price;
+        projectedInbound.set(materialId, { qty: nextQty, price: nextPrice });
+      }
+    };
+
+    for (const [materialId, plannedQty] of model.projectedPurchaseQuantities.entries()) {
+      if (plannedQty <= 0) continue;
+      const price = projectedPurchasePrice(model, materialId);
+      addProjectedInbound(materialId, plannedQty, price);
+      const pool = sharedBatchPool.get(materialId) ?? [];
+      pool.push({ batchId: `planned-${materialId}`, availableQty: plannedQty, receivedAt: "9998-12-31T00:00:00.000Z" });
+      sharedBatchPool.set(materialId, pool);
+    }
+
+    const projectionOrders = [...model.productionOrders]
+      .filter((productionOrder) => !["shipped", "reversed", "voided", "cancelled"].includes(str(productionOrder, "status")))
+      .sort((a, b) => str(a, "created_at").localeCompare(str(b, "created_at")) || str(a, "id").localeCompare(str(b, "id")));
+
+    for (const productionOrder of projectionOrders) {
       const order = model.orders.get(str(productionOrder, "order_id"));
       if (!order) continue;
       const productId = str(order, "product_id");
-      const orderQty = num(order, "qty", 0);
+      const productionOrderId = str(productionOrder, "id");
+      const orderQty = model.productionQtyOverrides.get(productionOrderId) ?? num(order, "qty", 0);
       const product = model.products.get(productId);
-      const bomInputs = activeBomLinesForProduct(model, productId);
-      const expansion = expandBom({ rootProductId: productId, quantity: orderQty, lines: bomInputs });
+      const lossRate = model.lossRateOverrides.get(productId) ?? 0;
+      const bomInputs = activeBomLines(model);
+      const expansion = expandBom({ rootProductId: productId, quantity: roundQty(orderQty * (1 + lossRate)), lines: bomInputs });
       const baseline = computeBaseline(model, productionOrder);
       const projectedBatchId = (materialId: string) => `projected-${materialId}`;
 
       let materialCost = 0;
       for (const demand of expansion.materials) {
         const materialId = demand.materialId;
-        const requiredQty = demand.requiredQty;
-        const batches = batchesForMaterial(model, materialId);
+        const requiredQty = model.issueQtyOverrides.get(`${productionOrderId}:${materialId}`) ?? demand.requiredQty;
+        const batches = sharedBatchPool.get(materialId) ?? [];
         const firstPass = allocateFifo(batches, requiredQty);
         const price = projectedPurchasePrice(model, materialId);
 
         let finalAllocations = firstPass.allocations;
         if (firstPass.shortage > 0) {
-          const projectedBatches: FifoBatch[] = [...batches, { batchId: projectedBatchId(materialId), availableQty: firstPass.shortage, receivedAt: "9999-12-31T00:00:00.000Z" }];
-          finalAllocations = allocateFifo(projectedBatches, requiredQty).allocations;
-          projectedInbound.set(materialId, { qty: firstPass.shortage, price });
+          const projectedBatch: FifoBatch = { batchId: projectedBatchId(materialId), availableQty: firstPass.shortage, receivedAt: "9999-12-31T00:00:00.000Z" };
+          batches.push(projectedBatch);
+          finalAllocations = [...firstPass.allocations, { batchId: projectedBatch.batchId, qty: firstPass.shortage }];
+          addProjectedInbound(materialId, firstPass.shortage, price);
+          const currentGap = gapByMaterial.get(materialId);
+          const shortageQty = roundQty((currentGap?.shortageQty ?? 0) + firstPass.shortage);
+          const totalRequired = roundQty((currentGap?.requiredQty ?? 0) + requiredQty);
+          const totalAvailable = roundQty((currentGap?.availableQty ?? 0) + requiredQty - firstPass.shortage);
           gapByMaterial.set(materialId, {
             materialId,
-            requiredQty,
-            availableQty: roundQty(requiredQty - firstPass.shortage),
-            shortageQty: firstPass.shortage,
-            projectedPurchaseQty: firstPass.shortage,
+            requiredQty: totalRequired,
+            availableQty: totalAvailable,
+            shortageQty,
+            projectedPurchaseQty: shortageQty,
             projectedUnitCost: price,
-            lineAmount: roundMoney(firstPass.shortage * price),
+            lineAmount: roundMoney(shortageQty * price),
           });
         }
 
         for (const alloc of finalAllocations) {
-          const isProjected = alloc.batchId === projectedBatchId(materialId);
+          const isProjected = alloc.batchId === projectedBatchId(materialId) || alloc.batchId === `planned-${materialId}`;
           const unitCost = isProjected ? price : batchUnitCost(model, alloc.batchId, materialId);
           materialCost = roundMoney(materialCost + alloc.qty * unitCost);
-          allocations.push({ productionOrderId: str(productionOrder, "id"), materialId, batchId: alloc.batchId, allocatedQty: alloc.qty, unitCost, isProjected });
+          allocations.push({ productionOrderId, materialId, batchId: alloc.batchId, allocatedQty: alloc.qty, unitCost, isProjected });
           issuedByMaterial.set(materialId, roundQty((issuedByMaterial.get(materialId) ?? 0) + alloc.qty));
+          const batch = batches.find((item) => item.batchId === alloc.batchId);
+          if (batch) batch.availableQty = roundQty(Math.max(0, batch.availableQty - alloc.qty));
         }
       }
 
@@ -320,7 +412,7 @@ export function runParallelCalculation(
       const finishedQty = orderQty;
       const unitCost = finishedQty > 0 ? roundMoney(totalCost / finishedQty) : 0;
       const yieldRate = calculateYieldRate({ actualInboundQty: finishedQty, primaryIssuedQty: expansion.primaryMaterialQty });
-      costResults.push({ productionOrderId: str(productionOrder, "id"), productId, materialCost, processingCost, totalCost, finishedQty, unitCost, yieldRate, baselineMaterialCost: baseline.materialCost, baselineTotalCost: baseline.total });
+      costResults.push({ productionOrderId, productId, materialCost, processingCost, totalCost, finishedQty, unitCost, yieldRate, baselineMaterialCost: baseline.materialCost, baselineTotalCost: baseline.total });
     }
 
     const inventoryEnding = new Map<string, { qty: number; value: number; avgCost: number }>();
@@ -336,15 +428,15 @@ export function runParallelCalculation(
       const moved = calculateMovingAverage({ currentQty: ending.qty, currentAverageCost: ending.avgCost, incomingQty: inbound.qty, incomingUnitCost: inbound.price });
       ending.qty = roundQty(ending.qty + inbound.qty);
       ending.avgCost = moved.nextAverageCost;
+      ending.value = roundMoney(ending.qty * ending.avgCost);
     }
     for (const [materialId, issued] of issuedByMaterial.entries()) {
       const ending = inventoryEnding.get(materialId);
       if (!ending) continue;
-      ending.qty = roundQty(ending.qty - issued);
+      ending.qty = roundQty(Math.max(0, ending.qty - issued));
       ending.value = roundMoney(ending.qty * ending.avgCost);
     }
 
-    clearRunProjections(database, ledgerId);
     const runId = uid("PRUN");
     const inputHash = `${ledgerId}:v${ledger.working_version}:${adjustments.length}:${lines.length}`;
     const finishedAt = now();
@@ -359,29 +451,32 @@ export function runParallelCalculation(
       totalShortageAmount: roundMoney(Array.from(gapByMaterial.values()).reduce((s, g) => s + g.lineAmount, 0)),
     };
 
-    database
-      .prepare("INSERT INTO parallel_calculation_runs (id, ledger_id, ledger_version, engine_version, input_hash, status, started_at, finished_at, duration_ms, error_code, error_message, summary_json, created_at, stale) VALUES (?, ?, ?, ?, ?, 'succeeded', ?, ?, ?, NULL, NULL, ?, ?, 0)")
-      .run(runId, ledgerId, ledger.working_version, PARALLEL_ENGINE_VERSION, inputHash, startedAt, finishedAt, durationMs, JSON.stringify(summary), finishedAt);
+    const persist = database.transaction(() => {
+      clearRunProjections(database, ledgerId);
+      database
+        .prepare("INSERT INTO parallel_calculation_runs (id, ledger_id, ledger_version, engine_version, input_hash, status, started_at, finished_at, duration_ms, error_code, error_message, summary_json, created_at, stale) VALUES (?, ?, ?, ?, ?, 'succeeded', ?, ?, ?, NULL, NULL, ?, ?, 0)")
+        .run(runId, ledgerId, ledger.working_version, PARALLEL_ENGINE_VERSION, inputHash, startedAt, finishedAt, durationMs, JSON.stringify(summary), finishedAt);
 
-    const insertAllocation = database.prepare("INSERT INTO parallel_material_allocations (id, run_id, production_order_id, requirement_material_id, issued_material_id, batch_id, allocated_qty, unit_cost, allocation_type, source_adjustment_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
-    for (const alloc of allocations) {
-      insertAllocation.run(uid("PMA"), runId, alloc.productionOrderId, alloc.materialId, alloc.materialId, alloc.batchId, alloc.allocatedQty, alloc.unitCost, alloc.isProjected ? "projected_purchase" : "fifo", null);
-    }
+      const insertAllocation = database.prepare("INSERT INTO parallel_material_allocations (id, run_id, production_order_id, requirement_material_id, issued_material_id, batch_id, allocated_qty, unit_cost, allocation_type, source_adjustment_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+      for (const alloc of allocations) {
+        insertAllocation.run(uid("PMA"), runId, alloc.productionOrderId, alloc.materialId, alloc.materialId, alloc.batchId, alloc.allocatedQty, alloc.unitCost, alloc.isProjected ? "projected_purchase" : "fifo", null);
+      }
 
-    const insertCost = database.prepare("INSERT INTO parallel_cost_projections (id, run_id, production_order_id, product_id, material_cost, processing_cost, other_cost, total_cost, finished_qty, unit_cost, yield_rate) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)");
-    for (const cost of costResults) {
-      insertCost.run(uid("PCP"), runId, cost.productionOrderId, cost.productId, cost.materialCost, cost.processingCost, cost.totalCost, cost.finishedQty, cost.unitCost, cost.yieldRate);
-    }
+      const insertCost = database.prepare("INSERT INTO parallel_cost_projections (id, run_id, production_order_id, product_id, material_cost, processing_cost, other_cost, total_cost, finished_qty, unit_cost, yield_rate) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)");
+      for (const cost of costResults) {
+        insertCost.run(uid("PCP"), runId, cost.productionOrderId, cost.productId, cost.materialCost, cost.processingCost, cost.totalCost, cost.finishedQty, cost.unitCost, cost.yieldRate);
+      }
 
-    const insertInventory = database.prepare("INSERT INTO parallel_inventory_projections (id, run_id, ledger_id, warehouse_id, material_id, batch_id, batch_no, quantity, unit_cost, inventory_value, last_movement_at, projection_status) VALUES (?, ?, ?, NULL, ?, NULL, NULL, ?, ?, ?, ?, 'projected')");
-    for (const [materialId, ending] of inventoryEnding.entries()) {
-      insertInventory.run(uid("PIP"), runId, ledgerId, materialId, ending.qty, ending.avgCost, ending.value, finishedAt);
-    }
+      const insertInventory = database.prepare("INSERT INTO parallel_inventory_projections (id, run_id, ledger_id, warehouse_id, material_id, batch_id, batch_no, quantity, unit_cost, inventory_value, last_movement_at, projection_status) VALUES (?, ?, ?, NULL, ?, NULL, NULL, ?, ?, ?, ?, 'projected')");
+      for (const [materialId, ending] of inventoryEnding.entries()) {
+        insertInventory.run(uid("PIP"), runId, ledgerId, materialId, ending.qty, ending.avgCost, ending.value, finishedAt);
+      }
 
-    writeImpactsAndGaps(database, runId, ledgerId, costResults, gapByMaterial, adjustments, model);
-
-    database.prepare("UPDATE parallel_ledgers SET status = 'ready', engine_version = ?, updated_at = ? WHERE id = ?").run(PARALLEL_ENGINE_VERSION, finishedAt, ledgerId);
-    database.prepare("INSERT INTO audit_logs (id, actor_id, action, entity_type, entity_id, message, created_at) VALUES (?, ?, 'parallelLedgerRecalculate', 'parallel_ledger', ?, ?, ?)").run(uid("A"), actorId, ledgerId, `重新测算平行账套 ${ledger.ledger_code}：${JSON.stringify(summary)}`, finishedAt);
+      writeImpactsAndGaps(database, runId, ledgerId, costResults, gapByMaterial, adjustments, model);
+      database.prepare("UPDATE parallel_ledgers SET status = 'ready', engine_version = ?, updated_at = ? WHERE id = ?").run(PARALLEL_ENGINE_VERSION, finishedAt, ledgerId);
+      database.prepare("INSERT INTO audit_logs (id, actor_id, action, entity_type, entity_id, message, created_at) VALUES (?, ?, 'parallelLedgerRecalculate', 'parallel_ledger', ?, ?, ?)").run(uid("A"), actorId, ledgerId, `重新测算平行账套 ${ledger.ledger_code}：${JSON.stringify(summary)}`, finishedAt);
+    });
+    persist();
 
     return { runId, summary };
   } catch (error) {

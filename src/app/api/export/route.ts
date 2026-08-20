@@ -10,6 +10,7 @@ export const dynamic = "force-dynamic";
 export async function GET(request: NextRequest) {
   try {
     const actorId = actorIdFromRequest(request, request.nextUrl.searchParams.get("actorId") ?? undefined);
+    if (!actorId) return NextResponse.json({ error: "登录已失效，请重新登录。" }, { status: 401 });
     const rawType = request.nextUrl.searchParams.get("type") ?? "finance";
     const format = (request.nextUrl.searchParams.get("format") ?? "xlsx") as "xlsx" | "csv";
     const entityId = request.nextUrl.searchParams.get("entityId") ?? undefined;

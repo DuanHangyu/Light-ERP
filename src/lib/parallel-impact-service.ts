@@ -91,11 +91,14 @@ export function previewParallelMerge(database: Database.Database, actorId: strin
   }
 
   const blocking = conflicts.length > 0;
+  const preview = { ledgerId, ledgerVersion: ledger.working_version, conflicts, diffItems, blocking };
+  database.prepare("UPDATE parallel_ledgers SET last_merge_preview_json = ?, last_merge_preview_at = ?, updated_at = ? WHERE id = ?")
+    .run(JSON.stringify(preview), nowIso, nowIso, ledgerId);
   audit(database, actorId, "parallelLedgerMergePreview", "parallel_ledger", ledgerId, `合并预览 ${ledger.ledger_code}：${conflicts.length} 个冲突，${diffItems.length} 个差异${blocking ? "（存在阻断）" : ""}`);
   void ledger.base_revision;
   void nowIso;
   void loadSnapshotStore;
-  return { ledgerId, ledgerVersion: ledger.working_version, conflicts, diffItems, blocking };
+  return preview;
 }
 
 function computeHash(row: Record<string, unknown>): string {

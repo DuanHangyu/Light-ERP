@@ -27,6 +27,7 @@ import {
   ShieldCheck,
   Truck,
   Upload,
+  Users,
   Warehouse,
   X,
 } from "lucide-react";
@@ -320,6 +321,7 @@ type Snapshot = {
   };
   parallel: {
     ledgers: Row[];
+    members: Row[];
     adjustments: Row[];
     adjustmentLines: Row[];
     runs: Row[];
@@ -332,6 +334,7 @@ type Snapshot = {
     mergeConflicts: Row[];
     mergeRequests: Row[];
     mergeItems: Row[];
+    publishedCorrections: Row[];
   };
 };
 
@@ -12796,7 +12799,7 @@ const PARALLEL_STATUS_LABELS: Record<string, string> = {
   merge_rejected: "合并已驳回",
   conflicted: "存在冲突",
   publishing: "发布中",
-  merged: "已合并",
+  merged: "已发布纠错单",
   archived: "已归档",
   discarded: "已放弃",
 };
@@ -12804,8 +12807,13 @@ const PARALLEL_STATUS_LABELS: Record<string, string> = {
 const PARALLEL_ADJUSTMENT_TYPES: Array<{ value: string; label: string }> = [
   { value: "bom_ratio", label: "配方比例调整" },
   { value: "purchase_price", label: "采购价格调整" },
+  { value: "purchase_qty", label: "采购数量调整" },
   { value: "material_substitute", label: "物料替换" },
   { value: "inventory_qty", label: "库存数量调整" },
+  { value: "batch_adjust", label: "批次数量调整" },
+  { value: "issue_qty", label: "工单领料数量调整" },
+  { value: "production_qty", label: "工单产量调整" },
+  { value: "effective_date", label: "业务生效日期调整" },
   { value: "process_fee_loss", label: "加工费/损耗率调整" },
 ];
 
@@ -12835,10 +12843,22 @@ function ParallelLedgerModule({
   const [selectedId, setSelectedId] = useState<string>("");
   const [showCreate, setShowCreate] = useState(false);
   const [showAdjust, setShowAdjust] = useState(false);
-  const [subTab, setSubTab] = useState<"overview" | "adjust" | "impact" | "gap" | "diff" | "export" | "merge" | "compare" | "monitor">("overview");
+  const [subTab, setSubTab] = useState<"overview" | "adjust" | "impact" | "gap" | "diff" | "export" | "merge" | "members" | "compare" | "monitor">("overview");
   const [compareTargetId, setCompareTargetId] = useState<string>("");
-  const [createForm, setCreateForm] = useState({ name: "", purpose: "经营数据测算", base_as_of: new Date().toISOString().slice(0, 10), scope_type: "company", merge_allowed: 1, seed_demo: false });
-  const [adjustForm, setAdjustForm] = useState({ adjustment_type: "bom_ratio", effective_at: new Date().toISOString().slice(0, 10), reason: "", reference_id: "P-PAL-DEMO", linesText: '[{"entity_type":"product","entity_id":"P-PAL-DEMO","field_code":"qty_per","target_material_id":"M-PAL-A","quantity":0.6},{"entity_type":"product","entity_id":"P-PAL-DEMO","field_code":"qty_per","target_material_id":"M-PAL-B","quantity":0.2}]' });
+  const [memberForm, setMemberForm] = useState({ user_id: "", member_role: "calculator" });
+  const [createForm, setCreateForm] = useState({ name: "", purpose: "经营数据测算", base_as_of: new Date().toISOString().slice(0, 10), scope_type: "company", scope_entity_id: "", merge_allowed: 1, seed_demo: false });
+  const [adjustForm, setAdjustForm] = useState({
+    adjustment_type: "bom_ratio",
+    effective_at: new Date().toISOString().slice(0, 10),
+    reason: "",
+    entity_id: "",
+    source_material_id: "",
+    target_material_id: "",
+    batch_id: "",
+    quantity: "",
+    unit_price: "",
+    field_code: "qty_per",
+  });
 
   const selected = parallel.ledgers.find((l) => String(l.id) === selectedId) as Row | undefined;
   const ledgerAdjustments = parallel.adjustments.filter((a) => String(a.ledger_id) === selectedId);
@@ -12849,10 +12869,54 @@ function ParallelLedgerModule({
   const impacts = parallel.impacts.filter((i) => String(i.run_id) === runId);
   const gaps = parallel.gaps.filter((g) => String(g.run_id) === runId);
   const suggestions = parallel.suggestions.filter((s) => String(s.ledger_id) === selectedId);
-  const conflicts = parallel.mergeConflicts.filter((c) => true);
+  const conflicts = parallel.mergeConflicts.filter((c) => !c.ledger_id || String(c.ledger_id) === selectedId);
   const ledgerMergeRequest = parallel.mergeRequests.find((m) => String(m.ledger_id) === selectedId) as Row | undefined;
   const mergeItems = ledgerMergeRequest ? parallel.mergeItems.filter((i) => String(i.merge_request_id) === String(ledgerMergeRequest.id)) : [];
+  const ledgerMembers = parallel.members.filter((member) => String(member.ledger_id) === selectedId);
   const canApproveMerge = ["manager", "admin"].includes(snapshot.currentUser.role);
+  const scopeOptions: Row[] = createForm.scope_type === "production_order"
+    ? snapshot.board.productions
+    : createForm.scope_type === "order"
+      ? snapshot.board.orders
+      : createForm.scope_type === "product"
+        ? snapshot.board.products
+        : createForm.scope_type === "material"
+          ? snapshot.board.materials
+          : [];
+  const scopeOptionLabel = (row: Row) => String(
+    row.prod_no ?? row.order_no ?? row.product_code ?? row.material_code ?? row.name ?? row.id,
+  );
+  const adjustmentMaterials = snapshot.board.materials;
+  const adjustmentProducts = snapshot.board.products;
+  const adjustmentProductions = snapshot.board.productions;
+  const adjustmentBatches = snapshot.board.batches;
+  const selectLabel = (row: Row) => String(row.name ?? row.material_name ?? row.product_name ?? row.prod_no ?? row.batch_no ?? row.id);
+  const adjustmentLines = () => {
+    const quantity = adjustForm.quantity === "" ? undefined : Number(adjustForm.quantity);
+    const unitPrice = adjustForm.unit_price === "" ? undefined : Number(adjustForm.unit_price);
+    switch (adjustForm.adjustment_type) {
+      case "bom_ratio":
+        return [{ entity_type: "product", entity_id: adjustForm.entity_id, field_code: "qty_per", target_material_id: adjustForm.target_material_id, quantity }];
+      case "material_substitute":
+        return [{ entity_type: "product", entity_id: adjustForm.entity_id, field_code: "material_id", source_material_id: adjustForm.source_material_id, target_material_id: adjustForm.target_material_id }];
+      case "purchase_price":
+        return [{ entity_type: "material", entity_id: adjustForm.target_material_id, field_code: "purchase_price", target_material_id: adjustForm.target_material_id, unit_price: unitPrice }];
+      case "purchase_qty":
+        return [{ entity_type: "material", entity_id: adjustForm.target_material_id, field_code: "purchase_qty", target_material_id: adjustForm.target_material_id, quantity, unit_price: unitPrice }];
+      case "inventory_qty":
+        return [{ entity_type: "material", entity_id: adjustForm.target_material_id, field_code: "stock_qty", target_material_id: adjustForm.target_material_id, quantity }];
+      case "batch_adjust":
+        return [{ entity_type: "material_batch", entity_id: adjustForm.batch_id, field_code: "qty", quantity }];
+      case "issue_qty":
+        return [{ entity_type: "production_order", entity_id: adjustForm.entity_id, field_code: "issued_qty", target_material_id: adjustForm.target_material_id, quantity }];
+      case "production_qty":
+        return [{ entity_type: "production_order", entity_id: adjustForm.entity_id, field_code: "qty", quantity }];
+      case "process_fee_loss":
+        return [{ entity_type: "product", entity_id: adjustForm.entity_id, field_code: adjustForm.field_code, after_value: adjustForm.field_code === "loss_rate" ? quantity : unitPrice, quantity: adjustForm.field_code === "loss_rate" ? quantity : undefined, unit_price: adjustForm.field_code === "process_fee" ? unitPrice : undefined }];
+      default:
+        return [{ entity_type: "parallel_ledger", entity_id: selectedId, field_code: "effective_at", after_value: adjustForm.effective_at }];
+    }
+  };
 
   const downloadExport = (type: string) => {
     if (!selectedId) return;
@@ -12870,12 +12934,13 @@ function ParallelLedgerModule({
             <label className="text-sm text-slate-600">账套名称<input value={createForm.name} onChange={(e) => setCreateForm({ ...createForm, name: e.target.value })} className="mt-1 block h-9 w-full rounded-md border border-slate-200 px-3 text-sm" placeholder="如：B 替代料测算" /></label>
             <label className="text-sm text-slate-600">用途说明<input value={createForm.purpose} onChange={(e) => setCreateForm({ ...createForm, purpose: e.target.value })} className="mt-1 block h-9 w-full rounded-md border border-slate-200 px-3 text-sm" /></label>
             <label className="text-sm text-slate-600">基准日期<input type="date" value={createForm.base_as_of} onChange={(e) => setCreateForm({ ...createForm, base_as_of: e.target.value })} className="mt-1 block h-9 w-full rounded-md border border-slate-200 px-3 text-sm" /></label>
-            <label className="text-sm text-slate-600">测算范围<select value={createForm.scope_type} onChange={(e) => setCreateForm({ ...createForm, scope_type: e.target.value })} className="mt-1 block h-9 w-full rounded-md border border-slate-200 px-3 text-sm"><option value="company">全公司</option><option value="production_order">指定生产工单</option><option value="product">指定产品</option><option value="material">指定物料</option></select></label>
+            <label className="text-sm text-slate-600">测算范围<select value={createForm.scope_type} onChange={(e) => setCreateForm({ ...createForm, scope_type: e.target.value, scope_entity_id: "" })} className="mt-1 block h-9 w-full rounded-md border border-slate-200 px-3 text-sm"><option value="company">全公司</option><option value="production_order">指定生产工单</option><option value="order">指定销售订单</option><option value="product">指定产品</option><option value="material">指定物料</option></select></label>
+            {createForm.scope_type !== "company" ? <label className="text-sm text-slate-600">具体对象<select value={createForm.scope_entity_id} onChange={(e) => setCreateForm({ ...createForm, scope_entity_id: e.target.value })} className="mt-1 block h-9 w-full rounded-md border border-slate-200 px-3 text-sm"><option value="">请选择</option>{scopeOptions.map((row) => <option key={String(row.id)} value={String(row.id)}>{scopeOptionLabel(row)} · {String(row.name ?? row.product_name ?? row.customer_name ?? row.id)}</option>)}</select></label> : null}
             <label className="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" checked={createForm.merge_allowed === 1} onChange={(e) => setCreateForm({ ...createForm, merge_allowed: e.target.checked ? 1 : 0 })} />允许申请合并</label>
             <label className="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" checked={createForm.seed_demo} onChange={(e) => setCreateForm({ ...createForm, seed_demo: e.target.checked })} />同时注入演示数据（原料 A/B/C + 成品 P + BOM A8+C2 + 工单）</label>
           </div>
           <div className="mt-5 flex gap-2">
-            <button type="button" disabled={loadingDemo} onClick={() => { void runAction({ action: "parallelLedgerCreate", payload: { ...createForm } }); setShowCreate(false); }} className="inline-flex h-9 items-center rounded-md bg-blue-600 px-4 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-50">创建账套</button>
+            <button type="button" disabled={loadingDemo || (createForm.scope_type !== "company" && !createForm.scope_entity_id)} onClick={() => { const { scope_entity_id, ...baseForm } = createForm; void runAction({ action: "parallelLedgerCreate", payload: { ...baseForm, scope_entities: createForm.scope_type === "company" ? [] : [{ scope_entity_type: createForm.scope_type, scope_entity_id, include_children: 1 }] } }); setShowCreate(false); }} className="inline-flex h-9 items-center rounded-md bg-blue-600 px-4 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-50">创建账套</button>
             <button type="button" onClick={() => setShowCreate(false)} className="inline-flex h-9 items-center rounded-md border border-slate-200 bg-white px-4 text-sm font-semibold text-slate-600">取消</button>
           </div>
         </div>
@@ -12917,7 +12982,7 @@ function ParallelLedgerModule({
         <div className="flex flex-wrap items-center gap-3 text-sm">
           <span className="rounded-md bg-amber-200 px-2 py-0.5 text-xs font-semibold text-amber-900">当前为测算环境</span>
           <span className="font-semibold text-slate-900">{String(selected.name)}</span>
-          <span className="text-slate-500">{String(selected.ledger_code)} · 基准 {String(selected.base_as_of)} · v{String(selected.working_version)} · {PARALLEL_STATUS_LABELS[status] ?? status}</span>
+          <span className="text-slate-500">{String(selected.ledger_code)} · 基准 {String(selected.base_as_of)} · v{String(selected.working_version)} · {PARALLEL_STATUS_LABELS[status] ?? status} · {Number(selected.merge_allowed) ? "允许申请合并" : "仅测算"}</span>
         </div>
         <button type="button" onClick={() => setSelectedId("")} className="rounded-md border border-slate-200 bg-white px-3 py-1 text-xs font-semibold text-slate-600">返回列表</button>
       </div>
@@ -12927,8 +12992,9 @@ function ParallelLedgerModule({
         <button type="button" disabled={busy?.startsWith("parallelLedger")} onClick={() => void runAction({ action: "parallelLedgerFreeze", entityId: selectedId })} className="rounded-md border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:border-blue-300 disabled:opacity-50">冻结版本</button>
         <button type="button" disabled={busy?.startsWith("parallelLedger")} onClick={() => void runAction({ action: "parallelLedgerUnfreeze", entityId: selectedId })} className="rounded-md border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:border-blue-300 disabled:opacity-50">解冻修改</button>
         <button type="button" disabled={busy?.startsWith("parallelLedger")} onClick={() => void runAction({ action: "parallelLedgerMergePreview", entityId: selectedId })} className="rounded-md border border-blue-300 bg-blue-50 px-3 py-1.5 text-xs font-semibold text-blue-700 hover:bg-blue-100 disabled:opacity-50">合并预览</button>
-        <button type="button" disabled={busy?.startsWith("parallelLedger") || status !== "frozen"} onClick={() => void runAction({ action: "parallelLedgerSubmitMerge", entityId: selectedId })} className="rounded-md border border-indigo-300 bg-indigo-50 px-3 py-1.5 text-xs font-semibold text-indigo-700 hover:bg-indigo-100 disabled:opacity-50">提交合并</button>
-        {ledgerMergeRequest && String(ledgerMergeRequest.status) === "merge_pending" && canApproveMerge ? (
+        {["conflicted", "merge_rejected"].includes(status) ? <button type="button" disabled={busy?.startsWith("parallelLedger")} onClick={() => void runAction({ action: "parallelLedgerRebase", entityId: selectedId })} className="rounded-md border border-amber-300 bg-amber-50 px-3 py-1.5 text-xs font-semibold text-amber-800 hover:bg-amber-100 disabled:opacity-50">吸收正式变更并重新基线</button> : null}
+        <button type="button" disabled={busy?.startsWith("parallelLedger") || status !== "frozen" || !Number(selected.merge_allowed)} onClick={() => void runAction({ action: "parallelLedgerSubmitMerge", entityId: selectedId })} className="rounded-md border border-indigo-300 bg-indigo-50 px-3 py-1.5 text-xs font-semibold text-indigo-700 hover:bg-indigo-100 disabled:opacity-50">提交合并</button>
+        {ledgerMergeRequest && String(ledgerMergeRequest.status) === "merge_pending" && canApproveMerge && String(ledgerMergeRequest.submitted_by) !== snapshot.currentUser.id ? (
           <>
             <button type="button" disabled={busy?.startsWith("parallelLedger")} onClick={() => void runAction({ action: "parallelLedgerApproveMerge", entityId: String(ledgerMergeRequest.id) })} className="rounded-md border border-emerald-300 bg-emerald-50 px-3 py-1.5 text-xs font-semibold text-emerald-700 hover:bg-emerald-100 disabled:opacity-50">同意合并</button>
             <button type="button" disabled={busy?.startsWith("parallelLedger")} onClick={() => void runAction({ action: "parallelLedgerRejectMerge", entityId: String(ledgerMergeRequest.id), payload: { approval_note: "驳回" } })} className="rounded-md border border-rose-200 bg-rose-50 px-3 py-1.5 text-xs font-semibold text-rose-700 hover:bg-rose-50 disabled:opacity-50">驳回合并</button>
@@ -12942,7 +13008,7 @@ function ParallelLedgerModule({
       </div>
 
       <div className="flex flex-wrap gap-2 border-b border-slate-200">
-        {([["overview", "总览"], ["adjust", "调整工作区"], ["impact", "影响分析"], ["gap", "缺口与建议"], ["diff", "差异对比"], ["export", "报表导出"], ["merge", "合并中心"], ["compare", "方案对比"], ["monitor", "运维监控"]] as const).map(([key, label]) => (
+        {([["overview", "总览"], ["adjust", "调整工作区"], ["impact", "影响分析"], ["gap", "缺口与建议"], ["diff", "差异对比"], ["export", "报表导出"], ["merge", "合并中心"], ["members", "成员权限"], ["compare", "方案对比"], ["monitor", "运维监控"]] as const).map(([key, label]) => (
           <button key={key} type="button" onClick={() => setSubTab(key)} className={`border-b-2 px-3 py-2 text-sm font-medium ${subTab === key ? "border-blue-600 text-blue-700" : "border-transparent text-slate-500 hover:text-slate-700"}`}>{label}</button>
         ))}
       </div>
@@ -12983,14 +13049,20 @@ function ParallelLedgerModule({
             <div className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
               <h3 className="text-sm font-semibold text-slate-900">新增调整项</h3>
               <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-2">
-                <label className="text-sm text-slate-600">调整类型<select value={adjustForm.adjustment_type} onChange={(e) => setAdjustForm({ ...adjustForm, adjustment_type: e.target.value })} className="mt-1 block h-9 w-full rounded-md border border-slate-200 px-3 text-sm">{PARALLEL_ADJUSTMENT_TYPES.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}</select></label>
+                <label className="text-sm text-slate-600">调整类型<select value={adjustForm.adjustment_type} onChange={(e) => setAdjustForm({ ...adjustForm, adjustment_type: e.target.value, entity_id: "", source_material_id: "", target_material_id: "", batch_id: "", quantity: "", unit_price: "" })} className="mt-1 block h-9 w-full rounded-md border border-slate-200 px-3 text-sm">{PARALLEL_ADJUSTMENT_TYPES.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}</select></label>
                 <label className="text-sm text-slate-600">生效日期<input type="date" value={adjustForm.effective_at} onChange={(e) => setAdjustForm({ ...adjustForm, effective_at: e.target.value })} className="mt-1 block h-9 w-full rounded-md border border-slate-200 px-3 text-sm" /></label>
                 <label className="text-sm text-slate-600">原因<input value={adjustForm.reason} onChange={(e) => setAdjustForm({ ...adjustForm, reason: e.target.value })} className="mt-1 block h-9 w-full rounded-md border border-slate-200 px-3 text-sm" placeholder="如：B 替代部分 A" /></label>
-                <label className="text-sm text-slate-600">关联产品<input value={adjustForm.reference_id} onChange={(e) => setAdjustForm({ ...adjustForm, reference_id: e.target.value })} className="mt-1 block h-9 w-full rounded-md border border-slate-200 px-3 text-sm" /></label>
+                {["bom_ratio", "material_substitute", "process_fee_loss"].includes(adjustForm.adjustment_type) ? <label className="text-sm text-slate-600">产品<select value={adjustForm.entity_id} onChange={(e) => setAdjustForm({ ...adjustForm, entity_id: e.target.value })} className="mt-1 block h-9 w-full rounded-md border border-slate-200 px-3 text-sm"><option value="">请选择产品</option>{adjustmentProducts.map((row) => <option key={String(row.id)} value={String(row.id)}>{selectLabel(row)}</option>)}</select></label> : null}
+                {["issue_qty", "production_qty"].includes(adjustForm.adjustment_type) ? <label className="text-sm text-slate-600">生产工单<select value={adjustForm.entity_id} onChange={(e) => setAdjustForm({ ...adjustForm, entity_id: e.target.value })} className="mt-1 block h-9 w-full rounded-md border border-slate-200 px-3 text-sm"><option value="">请选择工单</option>{adjustmentProductions.map((row) => <option key={String(row.id)} value={String(row.id)}>{String(row.prod_no ?? row.id)}</option>)}</select></label> : null}
+                {adjustForm.adjustment_type === "material_substitute" ? <label className="text-sm text-slate-600">原物料<select value={adjustForm.source_material_id} onChange={(e) => setAdjustForm({ ...adjustForm, source_material_id: e.target.value })} className="mt-1 block h-9 w-full rounded-md border border-slate-200 px-3 text-sm"><option value="">请选择原物料</option>{adjustmentMaterials.map((row) => <option key={String(row.id)} value={String(row.id)}>{selectLabel(row)}</option>)}</select></label> : null}
+                {["bom_ratio", "material_substitute", "purchase_price", "purchase_qty", "inventory_qty", "issue_qty"].includes(adjustForm.adjustment_type) ? <label className="text-sm text-slate-600">{adjustForm.adjustment_type === "material_substitute" ? "替代物料" : "物料"}<select value={adjustForm.target_material_id} onChange={(e) => setAdjustForm({ ...adjustForm, target_material_id: e.target.value })} className="mt-1 block h-9 w-full rounded-md border border-slate-200 px-3 text-sm"><option value="">请选择物料</option>{adjustmentMaterials.map((row) => <option key={String(row.id)} value={String(row.id)}>{selectLabel(row)}</option>)}</select></label> : null}
+                {adjustForm.adjustment_type === "batch_adjust" ? <label className="text-sm text-slate-600">库存批次<select value={adjustForm.batch_id} onChange={(e) => setAdjustForm({ ...adjustForm, batch_id: e.target.value })} className="mt-1 block h-9 w-full rounded-md border border-slate-200 px-3 text-sm"><option value="">请选择批次</option>{adjustmentBatches.map((row) => <option key={String(row.id)} value={String(row.id)}>{String(row.batch_no ?? row.id)} · {selectLabel(row)}</option>)}</select></label> : null}
+                {adjustForm.adjustment_type === "process_fee_loss" ? <label className="text-sm text-slate-600">调整口径<select value={adjustForm.field_code} onChange={(e) => setAdjustForm({ ...adjustForm, field_code: e.target.value })} className="mt-1 block h-9 w-full rounded-md border border-slate-200 px-3 text-sm"><option value="process_fee">加工费</option><option value="loss_rate">损耗率</option></select></label> : null}
+                {["bom_ratio", "purchase_qty", "inventory_qty", "batch_adjust", "issue_qty", "production_qty"].includes(adjustForm.adjustment_type) || (adjustForm.adjustment_type === "process_fee_loss" && adjustForm.field_code === "loss_rate") ? <label className="text-sm text-slate-600">{adjustForm.adjustment_type === "bom_ratio" ? "单位配比" : adjustForm.field_code === "loss_rate" ? "损耗率（小数）" : "调整数量"}<input type="number" min="0" step="0.001" value={adjustForm.quantity} onChange={(e) => setAdjustForm({ ...adjustForm, quantity: e.target.value })} className="mt-1 block h-9 w-full rounded-md border border-slate-200 px-3 text-sm" /></label> : null}
+                {["purchase_price", "purchase_qty"].includes(adjustForm.adjustment_type) || (adjustForm.adjustment_type === "process_fee_loss" && adjustForm.field_code === "process_fee") ? <label className="text-sm text-slate-600">{adjustForm.adjustment_type === "process_fee_loss" ? "单位加工费" : "预计采购单价"}<input type="number" min="0" step="0.01" value={adjustForm.unit_price} onChange={(e) => setAdjustForm({ ...adjustForm, unit_price: e.target.value })} className="mt-1 block h-9 w-full rounded-md border border-slate-200 px-3 text-sm" /></label> : null}
               </div>
-              <label className="mt-3 block text-sm text-slate-600">调整明细（JSON，每行 entity_type/entity_id/field_code/target_material_id/quantity/unit_price）<textarea value={adjustForm.linesText} onChange={(e) => setAdjustForm({ ...adjustForm, linesText: e.target.value })} rows={5} className="mt-1 block w-full rounded-md border border-slate-200 p-2 font-mono text-xs" /></label>
               <div className="mt-3 flex gap-2">
-                <button type="button" disabled={busy?.startsWith("parallelLedger")} onClick={() => { try { const lines = JSON.parse(adjustForm.linesText); void runAction({ action: "parallelLedgerAddAdjustment", entityId: selectedId, payload: { adjustment_type: adjustForm.adjustment_type, effective_at: adjustForm.effective_at, reason: adjustForm.reason || (PARALLEL_ADJUSTMENT_TYPES.find((t) => t.value === adjustForm.adjustment_type)?.label ?? ""), reference_id: adjustForm.reference_id, lines } }); setShowAdjust(false); } catch { alert("调整明细 JSON 格式错误"); } }} className="inline-flex h-9 items-center rounded-md bg-blue-600 px-4 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-50">保存调整</button>
+                <button type="button" disabled={busy?.startsWith("parallelLedger")} onClick={() => { void runAction({ action: "parallelLedgerAddAdjustment", entityId: selectedId, payload: { adjustment_type: adjustForm.adjustment_type, effective_at: adjustForm.effective_at, reason: adjustForm.reason || (PARALLEL_ADJUSTMENT_TYPES.find((t) => t.value === adjustForm.adjustment_type)?.label ?? ""), reference_type: adjustForm.adjustment_type, reference_id: adjustForm.entity_id || adjustForm.target_material_id || adjustForm.batch_id, lines: adjustmentLines() } }); setShowAdjust(false); }} className="inline-flex h-9 items-center rounded-md bg-blue-600 px-4 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-50">保存调整</button>
                 <button type="button" onClick={() => setShowAdjust(false)} className="inline-flex h-9 items-center rounded-md border border-slate-200 bg-white px-4 text-sm font-semibold text-slate-600">取消</button>
               </div>
             </div>
@@ -13050,7 +13122,22 @@ function ParallelLedgerModule({
             ) : <EmptyText text="尚未提交合并。请先冻结版本并接受建议后，点击「提交合并」。" />}
           </div>
           <DataTable title="纠错单据包" icon={FileCheck2} rows={mergeItems} columns={[{ key: "sequence_no", label: "序号" }, { key: "document_type", label: "单据类型" }, { key: "action_type", label: "动作" }, { key: "publish_status", label: "发布状态" }, { key: "published_document_id", label: "正式单据号", render: (v) => (v ? String(v) : "—") }]} empty="无纠错单据" />
+          <DataTable title="已发布正式纠错单" icon={FileCheck2} rows={parallel.publishedCorrections.filter((row) => String(row.source_ledger_id) === selectedId)} columns={[{ key: "correction_no", label: "纠错单号" }, { key: "correction_type", label: "类型" }, { key: "target_entity_id", label: "业务对象" }, { key: "status", label: "执行状态" }, { key: "created_at", label: "发布时间" }]} empty="暂无正式纠错单" />
           {conflicts.length > 0 ? <DataTable title="合并冲突" icon={AlertTriangle} rows={conflicts} columns={[{ key: "entity_type", label: "对象类型" }, { key: "entity_id", label: "对象" }, { key: "conflict_type", label: "冲突类型" }]} /> : null}
+        </div>
+      ) : null}
+
+      {subTab === "members" ? (
+        <div className="space-y-4">
+          <div className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+            <h3 className="text-sm font-semibold text-slate-900">授权账套成员</h3>
+            <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-[minmax(0,1fr)_220px_auto]">
+              <select value={memberForm.user_id} onChange={(event) => setMemberForm({ ...memberForm, user_id: event.target.value })} className="h-9 rounded-md border border-slate-200 px-3 text-sm"><option value="">选择用户</option>{snapshot.users.filter((user) => user.status === "active" && String(user.id) !== String(selected.owner_user_id)).map((user) => <option key={user.id} value={user.id}>{user.name} · {user.role_label}</option>)}</select>
+              <select value={memberForm.member_role} onChange={(event) => setMemberForm({ ...memberForm, member_role: event.target.value })} className="h-9 rounded-md border border-slate-200 px-3 text-sm"><option value="viewer">观察员</option><option value="calculator">测算员</option><option value="approver">审批人</option><option value="publisher">发布人</option><option value="ledger_admin">账套管理员</option></select>
+              <button type="button" disabled={!memberForm.user_id || busy?.startsWith("parallelLedger")} onClick={() => { const role = memberForm.member_role; void runAction({ action: "parallelLedgerUpsertMember", entityId: selectedId, payload: { user_id: memberForm.user_id, member_role: role, view: true, export: ["viewer", "calculator", "ledger_admin"].includes(role), adjust: ["calculator", "ledger_admin"].includes(role), recalculate: ["calculator", "ledger_admin"].includes(role), freeze: ["calculator", "ledger_admin"].includes(role), submit_merge: ["calculator", "ledger_admin"].includes(role), approve_merge: ["approver", "ledger_admin"].includes(role), publish_merge: ["publisher", "ledger_admin"].includes(role), archive: role === "ledger_admin", discard: role === "ledger_admin", admin: role === "ledger_admin" } }); }} className="h-9 rounded-md bg-blue-600 px-4 text-sm font-semibold text-white disabled:opacity-50">保存授权</button>
+            </div>
+          </div>
+          <DataTable title="成员权限矩阵" icon={Users} rows={ledgerMembers} columns={[{ key: "user_name", label: "成员" }, { key: "role_label", label: "系统角色" }, { key: "member_role", label: "账套角色" }, { key: "permissions", label: "已授权能力", render: (_value, row) => [["can_view", "查看"], ["can_adjust", "调整"], ["can_recalculate", "重算"], ["can_export", "导出"], ["can_freeze", "冻结"], ["can_submit_merge", "提交"], ["can_approve_merge", "审批"], ["can_publish_merge", "发布"], ["can_admin", "管理"]].filter(([key]) => Number(row[key]) === 1).map(([, label]) => label).join("、") }]} empty="暂无授权成员" />
         </div>
       ) : null}
 

@@ -1487,6 +1487,27 @@ function applySchema(database: Database.Database) {
       UNIQUE (merge_request_id, sequence_no)
     );
 
+    CREATE TABLE IF NOT EXISTS formal_correction_orders (
+      id TEXT PRIMARY KEY,
+      correction_no TEXT NOT NULL UNIQUE,
+      correction_type TEXT NOT NULL,
+      source_type TEXT NOT NULL DEFAULT 'parallel_merge',
+      source_ledger_id TEXT NOT NULL REFERENCES parallel_ledgers(id),
+      source_merge_request_id TEXT NOT NULL REFERENCES parallel_merge_requests(id),
+      source_merge_item_id TEXT NOT NULL UNIQUE REFERENCES parallel_merge_items(id),
+      target_entity_type TEXT NOT NULL DEFAULT '',
+      target_entity_id TEXT NOT NULL DEFAULT '',
+      payload_json TEXT NOT NULL DEFAULT '{}',
+      status TEXT NOT NULL DEFAULT 'pending_execution',
+      created_by TEXT NOT NULL REFERENCES users(id),
+      created_at TEXT NOT NULL,
+      executed_by TEXT REFERENCES users(id),
+      executed_at TEXT,
+      resulting_document_type TEXT,
+      resulting_document_id TEXT,
+      execution_note TEXT NOT NULL DEFAULT ''
+    );
+
     CREATE TABLE IF NOT EXISTS parallel_merge_conflicts (
       id TEXT PRIMARY KEY,
       merge_request_id TEXT NOT NULL REFERENCES parallel_merge_requests(id),
@@ -1597,6 +1618,8 @@ function applySchema(database: Database.Database) {
   ensureColumn(database, "parallel_ledger_members", "can_archive", "INTEGER NOT NULL DEFAULT 0");
   ensureColumn(database, "parallel_ledger_members", "can_discard", "INTEGER NOT NULL DEFAULT 0");
   ensureColumn(database, "parallel_ledger_members", "can_admin", "INTEGER NOT NULL DEFAULT 0");
+  ensureColumn(database, "parallel_ledgers", "last_merge_preview_json", "TEXT NOT NULL DEFAULT '{}'");
+  ensureColumn(database, "parallel_ledgers", "last_merge_preview_at", "TEXT");
   backfillInventoryMovementDates(database);
 }
 

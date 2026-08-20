@@ -16,9 +16,8 @@ export async function POST(request: NextRequest) {
       payload?: Record<string, unknown>;
     };
     const actorId = actorIdFromRequest(request, body.actorId);
-    if (!actorId || !body.action) {
-      return NextResponse.json({ error: "缺少账号或操作。" }, { status: 400 });
-    }
+    if (!actorId) return NextResponse.json({ error: "登录已失效，请重新登录。" }, { status: 401 });
+    if (!body.action) return NextResponse.json({ error: "缺少操作。" }, { status: 400 });
     performAction({
       actorId,
       action: body.action,

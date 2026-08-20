@@ -26,7 +26,7 @@ import {
 import { getDb, resetDemoDatabase } from "./db";
 import { ensureDataDirs, getDataPaths } from "./paths";
 import { hashPassword, hashSessionToken, randomSessionToken, verifyPassword } from "./security";
-import { createParallelLedger, freezeParallelLedger, unfreezeParallelLedger, archiveParallelLedger, discardParallelLedger, addParallelAdjustment, removeParallelAdjustment, buildParallelSnapshotData, seedParallelDemoData, requireParallelPermission } from "./parallel-ledger-service";
+import { createParallelLedger, freezeParallelLedger, unfreezeParallelLedger, archiveParallelLedger, discardParallelLedger, rebaseParallelLedger, upsertParallelLedgerMember, addParallelAdjustment, removeParallelAdjustment, buildParallelSnapshotData, seedParallelDemoData, requireParallelPermission } from "./parallel-ledger-service";
 import { runParallelCalculation } from "./parallel-calculation-engine";
 import { confirmParallelSuggestion, previewParallelMerge } from "./parallel-impact-service";
 import { submitParallelMerge, approveParallelMerge, rejectParallelMerge, publishParallelMerge } from "./parallel-merge-service";
@@ -250,6 +250,8 @@ const roleActionMap: Record<string, Role[]> = {
   parallelLedgerUnfreeze: ["manager", "admin", "finance"],
   parallelLedgerArchive: ["manager", "admin", "finance"],
   parallelLedgerDiscard: ["manager", "admin", "finance"],
+  parallelLedgerRebase: ["manager", "admin", "finance"],
+  parallelLedgerUpsertMember: ["manager", "admin", "finance"],
   parallelLedgerAddAdjustment: ["manager", "admin", "finance"],
   parallelLedgerRemoveAdjustment: ["manager", "admin", "finance"],
   parallelLedgerRecalculate: ["manager", "admin", "finance"],
@@ -353,6 +355,22 @@ const actionLabels: Record<string, string> = {
   recordSalesReturn: "登记销售退货",
   recordCustomerRefund: "登记客户退款",
   createReplacementShipment: "补开发货单",
+  parallelLedgerCreate: "创建平行账套",
+  parallelLedgerFreeze: "冻结平行账套版本",
+  parallelLedgerUnfreeze: "解冻平行账套版本",
+  parallelLedgerArchive: "归档平行账套",
+  parallelLedgerDiscard: "放弃平行账套方案",
+  parallelLedgerRebase: "吸收正式变更并重新基线",
+  parallelLedgerUpsertMember: "配置平行账套成员权限",
+  parallelLedgerAddAdjustment: "录入平行账套调整",
+  parallelLedgerRemoveAdjustment: "撤销平行账套调整",
+  parallelLedgerRecalculate: "执行平行账套测算",
+  parallelLedgerConfirmSuggestion: "确认平行账套缺口建议",
+  parallelLedgerMergePreview: "预览平行账套发布影响",
+  parallelLedgerSubmitMerge: "提交平行账套发布审批",
+  parallelLedgerApproveMerge: "审批平行账套发布",
+  parallelLedgerRejectMerge: "驳回平行账套发布",
+  parallelLedgerPublishMerge: "发布平行账套纠错单",
 };
 
 export function now() {
@@ -6860,6 +6878,12 @@ export function performAction(input: ActionInput) {
         break;
       case "parallelLedgerDiscard":
         discardParallelLedger(database, input.actorId, mustEntity(input.entityId));
+        break;
+      case "parallelLedgerRebase":
+        rebaseParallelLedger(database, input.actorId, mustEntity(input.entityId));
+        break;
+      case "parallelLedgerUpsertMember":
+        upsertParallelLedgerMember(database, input.actorId, mustEntity(input.entityId), input.payload ?? {});
         break;
       case "parallelLedgerAddAdjustment":
         addParallelAdjustment(database, input.actorId, mustEntity(input.entityId), input.payload ?? {});
