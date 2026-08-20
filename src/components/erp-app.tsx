@@ -12835,7 +12835,8 @@ function ParallelLedgerModule({
   const [selectedId, setSelectedId] = useState<string>("");
   const [showCreate, setShowCreate] = useState(false);
   const [showAdjust, setShowAdjust] = useState(false);
-  const [subTab, setSubTab] = useState<"overview" | "adjust" | "impact" | "gap" | "diff" | "export" | "merge">("overview");
+  const [subTab, setSubTab] = useState<"overview" | "adjust" | "impact" | "gap" | "diff" | "export" | "merge" | "compare" | "monitor">("overview");
+  const [compareTargetId, setCompareTargetId] = useState<string>("");
   const [createForm, setCreateForm] = useState({ name: "", purpose: "经营数据测算", base_as_of: new Date().toISOString().slice(0, 10), scope_type: "company", merge_allowed: 1, seed_demo: false });
   const [adjustForm, setAdjustForm] = useState({ adjustment_type: "bom_ratio", effective_at: new Date().toISOString().slice(0, 10), reason: "", reference_id: "P-PAL-DEMO", linesText: '[{"entity_type":"product","entity_id":"P-PAL-DEMO","field_code":"qty_per","target_material_id":"M-PAL-A","quantity":0.6},{"entity_type":"product","entity_id":"P-PAL-DEMO","field_code":"qty_per","target_material_id":"M-PAL-B","quantity":0.2}]' });
 
@@ -12941,7 +12942,7 @@ function ParallelLedgerModule({
       </div>
 
       <div className="flex flex-wrap gap-2 border-b border-slate-200">
-        {([["overview", "总览"], ["adjust", "调整工作区"], ["impact", "影响分析"], ["gap", "缺口与建议"], ["diff", "差异对比"], ["export", "报表导出"], ["merge", "合并中心"]] as const).map(([key, label]) => (
+        {([["overview", "总览"], ["adjust", "调整工作区"], ["impact", "影响分析"], ["gap", "缺口与建议"], ["diff", "差异对比"], ["export", "报表导出"], ["merge", "合并中心"], ["compare", "方案对比"], ["monitor", "运维监控"]] as const).map(([key, label]) => (
           <button key={key} type="button" onClick={() => setSubTab(key)} className={`border-b-2 px-3 py-2 text-sm font-medium ${subTab === key ? "border-blue-600 text-blue-700" : "border-transparent text-slate-500 hover:text-slate-700"}`}>{label}</button>
         ))}
       </div>
@@ -13050,6 +13051,55 @@ function ParallelLedgerModule({
           </div>
           <DataTable title="纠错单据包" icon={FileCheck2} rows={mergeItems} columns={[{ key: "sequence_no", label: "序号" }, { key: "document_type", label: "单据类型" }, { key: "action_type", label: "动作" }, { key: "publish_status", label: "发布状态" }, { key: "published_document_id", label: "正式单据号", render: (v) => (v ? String(v) : "—") }]} empty="无纠错单据" />
           {conflicts.length > 0 ? <DataTable title="合并冲突" icon={AlertTriangle} rows={conflicts} columns={[{ key: "entity_type", label: "对象类型" }, { key: "entity_id", label: "对象" }, { key: "conflict_type", label: "冲突类型" }]} /> : null}
+        </div>
+      ) : null}
+
+      {subTab === "compare" ? (
+        <div className="space-y-4">
+          <div className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+            <h3 className="text-sm font-semibold text-slate-900">方案对比</h3>
+            <p className="mt-1 text-xs text-slate-500">选择另一个平行账套，与当前账套逐项比较测算结果。</p>
+            <select value={compareTargetId} onChange={(e) => setCompareTargetId(e.target.value)} className="mt-3 block h-9 w-full max-w-md rounded-md border border-slate-200 px-3 text-sm md:w-80">
+              <option value="">— 选择对比账套 —</option>
+              {parallel.ledgers.filter((l) => String(l.id) !== selectedId && ["ready", "frozen", "merged"].includes(String(l.status))).map((l) => <option key={String(l.id)} value={String(l.id)}>{String(l.ledger_code)} · {String(l.name)} · v{String(l.working_version)}</option>)}
+            </select>
+          </div>
+          {compareTargetId ? (() => {
+            const targetRun = parallel.runs.find((r) => String(r.ledger_id) === compareTargetId) as Row | undefined;
+            const targetSummary = targetRun?.summary_json ? (JSON.parse(String(targetRun.summary_json)) as Record<string, unknown>) : null;
+            const targetCosts = parallel.costProjections.filter((c) => String(c.run_id) === String(targetRun?.id ?? ""));
+            const cur = summary ?? {};
+            const tgt = targetSummary ?? {};
+            const cmp = (label: string, a: unknown, b: unknown) => (
+              <tr key={label} className="divide-x divide-slate-100">
+                <td className="px-3 py-2 text-xs text-slate-500">{label}</td>
+                <td className="px-3 py-2 text-right text-sm text-slate-900">{String(a ?? "—")}</td>
+                <td className="px-3 py-2 text-right text-sm text-slate-900">{String(b ?? "—")}</td>
+                <td className="px-3 py-2 text-right text-xs text-blue-700">{a != null && b != null && Number(a) !== Number(b) ? `${Number(b) - Number(a) > 0 ? "+" : ""}${Number(Number(b) - Number(a)).toLocaleString("zh-CN")}` : "—"}</td>
+              </tr>
+            );
+            return (
+              <div className="overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm">
+                <table className="w-full min-w-[480px] text-left text-sm">
+                  <thead><tr className="border-b border-slate-200 bg-slate-50 text-xs font-semibold uppercase text-slate-500"><th className="px-3 py-3">指标</th><th className="px-3 py-3 text-right">当前账套</th><th className="px-3 py-3 text-right">对比账套</th><th className="px-3 py-3 text-right">差异</th></tr></thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {cmp("测算总成本", cur.totalCost, tgt.totalCost)}
+                    {cmp("基准总成本", cur.baselineTotalCost, tgt.baselineTotalCost)}
+                    {cmp("缺口数", cur.gapCount, tgt.gapCount)}
+                    {cmp("缺口金额", cur.totalShortageAmount, tgt.totalShortageAmount)}
+                    {costProjections[0] && targetCosts[0] ? cmp("单位成本", costProjections[0].unit_cost, targetCosts[0].unit_cost) : null}
+                  </tbody>
+                </table>
+              </div>
+            );
+          })() : <EmptyText text="请选择对比账套" />}
+        </div>
+      ) : null}
+
+      {subTab === "monitor" ? (
+        <div className="space-y-4">
+          <DataTable title="计算运行记录" icon={Calculator} rows={parallel.runs} columns={[{ key: "ledger_id", label: "账套" }, { key: "ledger_version", label: "版本", render: (v) => `v${v}` }, { key: "status", label: "状态" }, { key: "duration_ms", label: "耗时(ms)", render: (v) => (v ? String(v) : "—") }, { key: "stale", label: "已过期", render: (v) => (v ? "是" : "否") }, { key: "error_message", label: "错误", render: (v) => (v ? String(v) : "—") }]} empty="暂无计算记录" />
+          <DataTable title="合并申请记录" icon={FileCheck2} rows={parallel.mergeRequests} columns={[{ key: "merge_no", label: "合并单号" }, { key: "status", label: "状态" }, { key: "submitted_at", label: "提交时间" }, { key: "published_at", label: "发布时间", render: (v) => (v ? String(v) : "—") }, { key: "failure_reason", label: "失败原因", render: (v) => (v ? String(v) : "—") }]} empty="暂无合并记录" />
         </div>
       ) : null}
     </div>

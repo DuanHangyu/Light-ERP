@@ -224,10 +224,12 @@ function clearRunProjections(database: Database.Database, ledgerId: string) {
   const oldRuns = database.prepare("SELECT id FROM parallel_calculation_runs WHERE ledger_id = ?").all(ledgerId) as Array<{ id: string }>;
   if (oldRuns.length > 0) {
     const placeholders = oldRuns.map(() => "?").join(",");
-    for (const table of ["parallel_inventory_projections", "parallel_material_allocations", "parallel_cost_projections", "parallel_impacts", "parallel_gaps", "parallel_suggestions"]) {
+    for (const table of ["parallel_inventory_projections", "parallel_material_allocations", "parallel_cost_projections", "parallel_impacts", "parallel_gaps"]) {
       database.prepare(`DELETE FROM ${table} WHERE run_id IN (${placeholders})`).run(...oldRuns.map((r) => r.id));
     }
   }
+  // parallel_suggestions 无 run_id 列，按 ledger_id 清理（随每次重算重新生成）
+  database.prepare("DELETE FROM parallel_suggestions WHERE ledger_id = ?").run(ledgerId);
   database.prepare("UPDATE parallel_calculation_runs SET stale = 1 WHERE ledger_id = ?").run(ledgerId);
 }
 

@@ -1,6 +1,7 @@
 import type Database from "better-sqlite3";
 import { audit, decideApproval, getUser, matchApprovalRule, now, serial, uid } from "./erp-service";
 import { previewParallelMerge } from "./parallel-impact-service";
+import { requireParallelPermission } from "./parallel-ledger-service";
 
 function assertLedger(database: Database.Database, ledgerId: string, actorId: string) {
   const ledger = database.prepare("SELECT * FROM parallel_ledgers WHERE id = ?").get(ledgerId) as
@@ -23,6 +24,7 @@ function acceptedSuggestions(database: Database.Database, ledgerId: string) {
 
 export function submitParallelMerge(database: Database.Database, actorId: string, ledgerId: string): { mergeRequestId: string } {
   const ledger = assertLedger(database, ledgerId, actorId);
+  requireParallelPermission(database, actorId, ledgerId, "submit_merge");
   if (ledger.status !== "frozen") throw new Error("只有已冻结账套可以提交合并申请。请先冻结版本。");
 
   // 提交前必须重新测算，确保结果为最新
@@ -107,7 +109,9 @@ function findApprovalForMerge(database: Database.Database, mergeRequestId: strin
 }
 
 export function approveParallelMerge(database: Database.Database, actorId: string, mergeRequestId: string, payload: Record<string, unknown>) {
-  assertLedger(database, mergeRequestIdToLedgerId(database, mergeRequestId), actorId);
+  const ledgerId = mergeRequestIdToLedgerId(database, mergeRequestId);
+  assertLedger(database, ledgerId, actorId);
+  requireParallelPermission(database, actorId, ledgerId, "approve_merge");
   const approval = findApprovalForMerge(database, mergeRequestId);
   if (approval.status !== "pending") throw new Error(`审批单状态为 ${approval.status}，不能重复审批。`);
   decideApproval(database, actorId, approval.id, "approved", payload);
@@ -119,6 +123,7 @@ export function approveParallelMerge(database: Database.Database, actorId: strin
 export function rejectParallelMerge(database: Database.Database, actorId: string, mergeRequestId: string, payload: Record<string, unknown>) {
   const ledgerId = mergeRequestIdToLedgerId(database, mergeRequestId);
   assertLedger(database, ledgerId, actorId);
+  requireParallelPermission(database, actorId, ledgerId, "approve_merge");
   const approval = findApprovalForMerge(database, mergeRequestId);
   if (approval.status !== "pending") throw new Error(`审批单状态为 ${approval.status}，不能重复处理。`);
   decideApproval(database, actorId, approval.id, "rejected", payload);
@@ -168,6 +173,7 @@ export function publishParallelMerge(database: Database.Database, actorId: strin
   void user;
   const ledgerId = mergeRequestIdToLedgerId(database, mergeRequestId);
   const ledger = assertLedger(database, ledgerId, actorId);
+  requireParallelPermission(database, actorId, ledgerId, "publish_merge");
   const mergeRequest = database.prepare("SELECT * FROM parallel_merge_requests WHERE id = ?").get(mergeRequestId) as { id: string; status: string; idempotency_key: string } | undefined;
   if (!mergeRequest) throw new Error("合并申请不存在。");
   if (mergeRequest.status === "published") throw new Error("该合并已发布，不可重复发布。");

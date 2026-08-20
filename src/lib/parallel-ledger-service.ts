@@ -32,16 +32,52 @@ function numberOr(payload: Record<string, unknown> | undefined, key: string, fal
 function assertLedger(database: Database.Database, ledgerId: string, actorId: string): ParallelLedgerRow {
   const ledger = database.prepare("SELECT * FROM parallel_ledgers WHERE id = ?").get(ledgerId) as ParallelLedgerRow | undefined;
   if (!ledger) throw new Error("平行账套不存在。");
-  assertMember(database, ledgerId, actorId);
+  requireParallelPermission(database, actorId, ledgerId, "view");
   return ledger;
 }
 
-function assertMember(database: Database.Database, ledgerId: string, actorId: string) {
-  const ledger = database.prepare("SELECT owner_user_id FROM parallel_ledgers WHERE id = ?").get(ledgerId) as { owner_user_id: string } | undefined;
-  if (!ledger) throw new Error("平行账套不存在。");
-  if (ledger.owner_user_id === actorId) return;
-  const member = database.prepare("SELECT 1 FROM parallel_ledger_members WHERE ledger_id = ? AND user_id = ?").get(ledgerId, actorId);
-  if (!member) throw new Error("您不是该平行账套的成员，无权访问。");
+export type ParallelPermission =
+  | "view" | "adjust" | "recalculate" | "export" | "freeze"
+  | "submit_merge" | "approve_merge" | "publish_merge" | "archive" | "discard" | "admin";
+
+const PERMISSION_COLUMN: Record<ParallelPermission, string> = {
+  view: "can_view",
+  adjust: "can_adjust",
+  recalculate: "can_recalculate",
+  export: "can_export",
+  freeze: "can_freeze",
+  submit_merge: "can_submit_merge",
+  approve_merge: "can_approve_merge",
+  publish_merge: "can_publish_merge",
+  archive: "can_archive",
+  discard: "can_discard",
+  admin: "can_admin",
+};
+
+const PERMISSION_LABELS: Record<ParallelPermission, string> = {
+  view: "查看",
+  adjust: "调整",
+  recalculate: "重算",
+  export: "导出",
+  freeze: "冻结",
+  submit_merge: "提交合并",
+  approve_merge: "审批合并",
+  publish_merge: "发布合并",
+  archive: "归档",
+  discard: "放弃",
+  admin: "管理",
+};
+
+export function requireParallelPermission(database: Database.Database, actorId: string, ledgerId: string, permission: ParallelPermission) {
+  const user = getUser(database, actorId);
+  if (user.role === "admin") return;
+  const owner = database.prepare("SELECT owner_user_id FROM parallel_ledgers WHERE id = ?").get(ledgerId) as { owner_user_id: string } | undefined;
+  if (!owner) throw new Error("平行账套不存在。");
+  if (owner.owner_user_id === actorId) return;
+  const member = database.prepare(`SELECT ${PERMISSION_COLUMN[permission]} AS granted FROM parallel_ledger_members WHERE ledger_id = ? AND user_id = ?`).get(ledgerId, actorId) as { granted: number } | undefined;
+  if (!member || !Number(member.granted)) {
+    throw new Error(`无权执行该操作（缺少权限 parallel_ledger.${permission}「${PERMISSION_LABELS[permission]}」）。`);
+  }
 }
 
 export function seedParallelDemoData(database: Database.Database) {
@@ -148,6 +184,7 @@ export function createParallelLedger(database: Database.Database, actorId: strin
 
 export function freezeParallelLedger(database: Database.Database, actorId: string, ledgerId: string) {
   const ledger = assertLedger(database, ledgerId, actorId);
+  requireParallelPermission(database, actorId, ledgerId, "freeze");
   if (!["ready", "draft"].includes(ledger.status)) throw new Error(`账套状态【${LEDGER_STATUS_LABELS[ledger.status as keyof typeof LEDGER_STATUS_LABELS] ?? ledger.status}】不能冻结。`);
   if (ledger.status === "draft") runParallelCalculation(database, actorId, ledgerId);
   const frozenAt = now();
@@ -157,6 +194,7 @@ export function freezeParallelLedger(database: Database.Database, actorId: strin
 
 export function unfreezeParallelLedger(database: Database.Database, actorId: string, ledgerId: string) {
   const ledger = assertLedger(database, ledgerId, actorId);
+  requireParallelPermission(database, actorId, ledgerId, "freeze");
   if (ledger.status !== "frozen") throw new Error("只有已冻结账套可以解冻。");
   const nextVersion = ledger.working_version + 1;
   database.prepare("UPDATE parallel_ledgers SET status = 'draft', working_version = ?, frozen_at = NULL, updated_at = ? WHERE id = ?").run(nextVersion, now(), ledgerId);
@@ -165,6 +203,7 @@ export function unfreezeParallelLedger(database: Database.Database, actorId: str
 
 export function archiveParallelLedger(database: Database.Database, actorId: string, ledgerId: string) {
   const ledger = assertLedger(database, ledgerId, actorId);
+  requireParallelPermission(database, actorId, ledgerId, "archive");
   if (!["ready", "frozen", "merged"].includes(ledger.status)) throw new Error("当前状态不允许归档。");
   const archivedAt = now();
   database.prepare("UPDATE parallel_ledgers SET status = 'archived', archived_at = ?, updated_at = ? WHERE id = ?").run(archivedAt, archivedAt, ledgerId);
@@ -173,6 +212,7 @@ export function archiveParallelLedger(database: Database.Database, actorId: stri
 
 export function discardParallelLedger(database: Database.Database, actorId: string, ledgerId: string) {
   const ledger = assertLedger(database, ledgerId, actorId);
+  requireParallelPermission(database, actorId, ledgerId, "discard");
   if (["merged", "archived"].includes(ledger.status)) throw new Error("已合并或已归档账套不能放弃，请改用归档。");
   database.prepare("UPDATE parallel_ledgers SET status = 'discarded', updated_at = ? WHERE id = ?").run(now(), ledgerId);
   audit(database, actorId, "parallelLedgerDiscard", "parallel_ledger", ledgerId, `放弃平行账套 ${ledger.ledger_code}`);
@@ -180,6 +220,7 @@ export function discardParallelLedger(database: Database.Database, actorId: stri
 
 export function addParallelAdjustment(database: Database.Database, actorId: string, ledgerId: string, payload: Record<string, unknown>): { adjustmentId: string } {
   const ledger = assertLedger(database, ledgerId, actorId);
+  requireParallelPermission(database, actorId, ledgerId, "adjust");
   if (!["draft", "ready"].includes(ledger.status)) throw new Error("账套当前状态不允许新增调整。");
   const adjustmentType = text(payload, "adjustment_type", "调整类型") as AdjustmentType;
   if (!ADJUSTMENT_TYPE_LABELS[adjustmentType]) throw new Error(`不支持的调整类型：${adjustmentType}`);
@@ -227,6 +268,7 @@ export function addParallelAdjustment(database: Database.Database, actorId: stri
 
 export function removeParallelAdjustment(database: Database.Database, actorId: string, ledgerId: string, adjustmentId: string) {
   assertLedger(database, ledgerId, actorId);
+  requireParallelPermission(database, actorId, ledgerId, "adjust");
   const adjustment = database.prepare("SELECT adjustment_no, status FROM parallel_adjustments WHERE id = ? AND ledger_id = ?").get(adjustmentId, ledgerId) as { adjustment_no: string; status: string } | undefined;
   if (!adjustment) throw new Error("调整项不存在。");
   if (adjustment.status !== "active") throw new Error("只能撤销生效中的调整项。");

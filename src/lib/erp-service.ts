@@ -26,7 +26,7 @@ import {
 import { getDb, resetDemoDatabase } from "./db";
 import { ensureDataDirs, getDataPaths } from "./paths";
 import { hashPassword, hashSessionToken, randomSessionToken, verifyPassword } from "./security";
-import { createParallelLedger, freezeParallelLedger, unfreezeParallelLedger, archiveParallelLedger, discardParallelLedger, addParallelAdjustment, removeParallelAdjustment, buildParallelSnapshotData, seedParallelDemoData } from "./parallel-ledger-service";
+import { createParallelLedger, freezeParallelLedger, unfreezeParallelLedger, archiveParallelLedger, discardParallelLedger, addParallelAdjustment, removeParallelAdjustment, buildParallelSnapshotData, seedParallelDemoData, requireParallelPermission } from "./parallel-ledger-service";
 import { runParallelCalculation } from "./parallel-calculation-engine";
 import { confirmParallelSuggestion, previewParallelMerge } from "./parallel-impact-service";
 import { submitParallelMerge, approveParallelMerge, rejectParallelMerge, publishParallelMerge } from "./parallel-merge-service";
@@ -6868,6 +6868,7 @@ export function performAction(input: ActionInput) {
         removeParallelAdjustment(database, input.actorId, mustEntity(input.entityId), mustEntityFromPayload(input.payload));
         break;
       case "parallelLedgerRecalculate":
+        requireParallelPermission(database, input.actorId, mustEntity(input.entityId), "recalculate");
         runParallelCalculation(database, input.actorId, mustEntity(input.entityId));
         break;
       case "parallelLedgerConfirmSuggestion":

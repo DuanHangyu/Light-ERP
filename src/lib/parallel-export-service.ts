@@ -1,5 +1,6 @@
 import type Database from "better-sqlite3";
 import { buildXlsxBuffer, getUser, now, serial, uid } from "./erp-service";
+import { requireParallelPermission } from "./parallel-ledger-service";
 
 export const PARALLEL_EXPORT_TYPES = [
   "parallel_inventory",
@@ -48,6 +49,7 @@ export function buildParallelExport(
   void user;
   const ledger = database.prepare("SELECT ledger_code, name, working_version, base_as_of FROM parallel_ledgers WHERE id = ?").get(ledgerId) as { ledger_code: string; name: string; working_version: number; base_as_of: string } | undefined;
   if (!ledger) throw new Error("平行账套不存在。");
+  requireParallelPermission(database, actorId, ledgerId, "export");
   const runId = latestRunId(database, ledgerId);
   if (!runId) throw new Error("该账套尚无测算结果，请先重新测算后再导出。");
 

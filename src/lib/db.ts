@@ -1590,6 +1590,13 @@ function applySchema(database: Database.Database) {
   ensureColumn(database, "audit_logs", "ledger_id", "TEXT");
   ensureColumn(database, "audit_logs", "ledger_version", "INTEGER");
   ensureColumn(database, "audit_logs", "request_id", "TEXT");
+  ensureColumn(database, "parallel_ledger_members", "can_recalculate", "INTEGER NOT NULL DEFAULT 0");
+  ensureColumn(database, "parallel_ledger_members", "can_freeze", "INTEGER NOT NULL DEFAULT 0");
+  ensureColumn(database, "parallel_ledger_members", "can_approve_merge", "INTEGER NOT NULL DEFAULT 0");
+  ensureColumn(database, "parallel_ledger_members", "can_publish_merge", "INTEGER NOT NULL DEFAULT 0");
+  ensureColumn(database, "parallel_ledger_members", "can_archive", "INTEGER NOT NULL DEFAULT 0");
+  ensureColumn(database, "parallel_ledger_members", "can_discard", "INTEGER NOT NULL DEFAULT 0");
+  ensureColumn(database, "parallel_ledger_members", "can_admin", "INTEGER NOT NULL DEFAULT 0");
   backfillInventoryMovementDates(database);
 }
 

@@ -2,12 +2,14 @@ import type Database from "better-sqlite3";
 import crypto from "node:crypto";
 import { audit, getUser, now, uid } from "./erp-service";
 import { loadSnapshotStore } from "./parallel-snapshot-service";
+import { requireParallelPermission } from "./parallel-ledger-service";
 
 export function confirmParallelSuggestion(database: Database.Database, actorId: string, suggestionId: string, payload: Record<string, unknown>) {
   const user = getUser(database, actorId);
   void user;
   const suggestion = database.prepare("SELECT * FROM parallel_suggestions WHERE id = ?").get(suggestionId) as { id: string; gap_id: string; ledger_id: string; status: string; suggestion_type: string } | undefined;
   if (!suggestion) throw new Error("建议不存在。");
+  requireParallelPermission(database, actorId, suggestion.ledger_id, "adjust");
   if (suggestion.status !== "pending") throw new Error("该建议已处理。");
   const decision = String(payload.decision ?? "accept");
   const note = String(payload.note ?? "");
