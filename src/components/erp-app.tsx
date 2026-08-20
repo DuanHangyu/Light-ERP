@@ -318,6 +318,19 @@ type Snapshot = {
     rolePermissions: Row[];
     permissionMatrix: Row[];
   };
+  parallel: {
+    ledgers: Row[];
+    adjustments: Row[];
+    adjustmentLines: Row[];
+    runs: Row[];
+    costProjections: Row[];
+    inventoryProjections: Row[];
+    materialAllocations: Row[];
+    impacts: Row[];
+    gaps: Row[];
+    suggestions: Row[];
+    mergeConflicts: Row[];
+  };
 };
 
 type ModuleKey =
@@ -332,7 +345,8 @@ type ModuleKey =
   | "reports"
   | "approval"
   | "archive"
-  | "system";
+  | "system"
+  | "parallel";
 
 type ActionRequest = Pick<Task, "action" | "entityId"> & {
   variant?: string;
@@ -444,7 +458,8 @@ const navItems = [
   { key: "approval", label: "审批算价", title: "审批算价", subtitle: "办公 OA 审批、授权配方试算与历史统计", icon: Calculator },
   { key: "archive", label: "本地归档", title: "本地归档", subtitle: "数据盘、冷备份、导出记录与审计", icon: DatabaseBackup },
   { key: "system", label: "系统管理", title: "系统管理", subtitle: "账号登录、角色权限、密码与审计", icon: ShieldCheck },
-] satisfies Array<{ key: ModuleKey; label: string; title: string; subtitle: string; icon: typeof ClipboardList }>;
+  { key: "parallel", label: "平行账套", title: "平行账套", subtitle: "经营数据测算沙盘：快照·调整·复盘·合并预览", icon: Calculator, roles: ["manager", "admin", "finance"] },
+] satisfies Array<{ key: ModuleKey; label: string; title: string; subtitle: string; icon: typeof ClipboardList; roles?: string[] }>;
 
 const roleOptions = [
   { value: "sales", label: "销售员" },
@@ -957,7 +972,9 @@ export function ErpApp() {
             </div>
           </div>
           <nav className="space-y-1 px-3 py-4">
-            {navItems.map((item) => {
+            {navItems
+              .filter((item) => !item.roles || item.roles.includes(snapshot.currentUser.role))
+              .map((item) => {
               const Icon = item.icon;
               const active = item.key === activeModule;
               return (
@@ -1007,7 +1024,9 @@ export function ErpApp() {
                   <span className="truncate">搜索单据 / 客户 / 物料</span>
                 </div>
                 <div className="scrollbar-thin flex max-w-full gap-2 overflow-x-auto lg:hidden">
-                  {navItems.map((item) => {
+                  {navItems
+                    .filter((item) => !item.roles || item.roles.includes(snapshot.currentUser.role))
+                    .map((item) => {
                     const Icon = item.icon;
                     const active = item.key === activeModule;
                     return (
@@ -1180,6 +1199,9 @@ export function ErpApp() {
                 }}
                 onError={setError}
               />
+            ) : null}
+            {activeModule === "parallel" ? (
+              <ParallelLedgerModule snapshot={snapshot} actorId={actorId} busy={busy} runAction={runAction} />
             ) : null}
           </div>
         </section>
@@ -12759,4 +12781,241 @@ function KeyValue({ label, value }: { label: string; value: string }) {
 
 function EmptyText({ text }: { text: string }) {
   return <p className="rounded-md bg-slate-50 px-3 py-3 text-sm text-slate-500">{text}</p>;
+}
+
+const PARALLEL_STATUS_LABELS: Record<string, string> = {
+  creating: "创建中",
+  draft: "草稿",
+  calculating: "计算中",
+  calculation_failed: "计算失败",
+  ready: "测算完成",
+  frozen: "已冻结",
+  merge_pending: "合并审批中",
+  merge_rejected: "合并已驳回",
+  conflicted: "存在冲突",
+  publishing: "发布中",
+  merged: "已合并",
+  archived: "已归档",
+  discarded: "已放弃",
+};
+
+const PARALLEL_ADJUSTMENT_TYPES: Array<{ value: string; label: string }> = [
+  { value: "bom_ratio", label: "配方比例调整" },
+  { value: "purchase_price", label: "采购价格调整" },
+  { value: "material_substitute", label: "物料替换" },
+  { value: "inventory_qty", label: "库存数量调整" },
+  { value: "process_fee_loss", label: "加工费/损耗率调整" },
+];
+
+const PARALLEL_EXPORTS: Array<{ type: string; label: string }> = [
+  { type: "parallel_diff", label: "调整前后差异表" },
+  { type: "parallel_gaps", label: "物料缺口与建议" },
+  { type: "parallel_order_cost", label: "工单成本测算" },
+  { type: "parallel_product_cost", label: "成品成本变化" },
+  { type: "parallel_inventory", label: "库存汇总" },
+  { type: "parallel_batches", label: "批次明细" },
+  { type: "parallel_material_flow", label: "收发存测算" },
+  { type: "parallel_adjustments", label: "调整明细" },
+];
+
+function ParallelLedgerModule({
+  snapshot,
+  actorId,
+  busy,
+  runAction,
+}: {
+  snapshot: Snapshot;
+  actorId: string;
+  busy: string | null;
+  runAction: (task: ActionRequest) => Promise<void>;
+}) {
+  const parallel = snapshot.parallel;
+  const [selectedId, setSelectedId] = useState<string>("");
+  const [showCreate, setShowCreate] = useState(false);
+  const [showAdjust, setShowAdjust] = useState(false);
+  const [subTab, setSubTab] = useState<"overview" | "adjust" | "impact" | "gap" | "diff" | "export">("overview");
+  const [createForm, setCreateForm] = useState({ name: "", purpose: "经营数据测算", base_as_of: new Date().toISOString().slice(0, 10), scope_type: "company", merge_allowed: 1, seed_demo: false });
+  const [adjustForm, setAdjustForm] = useState({ adjustment_type: "bom_ratio", effective_at: new Date().toISOString().slice(0, 10), reason: "", reference_id: "P-PAL-DEMO", linesText: '[{"entity_type":"product","entity_id":"P-PAL-DEMO","field_code":"qty_per","target_material_id":"M-PAL-A","quantity":0.6},{"entity_type":"product","entity_id":"P-PAL-DEMO","field_code":"qty_per","target_material_id":"M-PAL-B","quantity":0.2}]' });
+
+  const selected = parallel.ledgers.find((l) => String(l.id) === selectedId) as Row | undefined;
+  const ledgerAdjustments = parallel.adjustments.filter((a) => String(a.ledger_id) === selectedId);
+  const ledgerRun = parallel.runs.find((r) => String(r.ledger_id) === selectedId) as Row | undefined;
+  const runId = ledgerRun ? String(ledgerRun.id) : "";
+  const costProjections = parallel.costProjections.filter((c) => String(c.run_id) === runId);
+  const inventoryProjections = parallel.inventoryProjections.filter((i) => String(i.run_id) === runId);
+  const impacts = parallel.impacts.filter((i) => String(i.run_id) === runId);
+  const gaps = parallel.gaps.filter((g) => String(g.run_id) === runId);
+  const suggestions = parallel.suggestions.filter((s) => String(s.ledger_id) === selectedId);
+  const conflicts = parallel.mergeConflicts.filter((c) => true);
+
+  const downloadExport = (type: string) => {
+    if (!selectedId) return;
+    window.location.href = `/api/export?actorId=${encodeURIComponent(actorId)}&type=${type}&entityId=${encodeURIComponent(selectedId)}&format=xlsx`;
+  };
+
+  const loadingDemo = busy === "parallelLedgerCreate-parallel-primary";
+
+  if (showCreate) {
+    return (
+      <div className="space-y-4">
+        <ModuleHeader title="创建平行账套" subtitle="从正式经营账套选择基准时点与范围生成测算沙盘" action={{ label: "返回列表", onClick: () => setShowCreate(false) }} />
+        <div className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+            <label className="text-sm text-slate-600">账套名称<input value={createForm.name} onChange={(e) => setCreateForm({ ...createForm, name: e.target.value })} className="mt-1 block h-9 w-full rounded-md border border-slate-200 px-3 text-sm" placeholder="如：B 替代料测算" /></label>
+            <label className="text-sm text-slate-600">用途说明<input value={createForm.purpose} onChange={(e) => setCreateForm({ ...createForm, purpose: e.target.value })} className="mt-1 block h-9 w-full rounded-md border border-slate-200 px-3 text-sm" /></label>
+            <label className="text-sm text-slate-600">基准日期<input type="date" value={createForm.base_as_of} onChange={(e) => setCreateForm({ ...createForm, base_as_of: e.target.value })} className="mt-1 block h-9 w-full rounded-md border border-slate-200 px-3 text-sm" /></label>
+            <label className="text-sm text-slate-600">测算范围<select value={createForm.scope_type} onChange={(e) => setCreateForm({ ...createForm, scope_type: e.target.value })} className="mt-1 block h-9 w-full rounded-md border border-slate-200 px-3 text-sm"><option value="company">全公司</option><option value="production_order">指定生产工单</option><option value="product">指定产品</option><option value="material">指定物料</option></select></label>
+            <label className="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" checked={createForm.merge_allowed === 1} onChange={(e) => setCreateForm({ ...createForm, merge_allowed: e.target.checked ? 1 : 0 })} />允许申请合并</label>
+            <label className="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" checked={createForm.seed_demo} onChange={(e) => setCreateForm({ ...createForm, seed_demo: e.target.checked })} />同时注入演示数据（原料 A/B/C + 成品 P + BOM A8+C2 + 工单）</label>
+          </div>
+          <div className="mt-5 flex gap-2">
+            <button type="button" disabled={loadingDemo} onClick={() => { void runAction({ action: "parallelLedgerCreate", payload: { ...createForm } }); setShowCreate(false); }} className="inline-flex h-9 items-center rounded-md bg-blue-600 px-4 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-50">创建账套</button>
+            <button type="button" onClick={() => setShowCreate(false)} className="inline-flex h-9 items-center rounded-md border border-slate-200 bg-white px-4 text-sm font-semibold text-slate-600">取消</button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (!selected) {
+    return (
+      <div className="space-y-4">
+        <ModuleHeader title="平行账套" subtitle="在不影响日常业务的前提下试算经营数据调整方案" action={{ label: "创建账套", onClick: () => setShowCreate(true) }} />
+        {["manager", "admin", "finance"].includes(snapshot.currentUser.role) ? null : <EmptyText text="普通员工不可见平行账套，请联系管理员。" />}
+        <DataTable
+          title="我的平行账套"
+          icon={Calculator}
+          rows={parallel.ledgers}
+          columns={[
+            { key: "ledger_code", label: "账套编码" },
+            { key: "name", label: "名称" },
+            { key: "base_as_of", label: "基准日期" },
+            { key: "working_version", label: "版本", render: (v) => `v${v}` },
+            { key: "status", label: "状态", render: (v) => PARALLEL_STATUS_LABELS[String(v)] ?? String(v) },
+            { key: "action", label: "操作", render: (_v, row) => (
+              <button type="button" onClick={() => { setSelectedId(String(row.id)); setSubTab("overview"); }} className="rounded-md border border-slate-200 px-3 py-1 text-xs font-semibold text-blue-700 hover:border-blue-300">进入</button>
+            ) },
+          ]}
+          empty="暂无平行账套，点击「创建账套」开始"
+        />
+      </div>
+    );
+  }
+
+  const status = String(selected.status);
+  const summary = ledgerRun?.summary_json ? (JSON.parse(String(ledgerRun.summary_json)) as Record<string, unknown>) : null;
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between gap-3 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3">
+        <div className="flex flex-wrap items-center gap-3 text-sm">
+          <span className="rounded-md bg-amber-200 px-2 py-0.5 text-xs font-semibold text-amber-900">当前为测算环境</span>
+          <span className="font-semibold text-slate-900">{String(selected.name)}</span>
+          <span className="text-slate-500">{String(selected.ledger_code)} · 基准 {String(selected.base_as_of)} · v{String(selected.working_version)} · {PARALLEL_STATUS_LABELS[status] ?? status}</span>
+        </div>
+        <button type="button" onClick={() => setSelectedId("")} className="rounded-md border border-slate-200 bg-white px-3 py-1 text-xs font-semibold text-slate-600">返回列表</button>
+      </div>
+
+      <div className="flex flex-wrap gap-2">
+        <button type="button" disabled={busy?.startsWith("parallelLedger")} onClick={() => void runAction({ action: "parallelLedgerRecalculate", entityId: selectedId })} className="rounded-md bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-blue-700 disabled:opacity-50">重新测算</button>
+        <button type="button" disabled={busy?.startsWith("parallelLedger")} onClick={() => void runAction({ action: "parallelLedgerFreeze", entityId: selectedId })} className="rounded-md border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:border-blue-300 disabled:opacity-50">冻结版本</button>
+        <button type="button" disabled={busy?.startsWith("parallelLedger")} onClick={() => void runAction({ action: "parallelLedgerUnfreeze", entityId: selectedId })} className="rounded-md border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:border-blue-300 disabled:opacity-50">解冻修改</button>
+        <button type="button" disabled={busy?.startsWith("parallelLedger")} onClick={() => void runAction({ action: "parallelLedgerMergePreview", entityId: selectedId })} className="rounded-md border border-blue-300 bg-blue-50 px-3 py-1.5 text-xs font-semibold text-blue-700 hover:bg-blue-100 disabled:opacity-50">合并预览</button>
+        <button type="button" disabled={busy?.startsWith("parallelLedger")} onClick={() => void runAction({ action: "parallelLedgerArchive", entityId: selectedId })} className="rounded-md border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 disabled:opacity-50">归档</button>
+        <button type="button" disabled={busy?.startsWith("parallelLedger")} onClick={() => void runAction({ action: "parallelLedgerDiscard", entityId: selectedId })} className="rounded-md border border-rose-200 bg-rose-50 px-3 py-1.5 text-xs font-semibold text-rose-700 disabled:opacity-50">放弃方案</button>
+      </div>
+
+      <div className="flex flex-wrap gap-2 border-b border-slate-200">
+        {([["overview", "总览"], ["adjust", "调整工作区"], ["impact", "影响分析"], ["gap", "缺口与建议"], ["diff", "差异对比"], ["export", "报表导出"]] as const).map(([key, label]) => (
+          <button key={key} type="button" onClick={() => setSubTab(key)} className={`border-b-2 px-3 py-2 text-sm font-medium ${subTab === key ? "border-blue-600 text-blue-700" : "border-transparent text-slate-500 hover:text-slate-700"}`}>{label}</button>
+        ))}
+      </div>
+
+      {subTab === "overview" ? (
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+          <div className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+            <h3 className="text-sm font-semibold text-slate-900">测算摘要</h3>
+            {summary ? (
+              <dl className="mt-3 space-y-2 text-sm">
+                <KeyValue label="生产工单数" value={String(summary.productionOrderCount ?? 0)} />
+                <KeyValue label="调整项数" value={String(summary.adjustmentCount ?? 0)} />
+                <KeyValue label="缺口数" value={String(summary.gapCount ?? 0)} />
+                <KeyValue label="测算总成本" value={formatCurrency(summary.totalCost)} />
+                <KeyValue label="基准总成本" value={formatCurrency(summary.baselineTotalCost)} />
+                <KeyValue label="缺口金额" value={formatCurrency(summary.totalShortageAmount)} />
+              </dl>
+            ) : <EmptyText text="尚未测算，请点击「重新测算」。" />}
+          </div>
+          <div className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+            <h3 className="text-sm font-semibold text-slate-900">工单成本测算</h3>
+            <div className="mt-3 space-y-2 text-sm">
+              {costProjections.length === 0 ? <EmptyText text="无测算结果" /> : costProjections.map((c) => (
+                <div key={String(c.id)} className="rounded-md border border-slate-100 p-3">
+                  <div className="font-medium text-slate-900">{String(c.production_order_id)}</div>
+                  <div className="mt-1 text-xs text-slate-500">材料 {formatCurrency(c.material_cost)} · 加工 {formatCurrency(c.processing_cost)} · 总 {formatCurrency(c.total_cost)}</div>
+                  <div className="mt-1 text-xs font-semibold text-blue-700">单位成本 {formatCurrency(c.unit_cost)} · 收率 {formatNumber(c.yield_rate)}%</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {subTab === "adjust" ? (
+        <div className="space-y-4">
+          {showAdjust ? (
+            <div className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+              <h3 className="text-sm font-semibold text-slate-900">新增调整项</h3>
+              <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-2">
+                <label className="text-sm text-slate-600">调整类型<select value={adjustForm.adjustment_type} onChange={(e) => setAdjustForm({ ...adjustForm, adjustment_type: e.target.value })} className="mt-1 block h-9 w-full rounded-md border border-slate-200 px-3 text-sm">{PARALLEL_ADJUSTMENT_TYPES.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}</select></label>
+                <label className="text-sm text-slate-600">生效日期<input type="date" value={adjustForm.effective_at} onChange={(e) => setAdjustForm({ ...adjustForm, effective_at: e.target.value })} className="mt-1 block h-9 w-full rounded-md border border-slate-200 px-3 text-sm" /></label>
+                <label className="text-sm text-slate-600">原因<input value={adjustForm.reason} onChange={(e) => setAdjustForm({ ...adjustForm, reason: e.target.value })} className="mt-1 block h-9 w-full rounded-md border border-slate-200 px-3 text-sm" placeholder="如：B 替代部分 A" /></label>
+                <label className="text-sm text-slate-600">关联产品<input value={adjustForm.reference_id} onChange={(e) => setAdjustForm({ ...adjustForm, reference_id: e.target.value })} className="mt-1 block h-9 w-full rounded-md border border-slate-200 px-3 text-sm" /></label>
+              </div>
+              <label className="mt-3 block text-sm text-slate-600">调整明细（JSON，每行 entity_type/entity_id/field_code/target_material_id/quantity/unit_price）<textarea value={adjustForm.linesText} onChange={(e) => setAdjustForm({ ...adjustForm, linesText: e.target.value })} rows={5} className="mt-1 block w-full rounded-md border border-slate-200 p-2 font-mono text-xs" /></label>
+              <div className="mt-3 flex gap-2">
+                <button type="button" disabled={busy?.startsWith("parallelLedger")} onClick={() => { try { const lines = JSON.parse(adjustForm.linesText); void runAction({ action: "parallelLedgerAddAdjustment", entityId: selectedId, payload: { adjustment_type: adjustForm.adjustment_type, effective_at: adjustForm.effective_at, reason: adjustForm.reason || (PARALLEL_ADJUSTMENT_TYPES.find((t) => t.value === adjustForm.adjustment_type)?.label ?? ""), reference_id: adjustForm.reference_id, lines } }); setShowAdjust(false); } catch { alert("调整明细 JSON 格式错误"); } }} className="inline-flex h-9 items-center rounded-md bg-blue-600 px-4 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-50">保存调整</button>
+                <button type="button" onClick={() => setShowAdjust(false)} className="inline-flex h-9 items-center rounded-md border border-slate-200 bg-white px-4 text-sm font-semibold text-slate-600">取消</button>
+              </div>
+            </div>
+          ) : (
+            <div className="flex flex-wrap gap-2">
+              <button type="button" onClick={() => setShowAdjust(true)} className="rounded-md bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-blue-700">新增调整</button>
+              <button type="button" disabled={busy?.startsWith("parallelLedger")} onClick={() => { void runAction({ action: "parallelLedgerAddAdjustment", entityId: selectedId, payload: { adjustment_type: "bom_ratio", effective_at: String(selected.base_as_of), reason: "演示：配方 A6+B2+C2（按 10 吨订单）", reference_id: "P-PAL-DEMO", lines: [{ entity_type: "product", entity_id: "P-PAL-DEMO", field_code: "qty_per", target_material_id: "M-PAL-A", quantity: 0.6 }, { entity_type: "product", entity_id: "P-PAL-DEMO", field_code: "qty_per", target_material_id: "M-PAL-B", quantity: 0.2 }] } }); void runAction({ action: "parallelLedgerAddAdjustment", entityId: selectedId, payload: { adjustment_type: "purchase_price", effective_at: String(selected.base_as_of), reason: "演示：B 采购价 13000", lines: [{ entity_type: "material", entity_id: "M-PAL-B", field_code: "purchase_price", target_material_id: "M-PAL-B", unit_price: 13000 }] } }); }} className="rounded-md border border-blue-300 bg-blue-50 px-3 py-1.5 text-xs font-semibold text-blue-700 hover:bg-blue-100 disabled:opacity-50">一键加载演示调整（A6+B2+C2 / B价13000）</button>
+            </div>
+          )}
+          <DataTable title="调整项" icon={Calculator} rows={ledgerAdjustments} columns={[{ key: "adjustment_no", label: "单号" }, { key: "adjustment_type", label: "类型" }, { key: "effective_at", label: "生效日期" }, { key: "reason", label: "原因" }, { key: "status", label: "状态" }, { key: "action", label: "操作", render: (_v, row) => <button type="button" disabled={busy?.startsWith("parallelLedger")} onClick={() => void runAction({ action: "parallelLedgerRemoveAdjustment", entityId: selectedId, payload: { adjustment_id: String(row.id) } })} className="rounded-md border border-rose-200 px-2 py-0.5 text-xs text-rose-700 hover:bg-rose-50">撤销</button> }]} empty="暂无调整项" />
+        </div>
+      ) : null}
+
+      {subTab === "impact" ? (
+        <DataTable title="影响分析" icon={AlertTriangle} rows={impacts} columns={[{ key: "domain", label: "域" }, { key: "severity", label: "等级" }, { key: "blocking", label: "阻断", render: (v) => (v ? "是" : "否") }, { key: "entity_type", label: "对象类型" }, { key: "entity_id", label: "对象" }, { key: "message", label: "说明" }]} empty="请先重新测算" />
+      ) : null}
+
+      {subTab === "gap" ? (
+        <div className="space-y-4">
+          <DataTable title="物料缺口" icon={AlertTriangle} rows={gaps} columns={[{ key: "material_id", label: "物料" }, { key: "required_qty", label: "需求量" }, { key: "available_qty", label: "可用量" }, { key: "shortage_qty", label: "缺口" }, { key: "resolution_status", label: "处理状态" }]} empty="无缺口" />
+          <DataTable title="建议单据" icon={FileCheck2} rows={suggestions} columns={[{ key: "suggestion_type", label: "建议类型" }, { key: "document_type", label: "单据类型" }, { key: "status", label: "状态" }, { key: "action", label: "操作", render: (_v, row) => (String(row.status) === "pending" ? <button type="button" disabled={busy?.startsWith("parallelLedger")} onClick={() => void runAction({ action: "parallelLedgerConfirmSuggestion", entityId: String(row.id), payload: { decision: "accept" } })} className="rounded-md border border-emerald-300 px-2 py-0.5 text-xs text-emerald-700 hover:bg-emerald-50">接受</button> : null) }]} empty="无建议" />
+        </div>
+      ) : null}
+
+      {subTab === "diff" ? (
+        <div className="space-y-4">
+          <DataTable title="工单成本对比（基准 → 测算）" icon={Calculator} rows={costProjections} columns={[{ key: "production_order_id", label: "工单" }, { key: "material_cost", label: "材料成本", render: formatCurrency }, { key: "processing_cost", label: "加工费", render: formatCurrency }, { key: "total_cost", label: "总成本", render: formatCurrency }, { key: "unit_cost", label: "单位成本", render: formatCurrency }, { key: "yield_rate", label: "收率", render: (v) => `${formatNumber(v)}%` }]} empty="请先重新测算" />
+          <DataTable title="库存投影" icon={Boxes} rows={inventoryProjections} columns={[{ key: "material_id", label: "物料" }, { key: "quantity", label: "期末数量" }, { key: "unit_cost", label: "测算均价", render: formatCurrency }, { key: "inventory_value", label: "库存价值", render: formatCurrency }]} empty="请先重新测算" />
+          {conflicts.length > 0 ? <DataTable title="合并冲突" icon={AlertTriangle} rows={conflicts} columns={[{ key: "entity_type", label: "对象类型" }, { key: "entity_id", label: "对象" }, { key: "conflict_type", label: "冲突类型" }]} /> : null}
+        </div>
+      ) : null}
+
+      {subTab === "export" ? (
+        <div className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+          <h3 className="text-sm font-semibold text-slate-900">导出平行账套报表</h3>
+          <p className="mt-1 text-xs text-slate-500">导出文件将标识「平行账套/测算数据」、账套编码、版本与基准日期。</p>
+          <div className="mt-3 grid grid-cols-2 gap-2 md:grid-cols-4">
+            {PARALLEL_EXPORTS.map((item) => <button key={item.type} type="button" onClick={() => downloadExport(item.type)} className="rounded-md border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 hover:border-blue-300 hover:text-blue-700">{item.label}</button>)}
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
 }

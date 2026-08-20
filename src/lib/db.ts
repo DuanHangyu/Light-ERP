@@ -1264,6 +1264,246 @@ function applySchema(database: Database.Database) {
       created_at TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS parallel_ledgers (
+      id TEXT PRIMARY KEY,
+      ledger_code TEXT NOT NULL UNIQUE,
+      name TEXT NOT NULL,
+      purpose TEXT NOT NULL DEFAULT '',
+      base_ledger_id TEXT NOT NULL DEFAULT 'formal',
+      base_as_of TEXT NOT NULL,
+      base_revision TEXT,
+      scope_type TEXT NOT NULL DEFAULT 'company',
+      status TEXT NOT NULL DEFAULT 'creating',
+      working_version INTEGER NOT NULL DEFAULT 1,
+      engine_version TEXT,
+      merge_allowed INTEGER NOT NULL DEFAULT 1,
+      owner_user_id TEXT NOT NULL REFERENCES users(id),
+      created_by TEXT NOT NULL REFERENCES users(id),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      frozen_at TEXT,
+      merged_at TEXT,
+      archived_at TEXT,
+      row_version INTEGER NOT NULL DEFAULT 0
+    );
+
+    CREATE TABLE IF NOT EXISTS parallel_ledger_members (
+      id TEXT PRIMARY KEY,
+      ledger_id TEXT NOT NULL REFERENCES parallel_ledgers(id),
+      user_id TEXT NOT NULL REFERENCES users(id),
+      member_role TEXT NOT NULL DEFAULT 'viewer',
+      can_view INTEGER NOT NULL DEFAULT 1,
+      can_adjust INTEGER NOT NULL DEFAULT 0,
+      can_export INTEGER NOT NULL DEFAULT 0,
+      can_submit_merge INTEGER NOT NULL DEFAULT 0,
+      granted_by TEXT REFERENCES users(id),
+      granted_at TEXT NOT NULL,
+      UNIQUE (ledger_id, user_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS parallel_ledger_scopes (
+      id TEXT PRIMARY KEY,
+      ledger_id TEXT NOT NULL REFERENCES parallel_ledgers(id),
+      scope_entity_type TEXT NOT NULL,
+      scope_entity_id TEXT NOT NULL,
+      include_children INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS parallel_entity_snapshots (
+      id TEXT PRIMARY KEY,
+      ledger_id TEXT NOT NULL REFERENCES parallel_ledgers(id),
+      entity_type TEXT NOT NULL,
+      entity_id TEXT NOT NULL,
+      source_row_version INTEGER NOT NULL DEFAULT 0,
+      source_updated_at TEXT,
+      content_hash TEXT NOT NULL,
+      payload_json TEXT NOT NULL,
+      captured_at TEXT NOT NULL,
+      UNIQUE (ledger_id, entity_type, entity_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS parallel_adjustments (
+      id TEXT PRIMARY KEY,
+      adjustment_no TEXT NOT NULL,
+      ledger_id TEXT NOT NULL REFERENCES parallel_ledgers(id),
+      ledger_version INTEGER NOT NULL,
+      adjustment_type TEXT NOT NULL,
+      effective_at TEXT NOT NULL,
+      reason TEXT NOT NULL DEFAULT '',
+      reference_type TEXT,
+      reference_id TEXT,
+      status TEXT NOT NULL DEFAULT 'active',
+      created_by TEXT NOT NULL REFERENCES users(id),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS parallel_adjustment_lines (
+      id TEXT PRIMARY KEY,
+      adjustment_id TEXT NOT NULL REFERENCES parallel_adjustments(id),
+      entity_type TEXT NOT NULL,
+      entity_id TEXT NOT NULL,
+      field_code TEXT NOT NULL,
+      before_value TEXT,
+      after_value TEXT,
+      delta_value TEXT,
+      source_material_id TEXT,
+      target_material_id TEXT,
+      quantity REAL,
+      unit_price REAL,
+      remark TEXT NOT NULL DEFAULT ''
+    );
+
+    CREATE TABLE IF NOT EXISTS parallel_calculation_runs (
+      id TEXT PRIMARY KEY,
+      ledger_id TEXT NOT NULL REFERENCES parallel_ledgers(id),
+      ledger_version INTEGER NOT NULL,
+      engine_version TEXT NOT NULL,
+      input_hash TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'running',
+      started_at TEXT NOT NULL,
+      finished_at TEXT,
+      duration_ms INTEGER,
+      error_code TEXT,
+      error_message TEXT,
+      summary_json TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL,
+      stale INTEGER NOT NULL DEFAULT 0
+    );
+
+    CREATE TABLE IF NOT EXISTS parallel_inventory_projections (
+      id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL REFERENCES parallel_calculation_runs(id),
+      ledger_id TEXT NOT NULL,
+      warehouse_id TEXT,
+      material_id TEXT NOT NULL,
+      batch_id TEXT,
+      batch_no TEXT,
+      quantity REAL NOT NULL,
+      unit_cost REAL NOT NULL,
+      inventory_value REAL NOT NULL,
+      last_movement_at TEXT,
+      projection_status TEXT NOT NULL DEFAULT 'available'
+    );
+
+    CREATE TABLE IF NOT EXISTS parallel_material_allocations (
+      id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL REFERENCES parallel_calculation_runs(id),
+      production_order_id TEXT NOT NULL,
+      requirement_material_id TEXT NOT NULL,
+      issued_material_id TEXT NOT NULL,
+      batch_id TEXT,
+      allocated_qty REAL NOT NULL,
+      unit_cost REAL NOT NULL,
+      allocation_type TEXT NOT NULL DEFAULT 'fifo',
+      source_adjustment_id TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS parallel_cost_projections (
+      id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL REFERENCES parallel_calculation_runs(id),
+      production_order_id TEXT NOT NULL,
+      product_id TEXT NOT NULL,
+      material_cost REAL NOT NULL,
+      processing_cost REAL NOT NULL,
+      other_cost REAL NOT NULL DEFAULT 0,
+      total_cost REAL NOT NULL,
+      finished_qty REAL NOT NULL,
+      unit_cost REAL NOT NULL,
+      yield_rate REAL NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS parallel_impacts (
+      id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL REFERENCES parallel_calculation_runs(id),
+      domain TEXT NOT NULL,
+      severity TEXT NOT NULL DEFAULT 'info',
+      blocking INTEGER NOT NULL DEFAULT 0,
+      entity_type TEXT,
+      entity_id TEXT,
+      before_value TEXT,
+      after_value TEXT,
+      delta_value TEXT,
+      message TEXT NOT NULL,
+      source_adjustment_id TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS parallel_gaps (
+      id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL REFERENCES parallel_calculation_runs(id),
+      gap_type TEXT NOT NULL,
+      material_id TEXT,
+      required_qty REAL NOT NULL,
+      available_qty REAL NOT NULL,
+      shortage_qty REAL NOT NULL,
+      required_date TEXT,
+      blocking INTEGER NOT NULL DEFAULT 0,
+      resolution_status TEXT NOT NULL DEFAULT 'open',
+      selected_suggestion_id TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS parallel_suggestions (
+      id TEXT PRIMARY KEY,
+      gap_id TEXT NOT NULL REFERENCES parallel_gaps(id),
+      ledger_id TEXT NOT NULL,
+      suggestion_type TEXT NOT NULL,
+      document_type TEXT NOT NULL,
+      payload_json TEXT NOT NULL DEFAULT '{}',
+      status TEXT NOT NULL DEFAULT 'pending',
+      confirmed_by TEXT REFERENCES users(id),
+      confirmed_at TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS parallel_merge_requests (
+      id TEXT PRIMARY KEY,
+      merge_no TEXT NOT NULL,
+      ledger_id TEXT NOT NULL REFERENCES parallel_ledgers(id),
+      ledger_version INTEGER NOT NULL,
+      base_revision TEXT,
+      target_revision TEXT,
+      status TEXT NOT NULL DEFAULT 'pending',
+      idempotency_key TEXT NOT NULL UNIQUE,
+      submitted_by TEXT REFERENCES users(id),
+      submitted_at TEXT,
+      approved_by TEXT REFERENCES users(id),
+      approved_at TEXT,
+      published_by TEXT REFERENCES users(id),
+      published_at TEXT,
+      failure_reason TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS parallel_merge_items (
+      id TEXT PRIMARY KEY,
+      merge_request_id TEXT NOT NULL REFERENCES parallel_merge_requests(id),
+      sequence_no INTEGER NOT NULL,
+      document_type TEXT NOT NULL,
+      source_entity_type TEXT,
+      source_entity_id TEXT,
+      action_type TEXT NOT NULL DEFAULT 'correct',
+      document_payload_json TEXT NOT NULL DEFAULT '{}',
+      publish_status TEXT NOT NULL DEFAULT 'pending',
+      published_document_id TEXT,
+      UNIQUE (merge_request_id, sequence_no)
+    );
+
+    CREATE TABLE IF NOT EXISTS parallel_merge_conflicts (
+      id TEXT PRIMARY KEY,
+      merge_request_id TEXT NOT NULL REFERENCES parallel_merge_requests(id),
+      entity_type TEXT NOT NULL,
+      entity_id TEXT NOT NULL,
+      conflict_type TEXT NOT NULL,
+      base_hash TEXT,
+      current_hash TEXT,
+      base_value_json TEXT,
+      current_value_json TEXT,
+      parallel_value_json TEXT,
+      resolution_type TEXT,
+      resolution_value_json TEXT,
+      resolved_by TEXT REFERENCES users(id),
+      resolved_at TEXT
+    );
+
     CREATE TABLE IF NOT EXISTS schema_migrations (
       id TEXT PRIMARY KEY,
       description TEXT NOT NULL,
@@ -1332,6 +1572,24 @@ function applySchema(database: Database.Database) {
   ensureColumn(database, "materials", "reorder_min_qty", "REAL NOT NULL DEFAULT 0");
   ensureColumn(database, "materials", "last_movement_at", "TEXT");
   ensureColumn(database, "material_batches", "last_movement_at", "TEXT");
+  ensureColumn(database, "materials", "row_version", "INTEGER NOT NULL DEFAULT 0");
+  ensureColumn(database, "material_batches", "row_version", "INTEGER NOT NULL DEFAULT 0");
+  ensureColumn(database, "boms", "row_version", "INTEGER NOT NULL DEFAULT 0");
+  ensureColumn(database, "bom_lines", "row_version", "INTEGER NOT NULL DEFAULT 0");
+  ensureColumn(database, "production_orders", "row_version", "INTEGER NOT NULL DEFAULT 0");
+  ensureColumn(database, "orders", "row_version", "INTEGER NOT NULL DEFAULT 0");
+  ensureColumn(database, "quotes", "row_version", "INTEGER NOT NULL DEFAULT 0");
+  ensureColumn(database, "requisitions", "row_version", "INTEGER NOT NULL DEFAULT 0");
+  ensureColumn(database, "requisition_lines", "row_version", "INTEGER NOT NULL DEFAULT 0");
+  ensureColumn(database, "finished_batches", "row_version", "INTEGER NOT NULL DEFAULT 0");
+  ensureColumn(database, "receivables", "row_version", "INTEGER NOT NULL DEFAULT 0");
+  ensureColumn(database, "payables", "row_version", "INTEGER NOT NULL DEFAULT 0");
+  ensureColumn(database, "document_exports", "ledger_type", "TEXT NOT NULL DEFAULT 'formal'");
+  ensureColumn(database, "document_exports", "ledger_id", "TEXT");
+  ensureColumn(database, "document_exports", "ledger_version", "INTEGER");
+  ensureColumn(database, "audit_logs", "ledger_id", "TEXT");
+  ensureColumn(database, "audit_logs", "ledger_version", "INTEGER");
+  ensureColumn(database, "audit_logs", "request_id", "TEXT");
   backfillInventoryMovementDates(database);
 }
 
@@ -3483,6 +3741,33 @@ function applyMigrations(database: Database.Database) {
             ON initialization_import_errors(import_id, row_no);
           CREATE INDEX IF NOT EXISTS idx_initialization_import_errors_created
             ON initialization_import_errors(created_at);
+        `);
+      },
+    },
+    {
+      id: "parallel_ledger_indexes",
+      description: "平行账套索引与唯一约束",
+      up: () => {
+        database.exec(`
+          CREATE INDEX IF NOT EXISTS idx_parallel_ledgers_status ON parallel_ledgers(status);
+          CREATE INDEX IF NOT EXISTS idx_parallel_ledgers_owner ON parallel_ledgers(owner_user_id);
+          CREATE INDEX IF NOT EXISTS idx_parallel_ledger_members_user ON parallel_ledger_members(user_id);
+          CREATE INDEX IF NOT EXISTS idx_parallel_ledger_scopes_ledger ON parallel_ledger_scopes(ledger_id, scope_entity_type);
+          CREATE INDEX IF NOT EXISTS idx_parallel_entity_snapshots_entity ON parallel_entity_snapshots(entity_type, entity_id);
+          CREATE INDEX IF NOT EXISTS idx_parallel_adjustments_ledger ON parallel_adjustments(ledger_id, ledger_version);
+          CREATE INDEX IF NOT EXISTS idx_parallel_adjustment_lines_adj ON parallel_adjustment_lines(adjustment_id);
+          CREATE INDEX IF NOT EXISTS idx_parallel_calculation_runs_ledger ON parallel_calculation_runs(ledger_id, ledger_version, created_at);
+          CREATE INDEX IF NOT EXISTS idx_parallel_calculation_runs_stale ON parallel_calculation_runs(stale, status);
+          CREATE INDEX IF NOT EXISTS idx_parallel_inventory_projections_run ON parallel_inventory_projections(run_id, material_id, batch_id);
+          CREATE INDEX IF NOT EXISTS idx_parallel_material_allocations_run ON parallel_material_allocations(run_id, production_order_id);
+          CREATE INDEX IF NOT EXISTS idx_parallel_cost_projections_run ON parallel_cost_projections(run_id, production_order_id);
+          CREATE INDEX IF NOT EXISTS idx_parallel_impacts_run ON parallel_impacts(run_id, blocking, severity);
+          CREATE INDEX IF NOT EXISTS idx_parallel_gaps_run ON parallel_gaps(run_id, blocking, resolution_status);
+          CREATE INDEX IF NOT EXISTS idx_parallel_suggestions_gap ON parallel_suggestions(gap_id, status);
+          CREATE INDEX IF NOT EXISTS idx_parallel_merge_requests_status ON parallel_merge_requests(ledger_id, status);
+          CREATE INDEX IF NOT EXISTS idx_parallel_merge_items_req ON parallel_merge_items(merge_request_id, publish_status);
+          CREATE INDEX IF NOT EXISTS idx_parallel_merge_conflicts_req ON parallel_merge_conflicts(merge_request_id, conflict_type);
+          CREATE INDEX IF NOT EXISTS idx_document_exports_ledger ON document_exports(ledger_type, ledger_id);
         `);
       },
     },

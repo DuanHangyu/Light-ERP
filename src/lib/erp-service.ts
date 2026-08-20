@@ -26,6 +26,9 @@ import {
 import { getDb, resetDemoDatabase } from "./db";
 import { ensureDataDirs, getDataPaths } from "./paths";
 import { hashPassword, hashSessionToken, randomSessionToken, verifyPassword } from "./security";
+import { createParallelLedger, freezeParallelLedger, unfreezeParallelLedger, archiveParallelLedger, discardParallelLedger, addParallelAdjustment, removeParallelAdjustment, buildParallelSnapshotData, seedParallelDemoData } from "./parallel-ledger-service";
+import { runParallelCalculation } from "./parallel-calculation-engine";
+import { confirmParallelSuggestion, previewParallelMerge } from "./parallel-impact-service";
 
 export type Role =
   | "sales"
@@ -241,6 +244,16 @@ const roleActionMap: Record<string, Role[]> = {
   recordSalesReturn: ["assistant", "warehouse", "admin"],
   recordCustomerRefund: ["finance", "admin"],
   createReplacementShipment: ["assistant", "admin"],
+  parallelLedgerCreate: ["manager", "admin", "finance"],
+  parallelLedgerFreeze: ["manager", "admin", "finance"],
+  parallelLedgerUnfreeze: ["manager", "admin", "finance"],
+  parallelLedgerArchive: ["manager", "admin", "finance"],
+  parallelLedgerDiscard: ["manager", "admin", "finance"],
+  parallelLedgerAddAdjustment: ["manager", "admin", "finance"],
+  parallelLedgerRemoveAdjustment: ["manager", "admin", "finance"],
+  parallelLedgerRecalculate: ["manager", "admin", "finance"],
+  parallelLedgerConfirmSuggestion: ["manager", "admin", "finance"],
+  parallelLedgerMergePreview: ["manager", "admin", "finance"],
 };
 
 const actionLabels: Record<string, string> = {
@@ -337,7 +350,7 @@ const actionLabels: Record<string, string> = {
   createReplacementShipment: "补开发货单",
 };
 
-function now() {
+export function now() {
   return new Date().toISOString();
 }
 
@@ -347,11 +360,11 @@ function addDays(dateText: string, days: number) {
   return date.toISOString().slice(0, 10);
 }
 
-function uid(prefix: string) {
+export function uid(prefix: string) {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`.toUpperCase();
 }
 
-function serial(database: Database.Database, table: string, prefix: string) {
+export function serial(database: Database.Database, table: string, prefix: string) {
   const dateKey = new Date().toISOString().slice(0, 10).replaceAll("-", "");
   const id = `${table}:${prefix}:${dateKey}`;
   const current = database.prepare("SELECT current_no FROM document_sequences WHERE id = ?").get(id) as
@@ -376,7 +389,7 @@ function serial(database: Database.Database, table: string, prefix: string) {
   return `${prefix}-${dateKey}-${String(nextNo).padStart(3, "0")}`;
 }
 
-function getUser(database: Database.Database, actorId: string) {
+export function getUser(database: Database.Database, actorId: string) {
   const user = database.prepare("SELECT * FROM users WHERE id = ?").get(actorId) as UserRow | undefined;
   if (!user) throw new Error("无效账号，请重新选择演示角色。");
   if (user.status === "inactive") throw new Error("账号已停用，请联系系统管理员。");
@@ -439,7 +452,7 @@ function requireActionPermission(database: Database.Database, actorId: string, a
   return user;
 }
 
-function audit(
+export function audit(
   database: Database.Database,
   actorId: string,
   action: string,
@@ -1271,7 +1284,7 @@ function approvalRuleRows(database: Database.Database) {
   `).all() as ApprovalRuleRow[]).map(approvalRuleView);
 }
 
-function matchApprovalRule(database: Database.Database, sourceType: string, amount: number, context?: ApprovalRuleMatchContext) {
+export function matchApprovalRule(database: Database.Database, sourceType: string, amount: number, context?: ApprovalRuleMatchContext) {
   const rules = database.prepare(`
     SELECT ar.*, m.name AS material_name
     FROM approval_rules ar
@@ -4263,6 +4276,7 @@ export function getSnapshot(actorId = "U-SALES") {
       rolePermissions: rolePermissionRows(database),
       permissionMatrix: rolePermissionMatrixRows(database),
     },
+    parallel: buildParallelSnapshotData(database, safeActor),
     safeActor,
   };
 }
@@ -6827,6 +6841,36 @@ export function performAction(input: ActionInput) {
       case "deactivateBom":
         deactivateMaster(database, input.actorId, "boms", mustEntity(input.entityId), "bom");
         break;
+      case "parallelLedgerCreate":
+        createParallelLedger(database, input.actorId, input.payload ?? {});
+        break;
+      case "parallelLedgerFreeze":
+        freezeParallelLedger(database, input.actorId, mustEntity(input.entityId));
+        break;
+      case "parallelLedgerUnfreeze":
+        unfreezeParallelLedger(database, input.actorId, mustEntity(input.entityId));
+        break;
+      case "parallelLedgerArchive":
+        archiveParallelLedger(database, input.actorId, mustEntity(input.entityId));
+        break;
+      case "parallelLedgerDiscard":
+        discardParallelLedger(database, input.actorId, mustEntity(input.entityId));
+        break;
+      case "parallelLedgerAddAdjustment":
+        addParallelAdjustment(database, input.actorId, mustEntity(input.entityId), input.payload ?? {});
+        break;
+      case "parallelLedgerRemoveAdjustment":
+        removeParallelAdjustment(database, input.actorId, mustEntity(input.entityId), mustEntityFromPayload(input.payload));
+        break;
+      case "parallelLedgerRecalculate":
+        runParallelCalculation(database, input.actorId, mustEntity(input.entityId));
+        break;
+      case "parallelLedgerConfirmSuggestion":
+        confirmParallelSuggestion(database, input.actorId, mustEntity(input.entityId), input.payload ?? {});
+        break;
+      case "parallelLedgerMergePreview":
+        previewParallelMerge(database, input.actorId, mustEntity(input.entityId));
+        break;
     }
   })();
 
@@ -6836,6 +6880,12 @@ export function performAction(input: ActionInput) {
 function mustEntity(entityId?: string) {
   if (!entityId) throw new Error("缺少单据编号。");
   return entityId;
+}
+
+function mustEntityFromPayload(payload?: Record<string, unknown>) {
+  const value = payload?.adjustment_id ?? payload?.entity_id;
+  if (!value || typeof value !== "string") throw new Error("缺少调整项编号。");
+  return value;
 }
 
 export type DocumentAttachmentEntityType =
@@ -20565,7 +20615,7 @@ function upsertReportSnapshot(database: Database.Database, exportType: FormalRep
   );
 }
 
-function recordDocumentExport(
+export function recordDocumentExport(
   database: Database.Database,
   input: { actorId: string; type: string; entityId?: string; fileName: string },
 ) {
@@ -20761,7 +20811,7 @@ function xlsxCellToPrimitive(value: unknown) {
   return value;
 }
 
-function buildXlsxBuffer(sheets: Array<{ name: string; rows: Array<Record<string, unknown>> }>) {
+export function buildXlsxBuffer(sheets: Array<{ name: string; rows: Array<Record<string, unknown>> }>) {
   const zip = new AdmZip();
   const safeSheets = sheets.length > 0 ? sheets : [{ name: "empty", rows: [] }];
   zip.addFile("[Content_Types].xml", Buffer.from(contentTypesXml(safeSheets.length)));
