@@ -82,6 +82,7 @@ import {
 } from "@/lib/erp-navigation";
 import { buildWorkbenchModel, type WorkbenchMetric } from "@/lib/erp-workbench";
 import { searchErpEntities, type ErpSearchResult } from "@/lib/erp-search";
+import { filterAndPaginateRows } from "@/lib/erp-table";
 import { workspaceFor, type FocusedWorkspaceModule } from "@/lib/erp-workspace";
 
 type User = {
@@ -2757,10 +2758,6 @@ function SystemModule({
 }) {
   const isAdmin = snapshot.currentUser.role === "admin";
   const [showAllHealthChecks, setShowAllHealthChecks] = useState(false);
-  const [passwordForm, setPasswordForm] = useState({
-    current_password: "",
-    new_password: "",
-  });
   const [userForm, setUserForm] = useState({
     user_id: "",
     username: "",
@@ -2809,8 +2806,6 @@ function SystemModule({
   });
   const [remediationAttachmentBusy, setRemediationAttachmentBusy] = useState(false);
   const [auditKeyword, setAuditKeyword] = useState("");
-  const updatePasswordField = (key: string, value: string) =>
-    setPasswordForm((current) => ({ ...current, [key]: value }));
   const updateUserField = (key: string, value: string) =>
     setUserForm((current) => ({ ...current, [key]: value }));
   const selectManagedUser = (userId: string) => {
@@ -3363,27 +3358,6 @@ function SystemModule({
               </div>
             );
           })}
-        </div>
-      </Panel>
-      <Panel title="修改本人密码" icon={ShieldCheck} action="会话安全">
-        <div className="grid gap-3 lg:grid-cols-[1fr_1fr_auto] lg:items-end">
-          <MasterInput
-            label="当前密码"
-            type="password"
-            value={passwordForm.current_password}
-            onChange={(value) => updatePasswordField("current_password", value)}
-          />
-          <MasterInput
-            label="新密码"
-            type="password"
-            value={passwordForm.new_password}
-            onChange={(value) => updatePasswordField("new_password", value)}
-          />
-          <MasterSubmitButton
-            busy={busy === "changeOwnPassword-system-primary"}
-            label="修改密码"
-            onClick={() => runAction({ action: "changeOwnPassword", payload: passwordForm })}
-          />
         </div>
       </Panel>
       <div className="grid gap-5 xl:grid-cols-[380px_1fr]">
@@ -12862,10 +12836,7 @@ function ArchiveModule({
           ]}
         />
       </div>
-      <div className="grid gap-5 xl:grid-cols-2">
-        <ActivityPanel title="导出记录" icon={Download} rows={snapshot.board.documentExports} mode="document" />
-        <ActivityPanel title="审计日志" icon={ShieldCheck} rows={snapshot.board.auditLogs} mode="audit" />
-      </div>
+      <ActivityPanel title="导出记录" icon={Download} rows={snapshot.board.documentExports} mode="document" />
       <Panel
         title="冷备份操作"
         icon={DatabaseBackup}
@@ -13711,24 +13682,45 @@ function DataTable({
   const Icon = icon;
   const ActionIcon = action?.icon ?? Download;
   const dataRows = rows ?? [];
+  const [query, setQuery] = useState("");
+  const [page, setPage] = useState(1);
+  const tablePage = useMemo(() => filterAndPaginateRows(dataRows, query, page, 10), [dataRows, page, query]);
   return (
     <section className="min-w-0 rounded-lg border border-slate-200 bg-white shadow-sm">
-      <div className="flex min-h-12 items-center justify-between gap-3 border-b border-slate-200 px-4 py-3">
+      <div className="flex min-h-12 flex-col gap-3 border-b border-slate-200 px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
         <div className="flex items-center gap-2">
           <Icon className="h-4 w-4 text-blue-600" />
           <h2 className="text-sm font-semibold text-slate-950">{title}</h2>
-          <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-500">{dataRows.length}</span>
+          <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-500">
+            {query ? `${tablePage.total}/${dataRows.length}` : dataRows.length}
+          </span>
         </div>
-        {action ? (
-          <button
-            type="button"
-            onClick={action.onClick}
-            className="inline-flex h-8 shrink-0 items-center gap-2 rounded-md border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-700 hover:border-blue-300 hover:text-blue-700"
-          >
-            <ActionIcon className="h-4 w-4" />
-            {action.label}
-          </button>
-        ) : null}
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+          <label className="flex h-8 min-w-0 items-center gap-2 rounded-md border border-slate-200 bg-slate-50 px-2.5 text-slate-500 sm:w-52">
+            <Search className="h-3.5 w-3.5 shrink-0" />
+            <span className="sr-only">搜索{title}</span>
+            <input
+              type="search"
+              value={query}
+              onChange={(event) => {
+                setQuery(event.target.value);
+                setPage(1);
+              }}
+              className="min-w-0 flex-1 bg-transparent text-xs text-slate-700 outline-none placeholder:text-slate-400"
+              placeholder="搜索当前列表"
+            />
+          </label>
+          {action ? (
+            <button
+              type="button"
+              onClick={action.onClick}
+              className="inline-flex h-8 shrink-0 items-center justify-center gap-2 rounded-md border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-700 hover:border-blue-300 hover:text-blue-700"
+            >
+              <ActionIcon className="h-4 w-4" />
+              {action.label}
+            </button>
+          ) : null}
+        </div>
       </div>
       <div className="scrollbar-thin overflow-x-auto">
         <table className="w-full min-w-[760px] text-left text-sm">
@@ -13742,14 +13734,14 @@ function DataTable({
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100">
-            {dataRows.length === 0 ? (
+            {tablePage.rows.length === 0 ? (
               <tr>
                 <td colSpan={columns.length} className="px-4 py-8 text-center text-sm text-slate-500">
                   {empty}
                 </td>
               </tr>
             ) : (
-              dataRows.map((row, index) => (
+              tablePage.rows.map((row, index) => (
                 <tr key={String(row.id ?? index)} className="bg-white hover:bg-slate-50">
                   {columns.map((column) => (
                     <td key={column.key} className="max-w-[220px] truncate px-4 py-3 text-slate-700">
@@ -13762,6 +13754,34 @@ function DataTable({
           </tbody>
         </table>
       </div>
+      {tablePage.total > 0 ? (
+        <div className="flex flex-col gap-2 border-t border-slate-100 px-4 py-3 text-xs text-slate-500 sm:flex-row sm:items-center sm:justify-between">
+          <span>
+            显示 {(tablePage.page - 1) * 10 + 1}–{Math.min(tablePage.page * 10, tablePage.total)}，共 {tablePage.total} 条
+          </span>
+          {tablePage.pageCount > 1 ? (
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                disabled={tablePage.page <= 1}
+                onClick={() => setPage((current) => Math.max(1, current - 1))}
+                className="h-7 rounded-md border border-slate-200 bg-white px-2.5 font-semibold text-slate-600 disabled:opacity-40"
+              >
+                上一页
+              </button>
+              <span>{tablePage.page} / {tablePage.pageCount}</span>
+              <button
+                type="button"
+                disabled={tablePage.page >= tablePage.pageCount}
+                onClick={() => setPage((current) => Math.min(tablePage.pageCount, current + 1))}
+                className="h-7 rounded-md border border-slate-200 bg-white px-2.5 font-semibold text-slate-600 disabled:opacity-40"
+              >
+                下一页
+              </button>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
     </section>
   );
 }
