@@ -4006,7 +4006,7 @@ function RoleWorkbenchModule({
             ))}
           </div>
         </div>
-        <div className="grid gap-3 p-4 sm:grid-cols-2 xl:grid-cols-4">
+        <div className="grid gap-3 p-4 sm:grid-cols-2 lg:grid-cols-4">
           {model.metrics.map((metric) => (
             <div key={metric.key} className="rounded-lg border border-slate-200 bg-slate-50/70 px-4 py-3">
               <p className="text-xs font-medium text-slate-500">{metric.label}</p>
@@ -4016,7 +4016,7 @@ function RoleWorkbenchModule({
         </div>
       </section>
 
-      <section className="grid gap-5 2xl:grid-cols-[minmax(0,1.35fr)_minmax(360px,0.65fr)]">
+      <section className="grid gap-5 lg:grid-cols-[minmax(0,1.35fr)_minmax(320px,0.65fr)]">
         <Panel title="我的待办" icon={ClipboardList} action={`共 ${snapshot.tasks.length} 项 / 优先 ${model.priorityTaskCount} 项`}>
           <div className="space-y-2">
             {model.tasks.length === 0 ? (
@@ -4063,7 +4063,7 @@ function RoleWorkbenchModule({
         </Panel>
       </section>
 
-      <section className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_minmax(320px,0.45fr)]">
+      <section className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(280px,0.45fr)]">
         <Panel title="最近业务" icon={ReceiptText} action="从最近单据继续工作">
           <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
             {recentDocuments.length === 0 ? (
