@@ -48,6 +48,8 @@ type AdjustedModel = {
   bomLines: Array<NumberRow>;
   productionOrders: Array<NumberRow>;
   orders: Map<string, NumberRow>;
+  requisitions: Array<NumberRow>;
+  requisitionLines: Array<NumberRow>;
   projectedPurchasePrices: Map<string, number>;
   projectedPurchaseQuantities: Map<string, number>;
   inventoryOverrides: Map<string, number>;
@@ -59,7 +61,30 @@ type AdjustedModel = {
   bomComponentOverrides: Map<string, number>;
   bomAddedComponents: Array<{ productId: string; materialId: string; qtyPer: number; isPrimary: boolean }>;
   bomRemovedComponents: Array<{ productId: string; materialId: string }>;
-  substituteMap: Map<string, string>;
+  materialSubstitutions: MaterialSubstitutionRule[];
+};
+
+type MaterialSubstitutionRule = {
+  adjustmentId: string;
+  lineId: string;
+  entityType: string;
+  entityId: string;
+  sourceMaterialId: string;
+  targetMaterialId: string;
+  quantity: number | null;
+};
+
+type MaterialSubstitutionResult = MaterialSubstitutionRule & {
+  productionOrderId: string;
+  productId: string;
+  substituteQty: number;
+  sourceRequiredBefore: number;
+  sourceRequiredAfter: number;
+  targetRequiredBefore: number;
+  targetRequiredAfter: number;
+  issuedSourceQty: number;
+  issuedTargetQty: number;
+  requisitionIds: string[];
 };
 
 function buildModel(store: SnapshotStore): AdjustedModel {
@@ -70,6 +95,8 @@ function buildModel(store: SnapshotStore): AdjustedModel {
     bomLines: [...store.bomLines],
     productionOrders: [...store.productionOrders],
     orders: new Map(store.orders.map((o) => [str(o, "id"), o])),
+    requisitions: [...store.requisitions],
+    requisitionLines: [...store.requisitionLines],
     projectedPurchasePrices: new Map(),
     projectedPurchaseQuantities: new Map(),
     inventoryOverrides: new Map(),
@@ -81,7 +108,7 @@ function buildModel(store: SnapshotStore): AdjustedModel {
     bomComponentOverrides: new Map(),
     bomAddedComponents: [],
     bomRemovedComponents: [],
-    substituteMap: new Map(),
+    materialSubstitutions: [],
   };
 }
 
@@ -160,17 +187,23 @@ function applyAdjustments(model: AdjustedModel, adjustments: ParallelAdjustmentR
         break;
       case "material_substitute":
         for (const line of adjLines) {
-          if (line.source_material_id && line.target_material_id) model.substituteMap.set(line.source_material_id, line.target_material_id);
+          if (line.source_material_id && line.target_material_id) {
+            model.materialSubstitutions.push({
+              adjustmentId: adjustment.id,
+              lineId: line.id,
+              entityType: line.entity_type,
+              entityId: line.entity_id,
+              sourceMaterialId: line.source_material_id,
+              targetMaterialId: line.target_material_id,
+              quantity: line.quantity,
+            });
+          }
         }
         break;
       default:
         break;
     }
   }
-}
-
-function effectiveMaterialId(model: AdjustedModel, materialId: string): string {
-  return model.substituteMap.get(materialId) ?? materialId;
 }
 
 function activeBomLines(model: AdjustedModel): BomLineInput[] {
@@ -182,16 +215,15 @@ function activeBomLines(model: AdjustedModel): BomLineInput[] {
     const removed = model.bomRemovedComponents.some((item) => item.productId === parentProductId && item.materialId === componentId);
     if (removed) continue;
     const componentType = str(line, "component_type", "material") as "material" | "product";
-    const effective = componentType === "material" ? effectiveMaterialId(model, componentId) : componentId;
-    const override = model.bomComponentOverrides.get(`${parentProductId}:${effective}`);
+    const override = model.bomComponentOverrides.get(`${parentProductId}:${componentId}`);
     inputs.push({
       parentProductId,
       componentType,
-      componentId: effective,
+      componentId,
       qtyPer: override != null ? override : num(line, "qty_per", 0),
       isPrimary: Boolean(num(line, "is_primary", 0)),
     });
-    seen.add(`${parentProductId}:${effective}`);
+    seen.add(`${parentProductId}:${componentId}`);
   }
   for (const added of model.bomAddedComponents) {
     const key = `${added.productId}:${added.materialId}`;
@@ -200,6 +232,82 @@ function activeBomLines(model: AdjustedModel): BomLineInput[] {
     seen.add(key);
   }
   return inputs;
+}
+
+type ExpandedMaterial = { materialId: string; requiredQty: number; isPrimary: boolean };
+
+function issuedMaterialsForProductionOrder(model: AdjustedModel, productionOrderId: string) {
+  const requisitionIds = model.requisitions
+    .filter((row) => str(row, "production_order_id") === productionOrderId)
+    .map((row) => str(row, "id"));
+  const requisitionIdSet = new Set(requisitionIds);
+  const issuedByMaterial = new Map<string, number>();
+  for (const line of model.requisitionLines) {
+    if (!requisitionIdSet.has(str(line, "requisition_id"))) continue;
+    const materialId = str(line, "material_id");
+    const issuedQty = Math.max(0, num(line, "issued_qty", 0));
+    issuedByMaterial.set(materialId, roundQty((issuedByMaterial.get(materialId) ?? 0) + issuedQty));
+  }
+  return { requisitionIds, issuedByMaterial };
+}
+
+function applyMaterialSubstitutions(
+  model: AdjustedModel,
+  productionOrderId: string,
+  productId: string,
+  materials: ExpandedMaterial[],
+): { materials: ExpandedMaterial[]; primaryMaterialQty: number; results: MaterialSubstitutionResult[] } {
+  const materialMap = new Map(materials.map((material) => [material.materialId, { ...material }]));
+  const { requisitionIds, issuedByMaterial } = issuedMaterialsForProductionOrder(model, productionOrderId);
+  const results: MaterialSubstitutionResult[] = [];
+
+  for (const rule of model.materialSubstitutions) {
+    const matchesScope =
+      (rule.entityType === "production_order" && rule.entityId === productionOrderId) ||
+      (rule.entityType === "product" && rule.entityId === productId);
+    if (!matchesScope || rule.sourceMaterialId === rule.targetMaterialId) continue;
+    const source = materialMap.get(rule.sourceMaterialId);
+    if (!source || source.requiredQty <= 0) continue;
+    const target = materialMap.get(rule.targetMaterialId) ?? {
+      materialId: rule.targetMaterialId,
+      requiredQty: 0,
+      isPrimary: source.isPrimary,
+    };
+    const requestedQty = rule.quantity == null ? source.requiredQty : Math.max(0, rule.quantity);
+    const substituteQty = roundQty(Math.min(source.requiredQty, requestedQty));
+    if (substituteQty <= 0) continue;
+    const sourceBefore = source.requiredQty;
+    const targetBefore = target.requiredQty;
+    source.requiredQty = roundQty(source.requiredQty - substituteQty);
+    target.requiredQty = roundQty(target.requiredQty + substituteQty);
+    target.isPrimary = target.isPrimary || source.isPrimary;
+    materialMap.set(rule.sourceMaterialId, source);
+    materialMap.set(rule.targetMaterialId, target);
+    results.push({
+      ...rule,
+      productionOrderId,
+      productId,
+      substituteQty,
+      sourceRequiredBefore: sourceBefore,
+      sourceRequiredAfter: source.requiredQty,
+      targetRequiredBefore: targetBefore,
+      targetRequiredAfter: target.requiredQty,
+      issuedSourceQty: issuedByMaterial.get(rule.sourceMaterialId) ?? 0,
+      issuedTargetQty: issuedByMaterial.get(rule.targetMaterialId) ?? 0,
+      requisitionIds,
+    });
+  }
+
+  const nextMaterials = [...materialMap.values()]
+    .filter((material) => material.requiredQty > 0)
+    .sort((a, b) => a.materialId.localeCompare(b.materialId));
+  return {
+    materials: nextMaterials,
+    primaryMaterialQty: roundQty(
+      nextMaterials.reduce((sum, material) => sum + (material.isPrimary ? material.requiredQty : 0), 0),
+    ),
+    results,
+  };
 }
 
 function batchesForMaterial(model: AdjustedModel, materialId: string): FifoBatch[] {
@@ -327,6 +435,7 @@ export function runParallelCalculation(
 
     const allocations: Allocation[] = [];
     const costResults: CostResult[] = [];
+    const substitutionResults: MaterialSubstitutionResult[] = [];
     const gapByMaterial = new Map<string, GapResult>();
     const issuedByMaterial = new Map<string, number>();
     const projectedInbound = new Map<string, { qty: number; price: number }>();
@@ -366,7 +475,14 @@ export function runParallelCalculation(
       const product = model.products.get(productId);
       const lossRate = model.lossRateOverrides.get(productId) ?? 0;
       const bomInputs = activeBomLines(model);
-      const expansion = expandBom({ rootProductId: productId, quantity: roundQty(orderQty * (1 + lossRate)), lines: bomInputs });
+      const expandedBom = expandBom({ rootProductId: productId, quantity: roundQty(orderQty * (1 + lossRate)), lines: bomInputs });
+      const expansion = applyMaterialSubstitutions(
+        model,
+        productionOrderId,
+        productId,
+        expandedBom.materials,
+      );
+      substitutionResults.push(...expansion.results);
       const baseline = computeBaseline(model, productionOrder);
       const projectedBatchId = (materialId: string) => `projected-${materialId}`;
 
@@ -477,7 +593,16 @@ export function runParallelCalculation(
         insertInventory.run(uid("PIP"), runId, ledgerId, materialId, ending.qty, ending.avgCost, ending.value, finishedAt);
       }
 
-      writeImpactsAndGaps(database, runId, ledgerId, costResults, gapByMaterial, adjustments, model);
+      writeImpactsAndGaps(
+        database,
+        runId,
+        ledgerId,
+        costResults,
+        gapByMaterial,
+        adjustments,
+        model,
+        substitutionResults,
+      );
       database.prepare("UPDATE parallel_ledgers SET status = 'ready', engine_version = ?, updated_at = ? WHERE id = ?").run(PARALLEL_ENGINE_VERSION, finishedAt, ledgerId);
       database.prepare("INSERT INTO audit_logs (id, actor_id, action, entity_type, entity_id, message, created_at) VALUES (?, ?, 'parallelLedgerRecalculate', 'parallel_ledger', ?, ?, ?)").run(uid("A"), actorId, ledgerId, `重新测算平行账套 ${ledger.ledger_code}：${JSON.stringify(summary)}`, finishedAt);
     });
@@ -501,10 +626,57 @@ function writeImpactsAndGaps(
   gapByMaterial: Map<string, GapResult>,
   adjustments: ParallelAdjustmentRow[],
   model: AdjustedModel,
+  substitutionResults: MaterialSubstitutionResult[],
 ) {
   const insertImpact = database.prepare("INSERT INTO parallel_impacts (id, run_id, domain, severity, blocking, entity_type, entity_id, before_value, after_value, delta_value, message, source_adjustment_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
   const addImpact = (domain: ImpactDomain, severity: ImpactSeverity, blocking: boolean, entity_type: string, entity_id: string, before: string, after: string, delta: string, message: string, sourceAdjustmentId: string | null) => {
     insertImpact.run(uid("PIM"), runId, domain, severity, blocking ? 1 : 0, entity_type, entity_id, before, after, delta, message, sourceAdjustmentId);
+  };
+
+  const insertGap = database.prepare(`
+    INSERT INTO parallel_gaps (
+      id, run_id, gap_type, material_id, required_qty, available_qty,
+      shortage_qty, required_date, blocking, resolution_status, selected_suggestion_id
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, 'open', NULL)
+  `);
+  const insertSuggestion = database.prepare(`
+    INSERT INTO parallel_suggestions (
+      id, gap_id, ledger_id, suggestion_type, document_type, payload_json,
+      status, confirmed_by, confirmed_at
+    ) VALUES (?, ?, ?, ?, ?, ?, 'pending', NULL, NULL)
+  `);
+  const addGapSuggestion = (input: {
+    gapType: string;
+    materialId: string | null;
+    requiredQty: number;
+    availableQty: number;
+    shortageQty: number;
+    blocking: boolean;
+    suggestionType: string;
+    documentType: string;
+    payload: Record<string, unknown>;
+  }) => {
+    const gapId = uid("PGP");
+    const suggestionId = uid("PSG");
+    insertGap.run(
+      gapId,
+      runId,
+      input.gapType,
+      input.materialId,
+      input.requiredQty,
+      input.availableQty,
+      input.shortageQty,
+      input.blocking ? 1 : 0,
+    );
+    insertSuggestion.run(
+      suggestionId,
+      gapId,
+      ledgerId,
+      input.suggestionType,
+      input.documentType,
+      JSON.stringify(input.payload),
+    );
+    return { gapId, suggestionId };
   };
 
   for (const cost of costResults) {
@@ -520,11 +692,199 @@ function writeImpactsAndGaps(
     addImpact("bom", "info", false, "adjustment", adjustment.id, "", "", "", `调整项 ${adjustment.adjustment_no}：${ADJUSTMENT_TYPE_LABELS[adjustment.adjustment_type as AdjustmentType] ?? adjustment.adjustment_type}（${adjustment.reason || "无说明"}）`, adjustment.id);
   }
 
-  const insertGap = database.prepare("INSERT INTO parallel_gaps (id, run_id, gap_type, material_id, required_qty, available_qty, shortage_qty, required_date, blocking, resolution_status, selected_suggestion_id) VALUES (?, ?, 'purchase_shortage', ?, ?, ?, ?, NULL, 1, 'open', NULL)");
-  const insertSuggestion = database.prepare("INSERT INTO parallel_suggestions (id, gap_id, ledger_id, suggestion_type, document_type, payload_json, status, confirmed_by, confirmed_at) VALUES (?, ?, ?, 'purchase_requisition', 'purchase_requisition', ?, 'pending', NULL, NULL)");
   for (const [materialId, gap] of gapByMaterial.entries()) {
-    const gapId = uid("PGP");
-    insertGap.run(gapId, runId, materialId, gap.requiredQty, gap.availableQty, gap.shortageQty);
-    insertSuggestion.run(uid("PSG"), gapId, ledgerId, JSON.stringify({ material_id: materialId, requested_qty: gap.projectedPurchaseQty, estimated_unit_cost: gap.projectedUnitCost, line_amount: gap.lineAmount }));
+    const source = substitutionResults.find((result) => result.targetMaterialId === materialId);
+    addGapSuggestion({
+      gapType: "purchase_shortage",
+      materialId,
+      requiredQty: gap.requiredQty,
+      availableQty: gap.availableQty,
+      shortageQty: gap.shortageQty,
+      blocking: true,
+      suggestionType: "purchase_requisition",
+      documentType: "purchase_requisition",
+      payload: {
+        material_id: materialId,
+        requested_qty: gap.projectedPurchaseQty,
+        estimated_unit_cost: gap.projectedUnitCost,
+        line_amount: gap.lineAmount,
+        source_adjustment_id: source?.adjustmentId ?? null,
+        source_adjustment_line_id: source?.lineId ?? null,
+        affected_entity_type: "material",
+        affected_entity_id: materialId,
+        evidence: {
+          required_qty: gap.requiredQty,
+          available_qty: gap.availableQty,
+          shortage_qty: gap.shortageQty,
+          calculation_run_id: runId,
+        },
+      },
+    });
+  }
+
+  for (const result of substitutionResults) {
+    const sourceMaterial = model.materials.get(result.sourceMaterialId);
+    const targetMaterial = model.materials.get(result.targetMaterialId);
+    const common = {
+      production_order_id: result.productionOrderId,
+      product_id: result.productId,
+      source_material_id: result.sourceMaterialId,
+      target_material_id: result.targetMaterialId,
+      substitute_qty: result.substituteQty,
+      requisition_ids: result.requisitionIds,
+      source_adjustment_id: result.adjustmentId,
+      source_adjustment_line_id: result.lineId,
+    };
+    const hasTargetBomBasis = model.bomLines.some(
+      (line) =>
+        str(line, "parent_product_id") === result.productId &&
+        str(line, "component_type", "material") === "material" &&
+        str(line, "component_id") === result.targetMaterialId,
+    );
+
+    if (!hasTargetBomBasis) {
+      addImpact(
+        "bom",
+        "blocking",
+        true,
+        "product",
+        result.productId,
+        result.sourceMaterialId,
+        result.targetMaterialId,
+        String(result.substituteQty),
+        `物料替换缺少正式配方依据：${str(sourceMaterial, "name", result.sourceMaterialId)} → ${str(targetMaterial, "name", result.targetMaterialId)} ${result.substituteQty}`,
+        result.adjustmentId,
+      );
+      addGapSuggestion({
+        gapType: "bom_basis_missing",
+        materialId: result.targetMaterialId,
+        requiredQty: result.substituteQty,
+        availableQty: 0,
+        shortageQty: result.substituteQty,
+        blocking: true,
+        suggestionType: "bom_change",
+        documentType: "bom_change",
+        payload: {
+          ...common,
+          affected_entity_type: "product",
+          affected_entity_id: result.productId,
+          evidence: {
+            active_target_bom_line_found: false,
+            source_required_before: result.sourceRequiredBefore,
+            source_required_after: result.sourceRequiredAfter,
+            target_required_before: result.targetRequiredBefore,
+            target_required_after: result.targetRequiredAfter,
+            calculation_run_id: runId,
+          },
+        },
+      });
+    }
+
+    const supplementQty = roundQty(Math.max(0, result.targetRequiredAfter - result.issuedTargetQty));
+    if (supplementQty > 0) {
+      addImpact(
+        "production",
+        "warning",
+        true,
+        "production_order",
+        result.productionOrderId,
+        String(result.issuedTargetQty),
+        String(result.targetRequiredAfter),
+        String(supplementQty),
+        `工单需补领 ${str(targetMaterial, "name", result.targetMaterialId)} ${supplementQty}`,
+        result.adjustmentId,
+      );
+      addGapSuggestion({
+        gapType: "material_supplement_needed",
+        materialId: result.targetMaterialId,
+        requiredQty: result.targetRequiredAfter,
+        availableQty: result.issuedTargetQty,
+        shortageQty: supplementQty,
+        blocking: true,
+        suggestionType: "replenish",
+        documentType: "material_supplement",
+        payload: {
+          ...common,
+          material_id: result.targetMaterialId,
+          suggested_qty: supplementQty,
+          affected_entity_type: "production_order",
+          affected_entity_id: result.productionOrderId,
+          evidence: {
+            theoretical_required_qty: result.targetRequiredAfter,
+            issued_qty: result.issuedTargetQty,
+            calculation_run_id: runId,
+          },
+        },
+      });
+    }
+
+    const returnQty = roundQty(Math.max(0, result.issuedSourceQty - result.sourceRequiredAfter));
+    if (returnQty > 0) {
+      addImpact(
+        "production",
+        "warning",
+        true,
+        "production_order",
+        result.productionOrderId,
+        String(result.issuedSourceQty),
+        String(result.sourceRequiredAfter),
+        String(returnQty),
+        `工单需退回 ${str(sourceMaterial, "name", result.sourceMaterialId)} ${returnQty}`,
+        result.adjustmentId,
+      );
+      addGapSuggestion({
+        gapType: "material_return_needed",
+        materialId: result.sourceMaterialId,
+        requiredQty: result.sourceRequiredAfter,
+        availableQty: result.issuedSourceQty,
+        shortageQty: returnQty,
+        blocking: true,
+        suggestionType: "return_material",
+        documentType: "material_return",
+        payload: {
+          ...common,
+          material_id: result.sourceMaterialId,
+          suggested_qty: returnQty,
+          affected_entity_type: "production_order",
+          affected_entity_id: result.productionOrderId,
+          evidence: {
+            theoretical_required_qty: result.sourceRequiredAfter,
+            issued_qty: result.issuedSourceQty,
+            calculation_run_id: runId,
+          },
+        },
+      });
+    }
+
+    const cost = costResults.find((item) => item.productionOrderId === result.productionOrderId);
+    if (cost) {
+      const deltaAmount = roundMoney(cost.totalCost - cost.baselineTotalCost);
+      if (deltaAmount !== 0) {
+        addGapSuggestion({
+          gapType: "production_cost_changed",
+          materialId: null,
+          requiredQty: cost.totalCost,
+          availableQty: cost.baselineTotalCost,
+          shortageQty: Math.abs(deltaAmount),
+          blocking: true,
+          suggestionType: "order_cost_adjust",
+          documentType: "production_cost_adjustment",
+          payload: {
+            ...common,
+            before_total_cost: cost.baselineTotalCost,
+            after_total_cost: cost.totalCost,
+            delta_amount: deltaAmount,
+            affected_entity_type: "production_order",
+            affected_entity_id: result.productionOrderId,
+            evidence: {
+              baseline_material_cost: cost.baselineMaterialCost,
+              projected_material_cost: cost.materialCost,
+              projected_unit_cost: cost.unitCost,
+              calculation_run_id: runId,
+            },
+          },
+        });
+      }
+    }
   }
 }

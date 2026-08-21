@@ -351,6 +351,15 @@ export function addParallelAdjustment(database: Database.Database, actorId: stri
     const entityId = String(line.entity_id ?? "");
     const fieldCode = String(line.field_code ?? "");
     if (!entityType || !entityId || !fieldCode) throw new Error("调整明细缺少业务对象或调整字段。");
+    if (adjustmentType === "material_substitute") {
+      const sourceMaterialId = String(line.source_material_id ?? "");
+      const targetMaterialId = String(line.target_material_id ?? "");
+      const substituteQty = Number(line.quantity);
+      if (!sourceMaterialId || !targetMaterialId) throw new Error("原料替换必须选择原物料和替代物料。");
+      if (sourceMaterialId === targetMaterialId) throw new Error("原物料和替代物料不能相同。");
+      if (!Number.isFinite(substituteQty) || substituteQty <= 0) throw new Error("替换数量必须是大于 0 的数字。");
+      if (!["production_order", "product"].includes(entityType)) throw new Error("原料替换必须明确指定生产工单或产品。");
+    }
     for (const key of ["quantity", "unit_price"] as const) {
       if (line[key] == null || line[key] === "") continue;
       const value = Number(line[key]);
