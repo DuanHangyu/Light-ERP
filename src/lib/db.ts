@@ -1525,6 +1525,54 @@ function applySchema(database: Database.Database) {
       execution_note TEXT NOT NULL DEFAULT ''
     );
 
+    CREATE TABLE IF NOT EXISTS correction_execution_runs (
+      id TEXT PRIMARY KEY,
+      merge_request_id TEXT NOT NULL UNIQUE REFERENCES parallel_merge_requests(id),
+      idempotency_key TEXT NOT NULL UNIQUE,
+      status TEXT NOT NULL,
+      attempt_no INTEGER NOT NULL DEFAULT 1,
+      total_steps INTEGER NOT NULL DEFAULT 0,
+      succeeded_steps INTEGER NOT NULL DEFAULT 0,
+      waiting_steps INTEGER NOT NULL DEFAULT 0,
+      failed_steps INTEGER NOT NULL DEFAULT 0,
+      failure_reason TEXT NOT NULL DEFAULT '',
+      started_at TEXT NOT NULL,
+      finished_at TEXT,
+      created_by TEXT NOT NULL REFERENCES users(id),
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS correction_execution_steps (
+      id TEXT PRIMARY KEY,
+      execution_run_id TEXT NOT NULL REFERENCES correction_execution_runs(id),
+      merge_item_id TEXT NOT NULL UNIQUE REFERENCES parallel_merge_items(id),
+      document_type TEXT NOT NULL,
+      dependency_order INTEGER NOT NULL,
+      idempotency_key TEXT NOT NULL UNIQUE,
+      status TEXT NOT NULL,
+      published_document_id TEXT,
+      result_json TEXT NOT NULL DEFAULT '{}',
+      error_message TEXT NOT NULL DEFAULT '',
+      executed_at TEXT,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS reconciliation_results (
+      id TEXT PRIMARY KEY,
+      execution_run_id TEXT NOT NULL REFERENCES correction_execution_runs(id),
+      merge_request_id TEXT NOT NULL REFERENCES parallel_merge_requests(id),
+      rule_code TEXT NOT NULL,
+      domain TEXT NOT NULL,
+      status TEXT NOT NULL,
+      blocking INTEGER NOT NULL DEFAULT 1,
+      expected_json TEXT NOT NULL DEFAULT '{}',
+      actual_json TEXT NOT NULL DEFAULT '{}',
+      delta_json TEXT NOT NULL DEFAULT '{}',
+      message TEXT NOT NULL DEFAULT '',
+      checked_at TEXT NOT NULL,
+      UNIQUE (execution_run_id, rule_code)
+    );
+
     CREATE TABLE IF NOT EXISTS parallel_merge_conflicts (
       id TEXT PRIMARY KEY,
       merge_request_id TEXT NOT NULL REFERENCES parallel_merge_requests(id),
@@ -3814,6 +3862,65 @@ function applyMigrations(database: Database.Database) {
           );
           CREATE INDEX IF NOT EXISTS idx_parallel_snapshot_manifests_status
             ON parallel_snapshot_manifests(verification_status, updated_at);
+        `);
+      },
+    },
+    {
+      id: "061_parallel_correction_execution_and_reconciliation",
+      description: "平行账套正式纠错执行批次、幂等步骤与发布后对账",
+      up: () => {
+        database.exec(`
+          CREATE TABLE IF NOT EXISTS correction_execution_runs (
+            id TEXT PRIMARY KEY,
+            merge_request_id TEXT NOT NULL UNIQUE REFERENCES parallel_merge_requests(id),
+            idempotency_key TEXT NOT NULL UNIQUE,
+            status TEXT NOT NULL,
+            attempt_no INTEGER NOT NULL DEFAULT 1,
+            total_steps INTEGER NOT NULL DEFAULT 0,
+            succeeded_steps INTEGER NOT NULL DEFAULT 0,
+            waiting_steps INTEGER NOT NULL DEFAULT 0,
+            failed_steps INTEGER NOT NULL DEFAULT 0,
+            failure_reason TEXT NOT NULL DEFAULT '',
+            started_at TEXT NOT NULL,
+            finished_at TEXT,
+            created_by TEXT NOT NULL REFERENCES users(id),
+            updated_at TEXT NOT NULL
+          );
+          CREATE TABLE IF NOT EXISTS correction_execution_steps (
+            id TEXT PRIMARY KEY,
+            execution_run_id TEXT NOT NULL REFERENCES correction_execution_runs(id),
+            merge_item_id TEXT NOT NULL UNIQUE REFERENCES parallel_merge_items(id),
+            document_type TEXT NOT NULL,
+            dependency_order INTEGER NOT NULL,
+            idempotency_key TEXT NOT NULL UNIQUE,
+            status TEXT NOT NULL,
+            published_document_id TEXT,
+            result_json TEXT NOT NULL DEFAULT '{}',
+            error_message TEXT NOT NULL DEFAULT '',
+            executed_at TEXT,
+            updated_at TEXT NOT NULL
+          );
+          CREATE TABLE IF NOT EXISTS reconciliation_results (
+            id TEXT PRIMARY KEY,
+            execution_run_id TEXT NOT NULL REFERENCES correction_execution_runs(id),
+            merge_request_id TEXT NOT NULL REFERENCES parallel_merge_requests(id),
+            rule_code TEXT NOT NULL,
+            domain TEXT NOT NULL,
+            status TEXT NOT NULL,
+            blocking INTEGER NOT NULL DEFAULT 1,
+            expected_json TEXT NOT NULL DEFAULT '{}',
+            actual_json TEXT NOT NULL DEFAULT '{}',
+            delta_json TEXT NOT NULL DEFAULT '{}',
+            message TEXT NOT NULL DEFAULT '',
+            checked_at TEXT NOT NULL,
+            UNIQUE (execution_run_id, rule_code)
+          );
+          CREATE INDEX IF NOT EXISTS idx_correction_execution_runs_status
+            ON correction_execution_runs(status, updated_at);
+          CREATE INDEX IF NOT EXISTS idx_correction_execution_steps_run
+            ON correction_execution_steps(execution_run_id, dependency_order, status);
+          CREATE INDEX IF NOT EXISTS idx_reconciliation_results_merge
+            ON reconciliation_results(merge_request_id, status, blocking);
         `);
       },
     },

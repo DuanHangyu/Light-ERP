@@ -252,7 +252,102 @@ function publishPurchaseRequisition(database: Database.Database, actorId: string
   return requisitionId;
 }
 
-export function publishParallelMerge(database: Database.Database, actorId: string, mergeRequestId: string): { publishedCount: number; advisoryCount: number } {
+type PublishParallelMergeResult = {
+  publishedCount: number;
+  advisoryCount: number;
+  completed: boolean;
+  status: "execution_pending" | "merged";
+  idempotent?: boolean;
+};
+
+function existingPublishResult(
+  database: Database.Database,
+  mergeRequestId: string,
+  status: "execution_pending" | "merged",
+): PublishParallelMergeResult {
+  const publishedCount = (database.prepare(`
+    SELECT COUNT(*) AS count
+    FROM parallel_merge_items
+    WHERE merge_request_id = ? AND publish_status IN ('published', 'executed')
+  `).get(mergeRequestId) as { count: number }).count;
+  return {
+    publishedCount,
+    advisoryCount: 0,
+    completed: status === "merged",
+    status,
+    idempotent: true,
+  };
+}
+
+function dependencyOrder(documentType: string): number {
+  if (documentType === "bom_change") return 10;
+  if (["purchase_requisition", "purchase_order_change"].includes(documentType)) return 20;
+  if (["inventory_adjustment", "batch_adjustment"].includes(documentType)) return 30;
+  if (["material_supplement", "material_return", "production_adjustment"].includes(documentType)) return 40;
+  if (["production_cost_adjustment", "product_cost_adjustment"].includes(documentType)) return 50;
+  return 90;
+}
+
+function writeProcurementReadiness(
+  database: Database.Database,
+  executionRunId: string,
+  mergeRequestId: string,
+  items: MergeItem[],
+) {
+  const requirements = items
+    .filter((item) => item.document_type === "purchase_requisition")
+    .map((item) => {
+      const payload = JSON.parse(item.document_payload_json) as Record<string, unknown>;
+      const evidence = payload.evidence && typeof payload.evidence === "object"
+        ? payload.evidence as Record<string, unknown>
+        : {};
+      const materialId = String(payload.material_id ?? "");
+      const material = database.prepare("SELECT name, stock_qty FROM materials WHERE id = ?").get(materialId) as
+        | { name: string; stock_qty: number }
+        | undefined;
+      return {
+        material_id: materialId,
+        material_name: material?.name ?? materialId,
+        required_qty: Number(evidence.required_qty ?? payload.requested_qty ?? 0),
+        available_qty: Number(material?.stock_qty ?? 0),
+        requested_qty: Number(payload.requested_qty ?? 0),
+      };
+    });
+  const shortages = requirements.filter((item) => item.available_qty < item.required_qty);
+  const checkedAt = now();
+  const status = shortages.length > 0 ? "failed" : "passed";
+  const message = shortages.length > 0
+    ? shortages.map((item) => `${item.material_name || item.material_id} 尚缺 ${Math.max(0, item.required_qty - item.available_qty)}，需采购到货并完成入库后继续执行。`).join("；")
+    : requirements.length > 0
+      ? "采购相关物料库存已满足正式纠错执行条件。"
+      : "本纠错包不包含采购到货前置条件。";
+  database.prepare(`
+    INSERT INTO reconciliation_results (
+      id, execution_run_id, merge_request_id, rule_code, domain, status,
+      blocking, expected_json, actual_json, delta_json, message, checked_at
+    ) VALUES (?, ?, ?, 'inventory_procurement_readiness', 'inventory_purchase', ?, 1, ?, ?, ?, ?, ?)
+    ON CONFLICT(execution_run_id, rule_code) DO UPDATE SET
+      status = excluded.status,
+      expected_json = excluded.expected_json,
+      actual_json = excluded.actual_json,
+      delta_json = excluded.delta_json,
+      message = excluded.message,
+      checked_at = excluded.checked_at
+  `).run(
+    uid("RCR"),
+    executionRunId,
+    mergeRequestId,
+    status,
+    JSON.stringify(requirements.map((item) => ({ material_id: item.material_id, required_qty: item.required_qty }))),
+    JSON.stringify(requirements.map((item) => ({ material_id: item.material_id, available_qty: item.available_qty }))),
+    JSON.stringify(shortages.map((item) => ({ material_id: item.material_id, shortage_qty: Math.max(0, item.required_qty - item.available_qty) }))),
+    message,
+    checkedAt,
+  );
+  return { ready: shortages.length === 0, message };
+}
+
+export function publishParallelMerge(database: Database.Database, actorId: string, mergeRequestId: string): PublishParallelMergeResult {
   const user = getUser(database, actorId);
   void user;
   const ledgerId = mergeRequestIdToLedgerId(database, mergeRequestId);
@@ -260,7 +355,8 @@ export function publishParallelMerge(database: Database.Database, actorId: strin
   requireParallelPermission(database, actorId, ledgerId, "publish_merge");
   const mergeRequest = database.prepare("SELECT * FROM parallel_merge_requests WHERE id = ?").get(mergeRequestId) as { id: string; status: string; idempotency_key: string } | undefined;
   if (!mergeRequest) throw new Error("合并申请不存在。");
-  if (mergeRequest.status === "published") throw new Error("该合并已发布，不可重复发布。");
+  if (mergeRequest.status === "execution_pending") return existingPublishResult(database, mergeRequestId, "execution_pending");
+  if (mergeRequest.status === "published") return existingPublishResult(database, mergeRequestId, "merged");
   if (mergeRequest.status !== "approved") throw new Error("合并申请尚未审批通过，不能发布。");
 
   // 发布前再次冲突检查
@@ -290,15 +386,60 @@ export function publishParallelMerge(database: Database.Database, actorId: strin
         throw new Error(`不支持的合并动作：${item.action_type}/${item.document_type}`);
       }
     }
-    const publishedAt = now();
-    database.prepare("UPDATE parallel_merge_requests SET status = 'published', published_by = ?, published_at = ? WHERE id = ?").run(actorId, publishedAt, mergeRequestId);
-    database.prepare("UPDATE parallel_ledgers SET status = 'merged', merged_at = ?, updated_at = ? WHERE id = ?").run(publishedAt, publishedAt, ledgerId);
-    audit(database, actorId, "parallelLedgerPublishMerge", "parallel_merge", mergeRequestId, `发布合并到正式账套：${publishedCount} 张正式单据，${advisoryCount} 项建议性记录`);
+    const startedAt = now();
+    const executionRunId = uid("CER");
+    database.prepare(`
+      INSERT INTO correction_execution_runs (
+        id, merge_request_id, idempotency_key, status, attempt_no,
+        total_steps, succeeded_steps, waiting_steps, failed_steps,
+        failure_reason, started_at, finished_at, created_by, updated_at
+      ) VALUES (?, ?, ?, 'preparing', 1, ?, 0, ?, 0, '', ?, NULL, ?, ?)
+    `).run(
+      executionRunId,
+      mergeRequestId,
+      `${mergeRequest.idempotency_key}:execution`,
+      items.length,
+      items.length,
+      startedAt,
+      actorId,
+      startedAt,
+    );
+    const insertStep = database.prepare(`
+      INSERT INTO correction_execution_steps (
+        id, execution_run_id, merge_item_id, document_type, dependency_order,
+        idempotency_key, status, published_document_id, result_json,
+        error_message, executed_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, '{}', '', NULL, ?)
+    `);
+    for (const item of items) {
+      const published = database.prepare("SELECT published_document_id FROM parallel_merge_items WHERE id = ?").get(item.id) as { published_document_id: string | null };
+      insertStep.run(
+        uid("CES"),
+        executionRunId,
+        item.id,
+        item.document_type,
+        dependencyOrder(item.document_type),
+        `${mergeRequest.idempotency_key}:item:${item.id}`,
+        item.document_type === "purchase_requisition" ? "waiting_external" : "pending_execution",
+        published.published_document_id,
+        startedAt,
+      );
+    }
+    const readiness = writeProcurementReadiness(database, executionRunId, mergeRequestId, items);
+    database.prepare(`
+      UPDATE correction_execution_runs
+      SET status = ?, failure_reason = ?, updated_at = ?
+      WHERE id = ?
+    `).run(readiness.ready ? "pending_execution" : "waiting_external", readiness.ready ? "" : readiness.message, startedAt, executionRunId);
+    database.prepare("UPDATE parallel_merge_requests SET status = 'execution_pending', published_by = ?, published_at = NULL, failure_reason = ? WHERE id = ?")
+      .run(actorId, readiness.ready ? null : readiness.message, mergeRequestId);
+    database.prepare("UPDATE parallel_ledgers SET status = 'publishing', merged_at = NULL, updated_at = ? WHERE id = ?").run(startedAt, ledgerId);
+    audit(database, actorId, "parallelLedgerPublishMerge", "parallel_merge", mergeRequestId, `已生成 ${publishedCount} 张正式纠错单据，进入执行与对账；${readiness.message}`);
   });
 
   try {
     tx();
-    return { publishedCount, advisoryCount };
+    return { publishedCount, advisoryCount, completed: false, status: "execution_pending" };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     database.prepare("UPDATE parallel_merge_requests SET failure_reason = ? WHERE id = ?").run(`发布失败：${message}`, mergeRequestId);
