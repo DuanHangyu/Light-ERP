@@ -34,6 +34,7 @@ import {
   X,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import {
   Bar,
   BarChart,
@@ -1491,7 +1492,7 @@ function UserAccountMenu({
           </button>
       </div>
       </details>
-      {passwordOpen ? (
+      {passwordOpen && typeof document !== "undefined" ? createPortal(
         <div className="fixed inset-0 z-[70] grid place-items-center bg-slate-950/35 p-4" role="dialog" aria-modal="true" aria-labelledby="password-title">
           <div className="w-full max-w-md rounded-xl border border-slate-200 bg-white p-5 shadow-2xl">
             <div className="flex items-start justify-between gap-4">
@@ -1521,7 +1522,8 @@ function UserAccountMenu({
               </div>
             </div>
           </div>
-        </div>
+        </div>,
+        document.body,
       ) : null}
     </>
   );
