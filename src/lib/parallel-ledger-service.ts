@@ -1,6 +1,11 @@
 import type Database from "better-sqlite3";
 import { audit, getUser, now, serial, uid } from "./erp-service";
-import { captureFormalSnapshot, ensureMaterialSnapshot, previewSnapshot } from "./parallel-snapshot-service";
+import {
+  assertSupportedSnapshotBaseAsOf,
+  captureFormalSnapshot,
+  ensureMaterialSnapshot,
+  previewSnapshot,
+} from "./parallel-snapshot-service";
 import { runParallelCalculation } from "./parallel-calculation-engine";
 import {
   ADJUSTMENT_TYPE_LABELS,
@@ -171,6 +176,7 @@ export function createParallelLedger(database: Database.Database, actorId: strin
   const name = text(payload, "name", "账套名称");
   const purpose = text(payload, "purpose", "用途说明", false) || "经营数据测算";
   const baseAsOf = text(payload, "base_as_of", "基准日期", false) || new Date().toISOString().slice(0, 10);
+  assertSupportedSnapshotBaseAsOf(baseAsOf);
   const scopeType = text(payload, "scope_type", "范围类型", false) || "company";
   const mergeAllowed = numberOr(payload, "merge_allowed", 1) ? 1 : 0;
   const allowedUserIds = Array.isArray(payload.allowed_user_ids) ? (payload.allowed_user_ids as unknown[]).map(String) : [];

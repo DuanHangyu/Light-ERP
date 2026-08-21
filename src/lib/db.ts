@@ -1323,6 +1323,23 @@ function applySchema(database: Database.Database) {
       UNIQUE (ledger_id, entity_type, entity_id)
     );
 
+    CREATE TABLE IF NOT EXISTS parallel_snapshot_manifests (
+      id TEXT PRIMARY KEY,
+      ledger_id TEXT NOT NULL UNIQUE REFERENCES parallel_ledgers(id),
+      base_as_of TEXT NOT NULL,
+      captured_at TEXT NOT NULL,
+      schema_version TEXT NOT NULL,
+      engine_version TEXT NOT NULL,
+      entity_count INTEGER NOT NULL,
+      entity_type_count INTEGER NOT NULL,
+      snapshot_hash TEXT NOT NULL,
+      verification_status TEXT NOT NULL,
+      verified_at TEXT,
+      failure_reason TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
     CREATE TABLE IF NOT EXISTS parallel_adjustments (
       id TEXT PRIMARY KEY,
       adjustment_no TEXT NOT NULL,
@@ -3771,6 +3788,32 @@ function applyMigrations(database: Database.Database) {
             ON initialization_import_errors(import_id, row_no);
           CREATE INDEX IF NOT EXISTS idx_initialization_import_errors_created
             ON initialization_import_errors(created_at);
+        `);
+      },
+    },
+    {
+      id: "060_parallel_snapshot_manifests",
+      description: "平行账套可信快照清单、版本和完整性校验",
+      up: () => {
+        database.exec(`
+          CREATE TABLE IF NOT EXISTS parallel_snapshot_manifests (
+            id TEXT PRIMARY KEY,
+            ledger_id TEXT NOT NULL UNIQUE REFERENCES parallel_ledgers(id),
+            base_as_of TEXT NOT NULL,
+            captured_at TEXT NOT NULL,
+            schema_version TEXT NOT NULL,
+            engine_version TEXT NOT NULL,
+            entity_count INTEGER NOT NULL,
+            entity_type_count INTEGER NOT NULL,
+            snapshot_hash TEXT NOT NULL,
+            verification_status TEXT NOT NULL,
+            verified_at TEXT,
+            failure_reason TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+          );
+          CREATE INDEX IF NOT EXISTS idx_parallel_snapshot_manifests_status
+            ON parallel_snapshot_manifests(verification_status, updated_at);
         `);
       },
     },

@@ -10,7 +10,11 @@ import {
   type FifoBatch,
 } from "./domain";
 import { now, uid } from "./erp-service";
-import { loadSnapshotStore, type SnapshotStore } from "./parallel-snapshot-service";
+import {
+  assertTrustedFormalSnapshot,
+  loadSnapshotStore,
+  type SnapshotStore,
+} from "./parallel-snapshot-service";
 import {
   ADJUSTMENT_TYPE_LABELS,
   PARALLEL_ENGINE_VERSION,
@@ -302,6 +306,7 @@ export function runParallelCalculation(
   if (!["draft", "ready", "calculation_failed"].includes(ledger.status)) {
     throw new Error(`账套当前状态【${ledger.status}】不允许重新测算。`);
   }
+  assertTrustedFormalSnapshot(database, ledgerId);
 
   const startedAt = now();
   const startedMs = Date.now();

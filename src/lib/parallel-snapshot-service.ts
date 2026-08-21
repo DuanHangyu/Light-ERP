@@ -1,6 +1,9 @@
 import crypto from "node:crypto";
 import type Database from "better-sqlite3";
 import { now, uid } from "./erp-service";
+import { PARALLEL_ENGINE_VERSION } from "./parallel-ledger-types";
+
+const SNAPSHOT_SCHEMA_VERSION = "parallel-snapshot-1.0";
 
 export type SnapshotPreview = {
   orderCount: number;
@@ -37,6 +40,154 @@ function hashRow(row: Record<string, unknown>): string {
       }, {} as Record<string, unknown>),
   );
   return crypto.createHash("sha256").update(stable, "utf8").digest("hex");
+}
+
+export function assertSupportedSnapshotBaseAsOf(baseAsOf: string) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(baseAsOf) || Number.isNaN(Date.parse(`${baseAsOf}T00:00:00.000Z`))) {
+    throw new Error("基准日期格式不正确。");
+  }
+  const currentBusinessDate = now().slice(0, 10);
+  if (baseAsOf !== currentBusinessDate) {
+    throw new Error(
+      `当前版本尚未建立 ${baseAsOf} 的可信业务事件记录，只能选择当前业务日期 ${currentBusinessDate}。`,
+    );
+  }
+}
+
+type SnapshotIntegrity = {
+  valid: boolean;
+  entityCount: number;
+  entityTypeCount: number;
+  snapshotHash: string;
+  failureReason: string;
+};
+
+function calculateSnapshotIntegrity(database: Database.Database, ledgerId: string): SnapshotIntegrity {
+  const rows = database.prepare(`
+    SELECT entity_type, entity_id, content_hash, payload_json
+    FROM parallel_entity_snapshots
+    WHERE ledger_id = ?
+    ORDER BY entity_type, entity_id
+  `).all(ledgerId) as Array<{
+    entity_type: string;
+    entity_id: string;
+    content_hash: string;
+    payload_json: string;
+  }>;
+  const typeSet = new Set<string>();
+  const digest = crypto.createHash("sha256");
+  const failures: string[] = [];
+
+  for (const row of rows) {
+    typeSet.add(row.entity_type);
+    let computedHash = "";
+    try {
+      const payload = JSON.parse(row.payload_json) as unknown;
+      if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+        throw new Error("payload 不是对象");
+      }
+      computedHash = hashRow(payload as Record<string, unknown>);
+      if (computedHash !== row.content_hash) {
+        failures.push(`${row.entity_type}:${row.entity_id} 内容哈希不一致`);
+      }
+    } catch {
+      computedHash = crypto.createHash("sha256").update(row.payload_json, "utf8").digest("hex");
+      failures.push(`${row.entity_type}:${row.entity_id} 快照内容无法解析`);
+    }
+    digest.update(row.entity_type, "utf8");
+    digest.update("\0", "utf8");
+    digest.update(row.entity_id, "utf8");
+    digest.update("\0", "utf8");
+    digest.update(computedHash, "utf8");
+    digest.update("\n", "utf8");
+  }
+
+  if (rows.length === 0) failures.push("快照不包含任何业务实体");
+  return {
+    valid: failures.length === 0,
+    entityCount: rows.length,
+    entityTypeCount: typeSet.size,
+    snapshotHash: digest.digest("hex"),
+    failureReason: failures.slice(0, 5).join("；"),
+  };
+}
+
+function writeSnapshotManifest(database: Database.Database, ledgerId: string, capturedAt: string) {
+  const ledger = database.prepare("SELECT base_as_of FROM parallel_ledgers WHERE id = ?").get(ledgerId) as
+    | { base_as_of: string }
+    | undefined;
+  if (!ledger) throw new Error("平行账套不存在，无法生成快照清单。");
+  const integrity = calculateSnapshotIntegrity(database, ledgerId);
+  const timestamp = now();
+  database.prepare(`
+    INSERT INTO parallel_snapshot_manifests (
+      id, ledger_id, base_as_of, captured_at, schema_version, engine_version,
+      entity_count, entity_type_count, snapshot_hash, verification_status,
+      verified_at, failure_reason, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(ledger_id) DO UPDATE SET
+      base_as_of = excluded.base_as_of,
+      captured_at = excluded.captured_at,
+      schema_version = excluded.schema_version,
+      engine_version = excluded.engine_version,
+      entity_count = excluded.entity_count,
+      entity_type_count = excluded.entity_type_count,
+      snapshot_hash = excluded.snapshot_hash,
+      verification_status = excluded.verification_status,
+      verified_at = excluded.verified_at,
+      failure_reason = excluded.failure_reason,
+      updated_at = excluded.updated_at
+  `).run(
+    uid("PSM"),
+    ledgerId,
+    ledger.base_as_of,
+    capturedAt,
+    SNAPSHOT_SCHEMA_VERSION,
+    PARALLEL_ENGINE_VERSION,
+    integrity.entityCount,
+    integrity.entityTypeCount,
+    integrity.snapshotHash,
+    integrity.valid ? "verified" : "invalid",
+    integrity.valid ? timestamp : null,
+    integrity.failureReason,
+    timestamp,
+    timestamp,
+  );
+  return integrity;
+}
+
+export function verifyFormalSnapshot(database: Database.Database, ledgerId: string): SnapshotIntegrity {
+  const manifest = database.prepare(`
+    SELECT entity_count, entity_type_count, snapshot_hash
+    FROM parallel_snapshot_manifests
+    WHERE ledger_id = ?
+  `).get(ledgerId) as
+    | { entity_count: number; entity_type_count: number; snapshot_hash: string }
+    | undefined;
+  const integrity = calculateSnapshotIntegrity(database, ledgerId);
+  const matchesManifest = Boolean(
+    manifest &&
+      Number(manifest.entity_count) === integrity.entityCount &&
+      Number(manifest.entity_type_count) === integrity.entityTypeCount &&
+      manifest.snapshot_hash === integrity.snapshotHash,
+  );
+  const valid = integrity.valid && matchesManifest;
+  const failureReason = valid
+    ? ""
+    : integrity.failureReason || (manifest ? "快照总哈希或实体数量与清单不一致" : "快照清单不存在");
+  database.prepare(`
+    UPDATE parallel_snapshot_manifests
+    SET verification_status = ?, verified_at = ?, failure_reason = ?, updated_at = ?
+    WHERE ledger_id = ?
+  `).run(valid ? "verified" : "invalid", valid ? now() : null, failureReason, now(), ledgerId);
+  return { ...integrity, valid, failureReason };
+}
+
+export function assertTrustedFormalSnapshot(database: Database.Database, ledgerId: string) {
+  const integrity = verifyFormalSnapshot(database, ledgerId);
+  if (!integrity.valid) {
+    throw new Error(`快照完整性校验失败：${integrity.failureReason}`);
+  }
 }
 
 function capture(database: Database.Database, entityType: string, rows: Array<Record<string, unknown>>): CapturedEntity[] {
@@ -84,6 +235,7 @@ export function ensureMaterialSnapshot(database: Database.Database, ledgerId: st
     ...capture(database, "material", [material]),
     ...capture(database, "material_batch", batches),
   ], capturedAt);
+  writeSnapshotManifest(database, ledgerId, capturedAt);
 }
 
 export function previewSnapshot(database: Database.Database): SnapshotPreview {
@@ -272,6 +424,7 @@ export function captureFormalSnapshot(database: Database.Database, ledgerId: str
     upsertCapturedEntities(database, ledgerId, captured, capturedAt);
     count += captured.length;
   }
+  writeSnapshotManifest(database, ledgerId, capturedAt);
   return { capturedAt, count };
 }
 
