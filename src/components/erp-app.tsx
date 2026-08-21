@@ -81,6 +81,8 @@ import {
   type NavigationItem,
 } from "@/lib/erp-navigation";
 import { buildWorkbenchModel, type WorkbenchMetric } from "@/lib/erp-workbench";
+import { searchErpEntities, type ErpSearchResult } from "@/lib/erp-search";
+import { workspaceFor, type FocusedWorkspaceModule } from "@/lib/erp-workspace";
 
 type User = {
   id: string;
@@ -1024,29 +1026,25 @@ export function ErpApp() {
               </div>
 
               <div className="flex flex-col gap-2 md:flex-row md:items-center">
-                <div className="flex h-10 min-w-0 items-center gap-2 rounded-md border border-slate-200 bg-slate-50 px-3 text-sm text-slate-500 md:w-64">
-                  <Search className="h-4 w-4 shrink-0" />
-                  <span className="truncate">搜索单据 / 客户 / 物料</span>
-                </div>
+                <GlobalSearch
+                  snapshot={snapshot}
+                  onSelect={(result) => {
+                    openModule(result.module);
+                    setDetail(searchResultDetail(result));
+                  }}
+                />
                 <MobileRoleNavigation
                   groups={navigationGroups}
                   activeModule={activeModule}
                   onOpenModule={openModule}
                 />
-                <div className="flex h-10 shrink-0 items-center gap-2 rounded-md border border-slate-200 bg-white px-3 text-xs text-slate-600">
-                  <CurrentIcon className="h-4 w-4 text-blue-600" />
-                  <span className="font-semibold text-slate-800">{currentUser?.role_label}</span>
-                  <span className="text-slate-300">/</span>
-                  <span>{currentUser?.username}</span>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => void logout()}
-                  className="inline-flex h-10 shrink-0 items-center gap-2 rounded-md border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-600 transition hover:border-blue-300 hover:text-blue-700"
-                >
-                  <LogIn className="h-4 w-4" />
-                  退出登录
-                </button>
+                <UserAccountMenu
+                  user={snapshot.currentUser}
+                  icon={CurrentIcon}
+                  busy={busy}
+                  runAction={runAction}
+                  onLogout={logout}
+                />
               </div>
             </div>
           </header>
@@ -1095,7 +1093,7 @@ export function ErpApp() {
               />
             ) : null}
             {activeModule === "production" ? (
-              <ProductionModule
+              <ProductionWorkspace
                 snapshot={snapshot}
                 currentUser={currentUser}
                 busy={busy}
@@ -1118,7 +1116,7 @@ export function ErpApp() {
               />
             ) : null}
             {activeModule === "quality" ? (
-              <QualityModule
+              <QualityWorkspace
                 snapshot={snapshot}
                 currentUser={currentUser}
                 busy={busy}
@@ -1142,7 +1140,7 @@ export function ErpApp() {
               <AlertOperationsModule snapshot={snapshot} actorId={actorId} busy={busy} runAction={runAction} openDetail={setDetail} />
             ) : null}
             {activeModule === "approval" ? (
-              <ApprovalFormulaModule
+              <ApprovalWorkspace
                 snapshot={snapshot}
                 actorId={actorId}
                 busy={busy}
@@ -1162,7 +1160,7 @@ export function ErpApp() {
               />
             ) : null}
             {activeModule === "system" ? (
-              <SystemModule
+              <SystemWorkspace
                 snapshot={snapshot}
                 actorId={actorId}
                 busy={busy}
@@ -1297,6 +1295,222 @@ function MobileRoleNavigation({
           </button>
         );
       })}
+    </div>
+  );
+}
+
+function GlobalSearch({
+  snapshot,
+  onSelect,
+}: {
+  snapshot: Snapshot;
+  onSelect: (result: ErpSearchResult) => void;
+}) {
+  const [query, setQuery] = useState("");
+  const [focused, setFocused] = useState(false);
+  const results = useMemo(
+    () =>
+      searchErpEntities(
+        snapshot.currentUser.role,
+        {
+          quotes: snapshot.board.quotes,
+          orders: snapshot.board.orders,
+          customers: snapshot.board.customers,
+          productions: snapshot.board.productions,
+          materials: snapshot.board.materials,
+          products: snapshot.board.products,
+          suppliers: snapshot.board.suppliers,
+          purchaseOrders: snapshot.board.purchaseOrders,
+          requisitions: snapshot.board.requisitions,
+          shipments: snapshot.board.shipments,
+          receivables: snapshot.board.receivables,
+          payables: snapshot.board.payables,
+        },
+        query,
+      ),
+    [query, snapshot],
+  );
+  const showResults = focused && query.trim().length >= 2;
+
+  const choose = (result: ErpSearchResult) => {
+    onSelect(result);
+    setQuery("");
+    setFocused(false);
+  };
+
+  return (
+    <div className="relative min-w-0 md:w-72">
+      <div className="flex h-10 items-center gap-2 rounded-md border border-slate-200 bg-slate-50 px-3 focus-within:border-blue-400 focus-within:bg-white focus-within:ring-2 focus-within:ring-blue-100">
+        <Search className="h-4 w-4 shrink-0 text-slate-400" />
+        <input
+          type="search"
+          aria-label="全局搜索"
+          value={query}
+          onFocus={() => setFocused(true)}
+          onBlur={() => window.setTimeout(() => setFocused(false), 120)}
+          onChange={(event) => setQuery(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Escape") {
+              setFocused(false);
+              event.currentTarget.blur();
+            }
+            if (event.key === "Enter" && results[0]) choose(results[0]);
+          }}
+          className="min-w-0 flex-1 bg-transparent text-sm text-slate-800 outline-none placeholder:text-slate-400"
+          placeholder="搜索单号 / 客户 / 物料"
+        />
+      </div>
+      {showResults ? (
+        <div className="absolute right-0 top-12 z-50 max-h-[360px] w-[min(420px,calc(100vw-2rem))] overflow-y-auto rounded-lg border border-slate-200 bg-white p-2 shadow-xl">
+          {results.length > 0 ? (
+            results.map((result) => (
+              <button
+                key={`${result.module}-${result.id}`}
+                type="button"
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => choose(result)}
+                className="flex w-full items-center gap-3 rounded-md px-3 py-2.5 text-left transition hover:bg-blue-50"
+              >
+                <span className="shrink-0 rounded-md bg-slate-100 px-2 py-1 text-[11px] font-semibold text-slate-600">
+                  {result.type}
+                </span>
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-sm font-semibold text-slate-900">{result.primary}</span>
+                  <span className="mt-0.5 block truncate text-xs text-slate-500">{result.secondary}</span>
+                </span>
+                <ArrowRight className="h-4 w-4 shrink-0 text-slate-400" />
+              </button>
+            ))
+          ) : (
+            <div className="px-3 py-6 text-center text-sm text-slate-500">当前权限范围内没有匹配结果</div>
+          )}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function searchResultDetail(result: ErpSearchResult): DetailState {
+  const fields = Object.entries(result.row)
+    .filter(([, value]) => ["string", "number", "boolean"].includes(typeof value))
+    .slice(0, 12)
+    .map(([key, value]) => ({ label: detailColumnLabel(key), value: String(value ?? "-") }));
+  return {
+    title: result.primary,
+    subtitle: `${result.type} · ${result.secondary}`,
+    fields,
+  };
+}
+
+function UserAccountMenu({
+  user,
+  icon: Icon,
+  busy,
+  runAction,
+  onLogout,
+}: {
+  user: User;
+  icon: typeof ClipboardList;
+  busy: string | null;
+  runAction: (task: ActionRequest) => Promise<void>;
+  onLogout: () => Promise<void>;
+}) {
+  const [open, setOpen] = useState(false);
+  const [passwordOpen, setPasswordOpen] = useState(false);
+  const [form, setForm] = useState({ current_password: "", new_password: "", confirm_password: "" });
+  const [validation, setValidation] = useState("");
+
+  const submitPassword = async () => {
+    if (form.new_password.length < 6) {
+      setValidation("新密码至少需要 6 位。");
+      return;
+    }
+    if (form.new_password !== form.confirm_password) {
+      setValidation("两次输入的新密码不一致。");
+      return;
+    }
+    setValidation("");
+    await runAction({
+      action: "changeOwnPassword",
+      payload: { current_password: form.current_password, new_password: form.new_password },
+    });
+    setPasswordOpen(false);
+    setForm({ current_password: "", new_password: "", confirm_password: "" });
+  };
+
+  return (
+    <div className="relative shrink-0">
+      <button
+        type="button"
+        aria-expanded={open}
+        onClick={() => setOpen((current) => !current)}
+        className="flex h-10 items-center gap-2 rounded-md border border-slate-200 bg-white px-3 text-xs text-slate-600 transition hover:border-blue-300"
+      >
+        <Icon className="h-4 w-4 text-blue-600" />
+        <span className="font-semibold text-slate-800">{user.role_label}</span>
+        <span className="hidden text-slate-300 sm:inline">/</span>
+        <span className="hidden sm:inline">{user.username}</span>
+        <ChevronDown className="h-3.5 w-3.5 text-slate-400" />
+      </button>
+      {open ? (
+        <div className="absolute right-0 top-12 z-40 w-56 rounded-lg border border-slate-200 bg-white p-2 shadow-xl">
+          <div className="border-b border-slate-100 px-3 py-2">
+            <p className="text-sm font-semibold text-slate-900">{user.name}</p>
+            <p className="mt-0.5 text-xs text-slate-500">{user.title}</p>
+          </div>
+          <button
+            type="button"
+            onClick={() => {
+              setOpen(false);
+              setPasswordOpen(true);
+            }}
+            className="mt-1 flex h-9 w-full items-center gap-2 rounded-md px-3 text-sm text-slate-700 hover:bg-slate-50"
+          >
+            <ShieldCheck className="h-4 w-4 text-slate-500" />
+            修改密码
+          </button>
+          <button
+            type="button"
+            onClick={() => void onLogout()}
+            className="flex h-9 w-full items-center gap-2 rounded-md px-3 text-sm text-rose-700 hover:bg-rose-50"
+          >
+            <LogIn className="h-4 w-4" />
+            退出登录
+          </button>
+        </div>
+      ) : null}
+      {passwordOpen ? (
+        <div className="fixed inset-0 z-[70] grid place-items-center bg-slate-950/35 p-4" role="dialog" aria-modal="true" aria-labelledby="password-title">
+          <div className="w-full max-w-md rounded-xl border border-slate-200 bg-white p-5 shadow-2xl">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <h2 id="password-title" className="text-lg font-semibold text-slate-950">修改登录密码</h2>
+                <p className="mt-1 text-sm text-slate-500">修改后请使用新密码继续登录。</p>
+              </div>
+              <button type="button" aria-label="关闭" onClick={() => setPasswordOpen(false)} className="rounded-md p-1.5 text-slate-500 hover:bg-slate-100">
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <div className="mt-5 space-y-3">
+              <MasterInput label="当前密码" type="password" value={form.current_password} onChange={(value) => setForm((current) => ({ ...current, current_password: value }))} />
+              <MasterInput label="新密码" type="password" value={form.new_password} onChange={(value) => setForm((current) => ({ ...current, new_password: value }))} />
+              <MasterInput label="确认新密码" type="password" value={form.confirm_password} onChange={(value) => setForm((current) => ({ ...current, confirm_password: value }))} />
+              {validation ? <p className="text-sm text-rose-600">{validation}</p> : null}
+              <div className="flex justify-end gap-2 pt-2">
+                <button type="button" onClick={() => setPasswordOpen(false)} className="h-9 rounded-md border border-slate-200 px-4 text-sm font-semibold text-slate-600">取消</button>
+                <button
+                  type="button"
+                  disabled={busy === "changeOwnPassword-system-primary"}
+                  onClick={() => void submitPassword()}
+                  className="h-9 rounded-md bg-blue-600 px-4 text-sm font-semibold text-white disabled:bg-blue-300"
+                >
+                  {busy === "changeOwnPassword-system-primary" ? "保存中" : "保存新密码"}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -1527,6 +1741,453 @@ function processNodeClass(status: string) {
   if (status === "pending") return "border-amber-200 bg-amber-50/70";
   if (status === "completed") return "border-emerald-200 bg-emerald-50/70";
   return "border-slate-200 bg-slate-50";
+}
+
+function WorkspaceTabs({
+  module,
+  active,
+  onChange,
+}: {
+  module: FocusedWorkspaceModule;
+  active: string;
+  onChange: (tab: string) => void;
+}) {
+  const definition = workspaceFor(module);
+  return (
+    <div className="rounded-lg border border-slate-200 bg-white p-1.5 shadow-sm" role="tablist" aria-label={`${moduleCatalog[module].title}视图`}>
+      <div className={`grid gap-1 ${definition.tabs.length === 4 ? "md:grid-cols-4" : "md:grid-cols-2"}`}>
+        {definition.tabs.map((tab) => {
+          const selected = tab.key === active;
+          return (
+            <button
+              key={tab.key}
+              type="button"
+              role="tab"
+              aria-selected={selected}
+              onClick={() => onChange(tab.key)}
+              className={`rounded-md px-4 py-2.5 text-left transition ${selected ? "bg-blue-600 text-white shadow-sm" : "text-slate-600 hover:bg-slate-50"}`}
+            >
+              <span className="block text-sm font-semibold">{tab.label}</span>
+              <span className={`mt-1 block text-xs leading-5 ${selected ? "text-blue-100" : "text-slate-500"}`}>{tab.description}</span>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function compactRowDetail(title: string, row: Row): DetailState {
+  const fields = Object.entries(row)
+    .filter(([, value]) => ["string", "number", "boolean"].includes(typeof value))
+    .slice(0, 14)
+    .map(([key, value]) => ({ label: detailColumnLabel(key), value: String(value ?? "-") }));
+  return {
+    title,
+    subtitle: String(row.prod_no ?? row.inspection_no ?? row.request_no ?? row.username ?? row.id ?? "业务详情"),
+    fields,
+  };
+}
+
+function ProductionWorkspace({
+  snapshot,
+  currentUser,
+  busy,
+  runAction,
+  fileInputRef,
+  uploadBom,
+  openDetail,
+}: {
+  snapshot: Snapshot;
+  currentUser?: User;
+  busy: string | null;
+  runAction: (task: ActionRequest) => Promise<void>;
+  fileInputRef: React.RefObject<HTMLInputElement | null>;
+  uploadBom: () => Promise<void>;
+  openDetail: (detail: DetailState) => void;
+}) {
+  const definition = workspaceFor("production");
+  const [tab, setTab] = useState(definition.defaultTab);
+  const activeProductions = snapshot.board.productions.filter(
+    (row) => !["shipped", "voided", "cancelled"].includes(String(row.status)),
+  );
+  const pendingRequisitions = snapshot.board.requisitions.filter((row) =>
+    ["pending_approval", "approved", "pending"].includes(String(row.status)),
+  );
+  const warnings = snapshot.board.productionDeliveryWarnings ?? [];
+
+  return (
+    <div className="space-y-5">
+      <WorkspaceTabs module="production" active={tab} onChange={setTab} />
+      {tab === "tasks" ? (
+        <>
+          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+            <MiniMetric label="在制生产" value={`${activeProductions.length} 单`} />
+            <MiniMetric label="交期风险" value={`${warnings.length} 条`} />
+            <MiniMetric label="待领/发料" value={`${pendingRequisitions.length} 单`} />
+            <MiniMetric label="今日待报工" value={`${activeProductions.filter((row) => row.status === "producing").length} 单`} />
+          </div>
+          <DataTable
+            title="当前生产任务"
+            icon={Factory}
+            rows={sortedProductionRows(activeProductions)}
+            action={{ label: "进入完整计划", onClick: () => setTab("full"), icon: ArrowRight }}
+            columns={[
+              { key: "prod_no", label: "生产单" },
+              { key: "order_no", label: "销售订单" },
+              { key: "product_name", label: "产品" },
+              { key: "order_qty", label: "数量", render: formatQty },
+              { key: "planned_date", label: "计划日期", render: shortDate },
+              { key: "owner", label: "负责人" },
+              { key: "status", label: "状态", render: (value) => <StatusBadge value={productionStatusLabel(String(value))} /> },
+              { key: "next_step", label: "下一步", render: (_value, row) => productionNextStep(row) },
+              { key: "detail", label: "详情", render: (_value, row) => <DetailButton onClick={() => openDetail(compactRowDetail("生产任务详情", row))} /> },
+            ]}
+          />
+          <div className="grid gap-5 xl:grid-cols-2">
+            <DataTable
+              title="领料推进队列"
+              icon={Boxes}
+              rows={pendingRequisitions}
+              columns={[
+                { key: "req_no", label: "领料单" },
+                { key: "prod_no", label: "生产单" },
+                { key: "product_name", label: "产品" },
+                { key: "status", label: "状态", render: (value) => <StatusBadge value={requisitionStatusLabel(String(value))} /> },
+                { key: "created_at", label: "创建时间", render: shortDate },
+              ]}
+            />
+            <DataTable
+              title="交期风险"
+              icon={AlertTriangle}
+              rows={warnings}
+              columns={[
+                { key: "prod_no", label: "生产单" },
+                { key: "order_no", label: "销售订单" },
+                { key: "customer_name", label: "客户" },
+                { key: "warning_type_label", label: "风险" },
+                { key: "planned_date", label: "计划日期", render: shortDate },
+              ]}
+            />
+          </div>
+        </>
+      ) : (
+        <ProductionModule
+          snapshot={snapshot}
+          currentUser={currentUser}
+          busy={busy}
+          runAction={runAction}
+          fileInputRef={fileInputRef}
+          uploadBom={uploadBom}
+          openDetail={openDetail}
+        />
+      )}
+    </div>
+  );
+}
+
+function QualityWorkspace({
+  snapshot,
+  currentUser,
+  busy,
+  runAction,
+  openDetail,
+}: {
+  snapshot: Snapshot;
+  currentUser?: User;
+  busy: string | null;
+  runAction: (task: ActionRequest) => Promise<void>;
+  openDetail: (detail: DetailState) => void;
+}) {
+  const definition = workspaceFor("quality");
+  const [tab, setTab] = useState(definition.defaultTab);
+  const pendingProduction = snapshot.board.inspections.filter((row) => row.status === "pending");
+  const pendingIqc = snapshot.board.materialIqcInspections.filter((row) => row.status === "pending");
+  const openDispositions = snapshot.board.technicalDispositions.filter((row) => !["closed", "voided"].includes(String(row.status)));
+
+  return (
+    <div className="space-y-5">
+      <WorkspaceTabs module="quality" active={tab} onChange={setTab} />
+      {tab === "queue" ? (
+        <>
+          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+            <MiniMetric label="待生产检验" value={`${pendingProduction.length} 单`} />
+            <MiniMetric label="待来料检验" value={`${pendingIqc.length} 单`} />
+            <MiniMetric label="待技术处置" value={`${openDispositions.length} 单`} />
+            <MiniMetric label="质量闭环率" value={`${snapshot.summary.qualityClosureRate.toFixed(1)}%`} />
+          </div>
+          <div className="grid gap-5 xl:grid-cols-2">
+            <DataTable
+              title="生产检验队列"
+              icon={FlaskConical}
+              rows={pendingProduction}
+              action={{ label: "进入检验操作", onClick: () => setTab("full"), icon: ArrowRight }}
+              columns={[
+                { key: "inspection_no", label: "请验单" },
+                { key: "prod_no", label: "生产单" },
+                { key: "product_name", label: "产品" },
+                { key: "sample_qty", label: "抽检数量", render: formatQty },
+                { key: "status", label: "状态", render: (value) => <StatusBadge value={String(value)} /> },
+                { key: "detail", label: "详情", render: (_value, row) => <DetailButton onClick={() => openDetail(compactRowDetail("生产请验详情", row))} /> },
+              ]}
+            />
+            <DataTable
+              title="来料检验队列"
+              icon={PackageCheck}
+              rows={pendingIqc}
+              action={{ label: "进入 IQC 操作", onClick: () => setTab("full"), icon: ArrowRight }}
+              columns={[
+                { key: "iqc_no", label: "IQC 单" },
+                { key: "purchase_no", label: "采购单" },
+                { key: "supplier_name", label: "供应商" },
+                { key: "material_name", label: "物料" },
+                { key: "status", label: "状态", render: (value) => <StatusBadge value={String(value)} /> },
+              ]}
+            />
+          </div>
+          <DataTable
+            title="技术处置跟踪"
+            icon={ShieldCheck}
+            rows={openDispositions}
+            columns={[
+              { key: "disposition_no", label: "处置单" },
+              { key: "inspection_no", label: "请验单" },
+              { key: "prod_no", label: "生产单" },
+              { key: "disposition_type_label", label: "处置方式" },
+              { key: "due_date", label: "要求完成", render: shortDate },
+              { key: "status_label", label: "状态", render: (value) => <StatusBadge value={String(value)} /> },
+            ]}
+          />
+        </>
+      ) : (
+        <QualityModule snapshot={snapshot} currentUser={currentUser} busy={busy} runAction={runAction} openDetail={openDetail} />
+      )}
+    </div>
+  );
+}
+
+function ApprovalWorkspace({
+  snapshot,
+  actorId,
+  busy,
+  runAction,
+  openDetail,
+}: {
+  snapshot: Snapshot;
+  actorId: string;
+  busy: string | null;
+  runAction: (task: ActionRequest) => Promise<void>;
+  openDetail: (detail: DetailState) => void;
+}) {
+  const definition = workspaceFor("approval");
+  const [tab, setTab] = useState(definition.defaultTab);
+  const approvalItems = snapshot.board.approvalCenter ?? [];
+  const pendingItems = approvalItems.filter((row) => ["pending", "pending_approval"].includes(String(row.status)));
+  const canRun = (row: Row, key: "approve_action" | "reject_action") =>
+    snapshot.security.currentPermissions.includes(String(row[key] ?? ""));
+  const decide = (row: Row, key: "approve_action" | "reject_action") => {
+    const action = String(row[key] ?? "");
+    if (!action) return;
+    void runAction({
+      action,
+      entityId: String(row.entity_id),
+      payload: { approval_note: key === "approve_action" ? "统一审批工作台：同意继续推进。" : "统一审批工作台：驳回并退回申请人修订。" },
+    });
+  };
+
+  return (
+    <div className="space-y-5">
+      <WorkspaceTabs module="approval" active={tab} onChange={setTab} />
+      {tab === "pending" ? (
+        <>
+          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+            <MiniMetric label="待我审批" value={`${pendingItems.length} 单`} />
+            <MiniMetric label="超期审批" value={`${snapshot.summary.approvalOverdueCount} 单`} />
+            <MiniMetric label="全部审批" value={`${approvalItems.length} 单`} />
+            <MiniMetric label="审批规则" value={`${snapshot.board.approvalRules.filter((row) => row.status === "active").length} 条`} />
+          </div>
+          <DataTable
+            title="待我审批"
+            icon={FileCheck2}
+            rows={pendingItems}
+            action={{ label: "审批规则与发起", onClick: () => setTab("full"), icon: ArrowRight }}
+            empty="目前没有需要你审批的事项"
+            columns={[
+              { key: "source_type_label", label: "类型", render: (value) => <StatusBadge value={String(value)} /> },
+              { key: "request_no", label: "审批单号" },
+              { key: "title", label: "标题" },
+              { key: "applicant_name", label: "申请人" },
+              { key: "amount", label: "金额/影响", render: formatCurrency },
+              { key: "age_days", label: "已等待", render: dayValue },
+              { key: "risk_level", label: "风险", render: (value) => <StatusBadge value={String(value)} /> },
+              {
+                key: "ops",
+                label: "操作",
+                render: (_value, row) => (
+                  <div className="flex flex-wrap gap-2">
+                    <DetailButton onClick={() => openDetail(approvalCenterDetail(row))} />
+                    {canRun(row, "approve_action") ? <InlineActionButton label="同意" busy={busy === `${String(row.approve_action)}-${String(row.entity_id)}-primary`} onClick={() => decide(row, "approve_action")} /> : null}
+                    {canRun(row, "reject_action") ? <InlineActionButton label="驳回" busy={busy === `${String(row.reject_action)}-${String(row.entity_id)}-primary`} onClick={() => decide(row, "reject_action")} /> : null}
+                  </div>
+                ),
+              },
+            ]}
+          />
+        </>
+      ) : (
+        <ApprovalFormulaModule snapshot={snapshot} actorId={actorId} busy={busy} runAction={runAction} openDetail={openDetail} />
+      )}
+    </div>
+  );
+}
+
+function SystemWorkspace({
+  snapshot,
+  actorId,
+  busy,
+  runAction,
+  openDetail,
+  onSnapshot,
+  onError,
+}: {
+  snapshot: Snapshot;
+  actorId: string;
+  busy: string | null;
+  runAction: (task: ActionRequest) => Promise<void>;
+  openDetail: (detail: DetailState) => void;
+  onSnapshot: (snapshot: Snapshot) => void;
+  onError: (message: string) => void;
+}) {
+  const definition = workspaceFor("system");
+  const [tab, setTab] = useState(definition.defaultTab);
+  const operatingParameters = Object.entries(snapshot.board.operatingParameters ?? {}).map(([key, value]) => ({
+    id: key,
+    parameter: detailColumnLabel(key),
+    value: typeof value === "object" ? JSON.stringify(value) : String(value ?? "-"),
+  }));
+
+  return (
+    <div className="space-y-5">
+      <WorkspaceTabs module="system" active={tab} onChange={setTab} />
+      {tab === "accounts" ? (
+        <>
+          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+            <MiniMetric label="用户账号" value={`${snapshot.users.length} 个`} />
+            <MiniMetric label="启用账号" value={`${snapshot.users.filter((user) => user.status === "active").length} 个`} />
+            <MiniMetric label="角色数量" value={`${new Set(snapshot.users.map((user) => user.role)).size} 个`} />
+            <MiniMetric label="高风险权限" value={`${snapshot.security.permissionMatrix.reduce((sum, row) => sum + Number(row.high_risk_count ?? 0), 0)} 项`} />
+          </div>
+          <DataTable
+            title="账号清单"
+            icon={Users}
+            rows={snapshot.users}
+            action={{ label: "进入账号维护", onClick: () => setTab("advanced"), icon: ArrowRight }}
+            columns={[
+              { key: "username", label: "登录账号" },
+              { key: "name", label: "姓名" },
+              { key: "role_label", label: "角色" },
+              { key: "title", label: "岗位" },
+              { key: "status", label: "状态", render: (value) => <StatusBadge value={String(value)} /> },
+              { key: "last_login_at", label: "最近登录", render: shortDate },
+              { key: "detail", label: "详情", render: (_value, row) => <DetailButton onClick={() => openDetail(compactRowDetail("用户账号详情", row))} /> },
+            ]}
+          />
+          <DataTable
+            title="角色权限摘要"
+            icon={ShieldCheck}
+            rows={snapshot.security.permissionMatrix}
+            columns={[
+              { key: "role_label", label: "角色" },
+              { key: "module_label", label: "模块" },
+              { key: "action_count", label: "权限项" },
+              { key: "enabled_count", label: "启用" },
+              { key: "disabled_count", label: "停用" },
+              { key: "high_risk_count", label: "高风险" },
+            ]}
+          />
+        </>
+      ) : null}
+      {tab === "settings" ? (
+        <>
+          <div className="grid gap-5 xl:grid-cols-2">
+            <DataTable
+              title="系统设置"
+              icon={ShieldCheck}
+              rows={snapshot.board.systemSettings}
+              action={{ label: "进入参数维护", onClick: () => setTab("advanced"), icon: ArrowRight }}
+              columns={[
+                { key: "category_label", label: "分类" },
+                { key: "setting_name", label: "设置项" },
+                { key: "setting_value", label: "当前值" },
+                { key: "updated_by_name", label: "更新人" },
+                { key: "updated_at", label: "更新时间", render: shortDate },
+              ]}
+            />
+            <DataTable
+              title="运行参数"
+              icon={Gauge}
+              rows={operatingParameters}
+              columns={[
+                { key: "parameter", label: "参数" },
+                { key: "value", label: "当前值" },
+              ]}
+            />
+          </div>
+          <DataTable
+            title="单据编号规则"
+            icon={ReceiptText}
+            rows={snapshot.board.documentSequences}
+            columns={[
+              { key: "doc_type", label: "单据类型" },
+              { key: "prefix", label: "前缀" },
+              { key: "date_key", label: "日期段" },
+              { key: "current_no", label: "当前流水" },
+              { key: "sample_no", label: "最新编号" },
+            ]}
+          />
+        </>
+      ) : null}
+      {tab === "audit" ? (
+        <div className="grid gap-5 xl:grid-cols-2">
+          <DataTable
+            title="登录日志"
+            icon={LogIn}
+            rows={snapshot.board.loginLogs}
+            columns={[
+              { key: "actor_name", label: "用户" },
+              { key: "username", label: "账号" },
+              { key: "role_label", label: "角色" },
+              { key: "message", label: "事件" },
+              { key: "created_at", label: "时间", render: shortDate },
+            ]}
+          />
+          <DataTable
+            title="操作审计"
+            icon={ShieldCheck}
+            rows={snapshot.board.auditLogs}
+            columns={[
+              { key: "actor_name", label: "操作人" },
+              { key: "action", label: "动作" },
+              { key: "entity_type", label: "对象" },
+              { key: "message", label: "说明" },
+              { key: "created_at", label: "时间", render: shortDate },
+            ]}
+          />
+        </div>
+      ) : null}
+      {tab === "advanced" ? (
+        <SystemModule
+          snapshot={snapshot}
+          actorId={actorId}
+          busy={busy}
+          runAction={runAction}
+          openDetail={openDetail}
+          onSnapshot={onSnapshot}
+          onError={onError}
+        />
+      ) : null}
+    </div>
+  );
 }
 
 function SystemModule({
@@ -12496,10 +13157,11 @@ function DataTable({
   icon: typeof ClipboardList;
   rows?: Row[];
   columns: Array<{ key: string; label: string; render?: (value: unknown, row: Row) => React.ReactNode }>;
-  action?: { label: string; onClick: () => void };
+  action?: { label: string; onClick: () => void; icon?: typeof ClipboardList };
   empty?: string;
 }) {
   const Icon = icon;
+  const ActionIcon = action?.icon ?? Download;
   const dataRows = rows ?? [];
   return (
     <section className="min-w-0 rounded-lg border border-slate-200 bg-white shadow-sm">
@@ -12515,7 +13177,7 @@ function DataTable({
             onClick={action.onClick}
             className="inline-flex h-8 shrink-0 items-center gap-2 rounded-md border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-700 hover:border-blue-300 hover:text-blue-700"
           >
-            <Download className="h-4 w-4" />
+            <ActionIcon className="h-4 w-4" />
             {action.label}
           </button>
         ) : null}
