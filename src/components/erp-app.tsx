@@ -815,7 +815,6 @@ export function ErpApp() {
   const currentUser = snapshot?.currentUser;
   const CurrentIcon = currentUser ? roleIcon[currentUser.role] ?? LogIn : LogIn;
   const navigationGroups = useMemo(() => navigationForRole(currentUser?.role ?? ""), [currentUser?.role]);
-  const activeNav = moduleCatalog[activeModule];
 
   const openModule = (module: ModuleKey) => {
     const role = currentUser?.role ?? "";
@@ -1013,12 +1012,10 @@ export function ErpApp() {
                   <Boxes className="h-5 w-5" />
                 </div>
                 <div className="min-w-0">
-                  <h1 className="truncate text-lg font-semibold text-slate-950">{activeNav.title}</h1>
+                  <h1 className="truncate text-lg font-semibold text-slate-950">Local ERP · 正式账套</h1>
                   <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-slate-500">
                     <CurrentIcon className="h-3.5 w-3.5 text-blue-600" />
                     <span>{currentUser?.name}</span>
-                    <span className="h-1 w-1 rounded-full bg-slate-300" />
-                    <span>{activeNav.subtitle}</span>
                     <span className="h-1 w-1 rounded-full bg-slate-300" />
                     <span>{message}</span>
                   </div>
@@ -1033,6 +1030,23 @@ export function ErpApp() {
                     setDetail(searchResultDetail(result));
                   }}
                 />
+                <button
+                  type="button"
+                  disabled={snapshot.board.alertCenter.length === 0}
+                  onClick={() => {
+                    const alert = snapshot.board.alertCenter[0];
+                    if (alert) setDetail(compactRowDetail("通知详情", alert));
+                  }}
+                  className="relative grid h-10 w-10 shrink-0 place-items-center rounded-md border border-slate-200 bg-white text-slate-600 transition hover:border-blue-300 hover:text-blue-700 disabled:opacity-50"
+                  aria-label={`我的通知，${snapshot.summary.unreadAlertCount} 条未读`}
+                >
+                  <BellRing className="h-4 w-4" />
+                  {snapshot.summary.unreadAlertCount > 0 ? (
+                    <span className="absolute -right-1 -top-1 grid min-h-5 min-w-5 place-items-center rounded-full bg-rose-600 px-1 text-[10px] font-bold text-white">
+                      {Math.min(snapshot.summary.unreadAlertCount, 99)}
+                    </span>
+                  ) : null}
+                </button>
                 <MobileRoleNavigation
                   groups={navigationGroups}
                   activeModule={activeModule}
@@ -1067,7 +1081,7 @@ export function ErpApp() {
             ) : null}
             {activeModule === "process" ? <ProcessCockpitModule snapshot={snapshot} onOpenModule={openModule} /> : null}
             {activeModule === "master" ? (
-              <MasterDataModule
+              <MasterDataWorkspace
                 snapshot={snapshot}
                 actorId={actorId}
                 busy={busy}
@@ -1084,7 +1098,7 @@ export function ErpApp() {
               />
             ) : null}
             {activeModule === "sales" ? (
-              <SalesModule
+              <SalesWorkspace
                 snapshot={snapshot}
                 actorId={actorId}
                 busy={busy}
@@ -1104,7 +1118,7 @@ export function ErpApp() {
               />
             ) : null}
             {["purchase", "warehouse", "suppliers"].includes(activeModule) ? (
-              <InventoryModule
+              <SupplyWorkspace
                 area={activeModule as "purchase" | "warehouse" | "suppliers"}
                 snapshot={snapshot}
                 actorId={actorId}
@@ -1125,7 +1139,7 @@ export function ErpApp() {
               />
             ) : null}
             {activeModule === "finance" ? (
-              <FinanceModule
+              <FinanceWorkspace
                 snapshot={snapshot}
                 actorId={actorId}
                 busy={busy}
@@ -1134,7 +1148,7 @@ export function ErpApp() {
               />
             ) : null}
             {activeModule === "reports" ? (
-              <ReportsModule snapshot={snapshot} actorId={actorId} busy={busy} runAction={runAction} openDetail={setDetail} />
+              <ReportsWorkspace snapshot={snapshot} actorId={actorId} busy={busy} runAction={runAction} openDetail={setDetail} />
             ) : null}
             {activeModule === "alerts" ? (
               <AlertOperationsModule snapshot={snapshot} actorId={actorId} busy={busy} runAction={runAction} openDetail={setDetail} />
@@ -1787,6 +1801,540 @@ function compactRowDetail(title: string, row: Row): DetailState {
     subtitle: String(row.prod_no ?? row.inspection_no ?? row.request_no ?? row.username ?? row.id ?? "业务详情"),
     fields,
   };
+}
+
+function MasterDataWorkspace({
+  snapshot,
+  actorId,
+  busy,
+  runAction,
+  openDetail,
+  onImported,
+}: {
+  snapshot: Snapshot;
+  actorId: string;
+  busy: string | null;
+  runAction: (task: ActionRequest) => Promise<void>;
+  openDetail: (detail: DetailState) => void;
+  onImported: (snapshot?: Snapshot) => void;
+}) {
+  const definition = workspaceFor("master");
+  const [tab, setTab] = useState(definition.defaultTab);
+  const detailColumn = (title: string) => ({
+    key: "detail",
+    label: "详情",
+    render: (_value: unknown, row: Row) => <DetailButton onClick={() => openDetail(compactRowDetail(title, row))} />,
+  });
+
+  return (
+    <div className="space-y-5">
+      <WorkspaceTabs module="master" active={tab} onChange={setTab} />
+      {tab === "records" ? (
+        <>
+          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+            <MiniMetric label="客户" value={`${snapshot.board.customers.length} 家`} />
+            <MiniMetric label="物料" value={`${snapshot.board.materials.length} 项`} />
+            <MiniMetric label="产品" value={`${snapshot.board.products.length} 项`} />
+            <MiniMetric label="BOM" value={`${snapshot.board.boms.length} 行`} />
+          </div>
+          <div className="grid gap-5 xl:grid-cols-2">
+            <DataTable
+              title="客户主档"
+              icon={Users}
+              rows={snapshot.board.customers}
+              action={{ label: "维护主档", onClick: () => setTab("full"), icon: ArrowRight }}
+              columns={[
+                { key: "customer_code", label: "客户编码" },
+                { key: "name", label: "客户名称" },
+                { key: "contact", label: "联系人" },
+                { key: "status", label: "状态", render: (value) => <StatusBadge value={String(value)} /> },
+                detailColumn("客户详情"),
+              ]}
+            />
+            <DataTable
+              title="物料主档"
+              icon={Warehouse}
+              rows={snapshot.board.materials}
+              columns={[
+                { key: "material_code", label: "物料编码" },
+                { key: "name", label: "物料名称" },
+                { key: "spec", label: "规格" },
+                { key: "unit", label: "单位" },
+                { key: "status", label: "状态", render: (value) => <StatusBadge value={String(value)} /> },
+                detailColumn("物料详情"),
+              ]}
+            />
+            <DataTable
+              title="产品主档"
+              icon={PackageCheck}
+              rows={snapshot.board.products}
+              columns={[
+                { key: "product_code", label: "产品编码" },
+                { key: "name", label: "产品名称" },
+                { key: "spec", label: "规格" },
+                { key: "unit", label: "单位" },
+                { key: "status", label: "状态", render: (value) => <StatusBadge value={String(value)} /> },
+                detailColumn("产品详情"),
+              ]}
+            />
+            <DataTable
+              title="BOM 清单"
+              icon={ClipboardList}
+              rows={snapshot.board.boms}
+              columns={[
+                { key: "product_name", label: "产品" },
+                { key: "material_name", label: "物料" },
+                { key: "qty_per", label: "单位用量", render: formatQty },
+                { key: "is_primary", label: "主材" },
+                { key: "version", label: "版本" },
+                detailColumn("BOM 详情"),
+              ]}
+            />
+          </div>
+        </>
+      ) : (
+        <MasterDataModule
+          snapshot={snapshot}
+          actorId={actorId}
+          busy={busy}
+          runAction={runAction}
+          openDetail={openDetail}
+          onImported={onImported}
+        />
+      )}
+    </div>
+  );
+}
+
+function SalesWorkspace({
+  snapshot,
+  actorId,
+  busy,
+  runAction,
+  openDetail,
+}: {
+  snapshot: Snapshot;
+  actorId: string;
+  busy: string | null;
+  runAction: (task: ActionRequest) => Promise<void>;
+  openDetail: (detail: DetailState) => void;
+}) {
+  const definition = workspaceFor("sales");
+  const [tab, setTab] = useState(definition.defaultTab);
+  const pendingQuotes = snapshot.board.quotes.filter((row) => ["draft", "confirmed"].includes(String(row.status)));
+  const pendingOrders = snapshot.board.orders.filter((row) => !["completed", "cancelled", "voided"].includes(String(row.status)));
+  const shipReady = snapshot.board.productions.filter((row) => ["in_stock", "partial_shipped"].includes(String(row.status)));
+  const openReceivables = snapshot.board.receivables.filter((row) => row.status !== "paid");
+  const latestFormula = snapshot.board.formulaCalculations[0];
+
+  return (
+    <div className="space-y-5">
+      <WorkspaceTabs module="sales" active={tab} onChange={setTab} />
+      {tab === "pending" ? (
+        <>
+          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+            <MiniMetric label="待处理报价" value={`${pendingQuotes.length} 张`} />
+            <MiniMetric label="执行中订单" value={`${pendingOrders.length} 张`} />
+            <MiniMetric label="待发货" value={`${shipReady.length} 单`} />
+            <MiniMetric label="应收余额" value={formatCurrency(snapshot.summary.receivableBalance)} />
+          </div>
+          <DataTable
+            title="报价与转单待办"
+            icon={FileSpreadsheet}
+            rows={pendingQuotes}
+            action={{ label: "新建报价 / 转订单", onClick: () => setTab("full"), icon: ArrowRight }}
+            columns={[
+              { key: "quote_no", label: "报价单" },
+              { key: "customer_name", label: "客户" },
+              { key: "product_name", label: "产品" },
+              { key: "qty", label: "数量", render: formatQty },
+              { key: "total_amount", label: "金额", render: formatCurrency },
+              { key: "status_label", label: "状态", render: (value) => <StatusBadge value={String(value)} /> },
+              {
+                key: "action",
+                label: "下一步",
+                render: (_value, row) =>
+                  row.status === "draft" && snapshot.security.currentPermissions.includes("confirmQuote") ? (
+                    <InlineActionButton
+                      label="确认报价"
+                      busy={busy === `confirmQuote-${String(row.id)}-primary`}
+                      onClick={() => void runAction({ action: "confirmQuote", entityId: String(row.id) })}
+                    />
+                  ) : (
+                    <InlineActionButton label="补充订单信息" onClick={() => setTab("full")} />
+                  ),
+              },
+              { key: "detail", label: "详情", render: (_value, row) => <DetailButton onClick={() => openDetail(compactRowDetail("报价单详情", row))} /> },
+            ]}
+          />
+          <div className="grid gap-5 xl:grid-cols-2">
+            <DataTable
+              title="交付与发货"
+              icon={Truck}
+              rows={shipReady}
+              action={{ label: "进入发货操作", onClick: () => setTab("full"), icon: ArrowRight }}
+              columns={[
+                { key: "prod_no", label: "生产单" },
+                { key: "order_no", label: "订单" },
+                { key: "customer_name", label: "客户" },
+                { key: "product_name", label: "产品" },
+                { key: "status", label: "状态", render: (value) => <StatusBadge value={productionStatusLabel(String(value))} /> },
+              ]}
+            />
+            <Panel title="报价成本参考" icon={Calculator} action="随报价查看">
+              <div className="grid gap-3 sm:grid-cols-2">
+                <MiniMetric label="最近试算价" value={formatCurrency(latestFormula?.quoted_unit_price)} />
+                <MiniMetric label="试算记录" value={`${snapshot.summary.formulaCount} 次`} />
+              </div>
+              <p className="mt-4 text-sm leading-6 text-slate-600">
+                配方价格作为报价上下文展示；正式报价仍以客户、产品、数量、材料成本和利润率为准。
+              </p>
+            </Panel>
+          </div>
+          <DataTable
+            title="应收状态（只读）"
+            icon={ReceiptText}
+            rows={openReceivables}
+            columns={[
+              { key: "receivable_no", label: "应收单" },
+              { key: "customer_name", label: "客户" },
+              { key: "order_no", label: "订单" },
+              { key: "balance_amount", label: "余额", render: formatCurrency },
+              { key: "due_date", label: "到期日", render: shortDate },
+              { key: "status", label: "状态", render: (value) => <StatusBadge value={String(value)} /> },
+            ]}
+          />
+        </>
+      ) : (
+        <SalesModule snapshot={snapshot} actorId={actorId} busy={busy} runAction={runAction} openDetail={openDetail} />
+      )}
+    </div>
+  );
+}
+
+function SupplyWorkspace({
+  area,
+  snapshot,
+  actorId,
+  busy,
+  runAction,
+  openDetail,
+  onSnapshot,
+  onError,
+}: {
+  area: "purchase" | "warehouse" | "suppliers";
+  snapshot: Snapshot;
+  actorId: string;
+  busy: string | null;
+  runAction: (task: ActionRequest) => Promise<void>;
+  openDetail: (detail: DetailState) => void;
+  onSnapshot: (snapshot: Snapshot) => void;
+  onError: (message: string) => void;
+}) {
+  const definition = workspaceFor(area);
+  const [tab, setTab] = useState(definition.defaultTab);
+  useEffect(() => {
+    setTab(workspaceFor(area).defaultTab);
+  }, [area]);
+  const isFocused = tab === definition.defaultTab;
+  const fullModule = (
+    <InventoryModule
+      area={area}
+      snapshot={snapshot}
+      actorId={actorId}
+      busy={busy}
+      runAction={runAction}
+      openDetail={openDetail}
+      onSnapshot={onSnapshot}
+      onError={onError}
+    />
+  );
+
+  if (!isFocused) {
+    return <div className="space-y-5"><WorkspaceTabs module={area} active={tab} onChange={setTab} />{fullModule}</div>;
+  }
+
+  const pendingPurchaseRequisitions = snapshot.board.purchaseRequisitions.filter((row) =>
+    !["ordered", "closed", "rejected", "voided"].includes(String(row.status)),
+  );
+  const pendingPurchaseOrders = snapshot.board.purchaseOrders.filter((row) => row.status === "pending_receipt");
+  const pendingArrivals = snapshot.board.purchaseArrivalNotices.filter((row) => row.status === "pending_signoff");
+  const pendingIssues = snapshot.board.requisitions.filter((row) => ["approved", "pending"].includes(String(row.status)));
+  const openStocktakes = snapshot.board.stocktakes.filter((row) => !["completed", "closed", "voided"].includes(String(row.status)));
+  const supplierRisks = snapshot.board.supplierAdmissionControls.filter((row) => String(row.status ?? row.admission_status ?? "active") !== "active");
+  const supplierCorrections = snapshot.board.supplierCorrectiveActions.filter((row) => !["closed", "completed"].includes(String(row.status)));
+
+  return (
+    <div className="space-y-5">
+      <WorkspaceTabs module={area} active={tab} onChange={setTab} />
+      {area === "purchase" ? (
+        <>
+          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+            <MiniMetric label="MRP 缺料" value={`${snapshot.summary.mrpShortageLineCount} 项`} />
+            <MiniMetric label="待处理申请" value={`${pendingPurchaseRequisitions.length} 张`} />
+            <MiniMetric label="待到货" value={`${pendingPurchaseOrders.length} 张`} />
+            <MiniMetric label="采购金额" value={formatCurrency(snapshot.summary.purchaseAmount)} />
+          </div>
+          <div className="grid gap-5 xl:grid-cols-2">
+            <DataTable
+              title="采购申请队列"
+              icon={ClipboardList}
+              rows={pendingPurchaseRequisitions}
+              action={{ label: "进入采购操作", onClick: () => setTab("full"), icon: ArrowRight }}
+              columns={[
+                { key: "requisition_no", label: "申请单", render: (value, row) => String(value ?? row.purchase_requisition_no ?? row.req_no ?? "-") },
+                { key: "source_type_label", label: "来源" },
+                { key: "requested_by_name", label: "申请人" },
+                { key: "required_date", label: "需求日期", render: shortDate },
+                { key: "status_label", label: "状态", render: (value, row) => <StatusBadge value={String(value ?? row.status ?? "-")} /> },
+              ]}
+            />
+            <DataTable
+              title="待到货采购单"
+              icon={Truck}
+              rows={pendingPurchaseOrders}
+              columns={[
+                { key: "purchase_no", label: "采购单" },
+                { key: "supplier_name", label: "供应商" },
+                { key: "total_amount", label: "金额", render: formatCurrency },
+                { key: "due_date", label: "预计到货", render: shortDate },
+                { key: "status", label: "状态", render: (value) => <StatusBadge value={String(value)} /> },
+              ]}
+            />
+          </div>
+        </>
+      ) : area === "warehouse" ? (
+        <>
+          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+            <MiniMetric label="今日待收" value={`${pendingArrivals.length} 张`} />
+            <MiniMetric label="今日待发" value={`${pendingIssues.length} 张`} />
+            <MiniMetric label="待盘点" value={`${openStocktakes.length} 张`} />
+            <MiniMetric label="低库存" value={`${snapshot.summary.lowStockCount} 项`} />
+          </div>
+          <div className="grid gap-5 xl:grid-cols-3">
+            <DataTable
+              title="到货签收"
+              icon={Truck}
+              rows={pendingArrivals}
+              action={{ label: "进入收货", onClick: () => setTab("full"), icon: ArrowRight }}
+              columns={[
+                { key: "notice_no", label: "到货通知", render: (value, row) => String(value ?? row.arrival_no ?? "-") },
+                { key: "purchase_no", label: "采购单" },
+                { key: "supplier_name", label: "供应商" },
+                { key: "status_label", label: "状态", render: (value, row) => <StatusBadge value={String(value ?? row.status ?? "-")} /> },
+              ]}
+            />
+            <DataTable
+              title="生产发料"
+              icon={Boxes}
+              rows={pendingIssues}
+              action={{ label: "进入发料", onClick: () => setTab("full"), icon: ArrowRight }}
+              columns={[
+                { key: "req_no", label: "领料单" },
+                { key: "prod_no", label: "生产单" },
+                { key: "product_name", label: "产品" },
+                { key: "status", label: "状态", render: (value) => <StatusBadge value={requisitionStatusLabel(String(value))} /> },
+              ]}
+            />
+            <DataTable
+              title="盘点任务"
+              icon={ClipboardCheck}
+              rows={openStocktakes}
+              action={{ label: "进入盘点", onClick: () => setTab("full"), icon: ArrowRight }}
+              columns={[
+                { key: "stocktake_no", label: "盘点单" },
+                { key: "stocktake_date", label: "盘点日期", render: shortDate },
+                { key: "created_by_name", label: "负责人" },
+                { key: "status_label", label: "状态", render: (value, row) => <StatusBadge value={String(value ?? row.status ?? "-")} /> },
+              ]}
+            />
+          </div>
+        </>
+      ) : (
+        <>
+          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+            <MiniMetric label="风险供应商" value={`${snapshot.summary.supplierRiskCount} 家`} />
+            <MiniMetric label="资质临期" value={`${snapshot.summary.supplierCertificateDueCount} 项`} />
+            <MiniMetric label="整改待办" value={`${snapshot.summary.supplierCorrectiveOpenCount} 项`} />
+            <MiniMetric label="限制采购" value={`${snapshot.summary.supplierRestrictedCount} 家`} />
+          </div>
+          <div className="grid gap-5 xl:grid-cols-2">
+            <DataTable
+              title="供应商风险"
+              icon={AlertTriangle}
+              rows={supplierRisks}
+              action={{ label: "供应商全景", onClick: () => setTab("full"), icon: ArrowRight }}
+              columns={[
+                { key: "supplier_name", label: "供应商" },
+                { key: "supplier_code", label: "编码" },
+                { key: "status_label", label: "准入状态", render: (value, row) => <StatusBadge value={String(value ?? row.status ?? "-")} /> },
+                { key: "reason", label: "原因", render: (value, row) => String(value ?? row.recommendation ?? "-") },
+              ]}
+            />
+            <DataTable
+              title="整改任务"
+              icon={FileCheck2}
+              rows={supplierCorrections}
+              columns={[
+                { key: "action_no", label: "整改单" },
+                { key: "supplier_name", label: "供应商" },
+                { key: "due_date", label: "期限", render: shortDate },
+                { key: "owner_name", label: "责任人" },
+                { key: "status_label", label: "状态", render: (value, row) => <StatusBadge value={String(value ?? row.status ?? "-")} /> },
+              ]}
+            />
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function FinanceWorkspace({
+  snapshot,
+  actorId,
+  busy,
+  runAction,
+  openDetail,
+}: {
+  snapshot: Snapshot;
+  actorId: string;
+  busy: string | null;
+  runAction: (task: ActionRequest) => Promise<void>;
+  openDetail: (detail: DetailState) => void;
+}) {
+  const definition = workspaceFor("finance");
+  const [tab, setTab] = useState(definition.defaultTab);
+  const receivables = snapshot.board.receivables.filter((row) => row.status !== "paid");
+  const payables = snapshot.board.payables.filter((row) => row.status !== "paid");
+  const refunds = snapshot.board.salesReturns.filter((row) => ["pending_refund", "partial_refunded"].includes(String(row.refund_status)));
+  return (
+    <div className="space-y-5">
+      <WorkspaceTabs module="finance" active={tab} onChange={setTab} />
+      {tab === "pending" ? (
+        <>
+          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+            <MiniMetric label="应收余额" value={formatCurrency(snapshot.summary.receivableBalance)} />
+            <MiniMetric label="应付余额" value={formatCurrency(snapshot.summary.payableBalance)} />
+            <MiniMetric label="待退款" value={`${refunds.length} 单`} />
+            <MiniMetric label="已回款" value={formatCurrency(snapshot.summary.receivedAmount)} />
+          </div>
+          <div className="grid gap-5 xl:grid-cols-2">
+            <DataTable
+              title="待收款"
+              icon={Download}
+              rows={receivables}
+              action={{ label: "登记回款", onClick: () => setTab("full"), icon: ArrowRight }}
+              columns={[
+                { key: "receivable_no", label: "应收单" },
+                { key: "customer_name", label: "客户" },
+                { key: "order_no", label: "订单" },
+                { key: "balance_amount", label: "待收金额", render: formatCurrency },
+                { key: "due_date", label: "到期日", render: shortDate },
+                { key: "status", label: "状态", render: (value) => <StatusBadge value={String(value)} /> },
+                { key: "detail", label: "详情", render: (_value, row) => <DetailButton onClick={() => openDetail(compactRowDetail("应收详情", row))} /> },
+              ]}
+            />
+            <DataTable
+              title="待付款"
+              icon={ReceiptText}
+              rows={payables}
+              action={{ label: "登记付款", onClick: () => setTab("full"), icon: ArrowRight }}
+              columns={[
+                { key: "payable_no", label: "应付单" },
+                { key: "supplier_name", label: "供应商" },
+                { key: "purchase_no", label: "采购单" },
+                { key: "balance_amount", label: "待付金额", render: formatCurrency },
+                { key: "due_date", label: "到期日", render: shortDate },
+                { key: "status", label: "状态", render: (value) => <StatusBadge value={String(value)} /> },
+                { key: "detail", label: "详情", render: (_value, row) => <DetailButton onClick={() => openDetail(compactRowDetail("应付详情", row))} /> },
+              ]}
+            />
+          </div>
+          <DataTable
+            title="退款与异常"
+            icon={RotateCcw}
+            rows={refunds}
+            action={{ label: "进入退款处理", onClick: () => setTab("full"), icon: ArrowRight }}
+            columns={[
+              { key: "return_no", label: "退货单" },
+              { key: "customer_name", label: "客户" },
+              { key: "refund_due_amount", label: "待退金额", render: formatCurrency },
+              { key: "refund_status", label: "状态", render: (value) => <StatusBadge value={String(value)} /> },
+              { key: "received_at", label: "退货日期", render: shortDate },
+            ]}
+          />
+        </>
+      ) : (
+        <FinanceModule snapshot={snapshot} actorId={actorId} busy={busy} runAction={runAction} openDetail={openDetail} />
+      )}
+    </div>
+  );
+}
+
+function ReportsWorkspace({
+  snapshot,
+  actorId,
+  busy,
+  runAction,
+  openDetail,
+}: {
+  snapshot: Snapshot;
+  actorId: string;
+  busy: string | null;
+  runAction: (task: ActionRequest) => void | Promise<void>;
+  openDetail: (detail: DetailState) => void;
+}) {
+  const definition = workspaceFor("reports");
+  const [tab, setTab] = useState(definition.defaultTab);
+  return (
+    <div className="space-y-5">
+      <WorkspaceTabs module="reports" active={tab} onChange={setTab} />
+      {tab === "catalog" ? (
+        <>
+          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+            <MiniMetric label="报表模板" value={`${reportCards.length} 类`} />
+            <MiniMetric label="最近快照" value={`${snapshot.board.reportSnapshots.length} 次`} />
+            <MiniMetric label="导出记录" value={`${snapshot.board.documentExports.filter((row) => row.entity_type === "report").length} 个`} />
+            <MiniMetric label="积压金额" value={formatCurrency(snapshot.summary.overstockValue)} />
+          </div>
+          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+            {reportCards.map((card) => (
+              <Panel
+                key={card.type}
+                title={card.title}
+                icon={FileSpreadsheet}
+                actionButton={{ label: "下载 XLSX", onClick: () => downloadExport(actorId, card.type) }}
+              >
+                <div className="flex items-center justify-between gap-3">
+                  <StatusBadge value="正式模板" tone="success" />
+                  <span className="text-xs font-semibold text-slate-500">{card.cadence}</span>
+                </div>
+                <p className="mt-3 min-h-12 text-sm leading-6 text-slate-600">{card.detail}</p>
+              </Panel>
+            ))}
+          </div>
+          <DataTable
+            title="最近报表快照"
+            icon={FileSpreadsheet}
+            rows={snapshot.board.reportSnapshots}
+            action={{ label: "组合筛选与预览", onClick: () => setTab("full"), icon: ArrowRight }}
+            columns={[
+              { key: "report_no", label: "快照编号" },
+              { key: "report_title", label: "报表" },
+              { key: "period_start", label: "开始", render: shortDate },
+              { key: "period_end", label: "结束", render: shortDate },
+              { key: "generated_by_name", label: "生成人" },
+              { key: "created_at", label: "生成时间", render: shortDate },
+              { key: "detail", label: "详情", render: (_value, row) => <DetailButton onClick={() => openDetail(compactRowDetail("报表快照详情", row))} /> },
+            ]}
+          />
+        </>
+      ) : (
+        <ReportsModule snapshot={snapshot} actorId={actorId} busy={busy} runAction={runAction} openDetail={openDetail} />
+      )}
+    </div>
+  );
 }
 
 function ProductionWorkspace({
