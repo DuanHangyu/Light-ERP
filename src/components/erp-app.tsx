@@ -8,6 +8,8 @@ import {
   Calculator,
   CalendarDays,
   CheckCircle2,
+  ChevronDown,
+  ChevronRight,
   ClipboardCheck,
   ClipboardList,
   DatabaseBackup,
@@ -70,6 +72,15 @@ import {
   type FormalDocumentPreview,
 } from "@/lib/production-documents";
 import { buildReportPreview, type ReportPreview, type ReportPreviewType } from "@/lib/report-preview";
+import {
+  moduleCatalog,
+  navigationForRole,
+  resolveAccessibleModule,
+  type ModuleKey,
+  type NavigationGroup,
+  type NavigationItem,
+} from "@/lib/erp-navigation";
+import { buildWorkbenchModel, type WorkbenchMetric } from "@/lib/erp-workbench";
 
 type User = {
   id: string;
@@ -338,21 +349,6 @@ type Snapshot = {
   };
 };
 
-type ModuleKey =
-  | "overview"
-  | "process"
-  | "master"
-  | "sales"
-  | "production"
-  | "inventory"
-  | "quality"
-  | "finance"
-  | "reports"
-  | "approval"
-  | "archive"
-  | "system"
-  | "parallel";
-
 type ActionRequest = Pick<Task, "action" | "entityId"> & {
   variant?: string;
   payload?: Record<string, unknown>;
@@ -370,6 +366,32 @@ const roleIcon: Record<string, typeof ClipboardList> = {
   finance: Download,
   admin: ShieldCheck,
 };
+
+const navigationIcon: Record<NavigationItem["icon"], typeof ClipboardList> = {
+  workbench: ClipboardList,
+  process: ArrowRight,
+  database: DatabaseBackup,
+  sales: FileSpreadsheet,
+  production: Factory,
+  purchase: ReceiptText,
+  warehouse: Warehouse,
+  supplier: Users,
+  quality: FlaskConical,
+  finance: Download,
+  report: FileSpreadsheet,
+  alert: BellRing,
+  approval: FileCheck2,
+  archive: DatabaseBackup,
+  system: ShieldCheck,
+  parallel: Calculator,
+};
+
+function moduleFromLegacyTarget(value: unknown): ModuleKey {
+  const target = String(value ?? "workbench");
+  if (target === "overview") return "workbench";
+  if (target === "inventory") return "warehouse";
+  return target in moduleCatalog ? (target as ModuleKey) : "workbench";
+}
 
 const taskIcon: Record<string, typeof ClipboardList> = {
   confirmQuote: CheckCircle2,
@@ -449,22 +471,6 @@ const taskIcon: Record<string, typeof ClipboardList> = {
   downloadMonthlyReport: FileSpreadsheet,
   downloadOverstockReport: FileSpreadsheet,
 };
-
-const navItems = [
-  { key: "overview", label: "经营总览", title: "经营总览", subtitle: "订单、生产、库存、现金流与待办", icon: Gauge },
-  { key: "process", label: "流程驾驶舱", title: "流程驾驶舱", subtitle: "客户流程图节点、待办、异常与部门责任", icon: ArrowRight },
-  { key: "master", label: "主数据", title: "主数据管理", subtitle: "客户、供应商、物料、产品与 BOM 基础资料", icon: DatabaseBackup },
-  { key: "sales", label: "销售订单", title: "销售订单", subtitle: "报价、客户订单、发货与销售对账", icon: FileSpreadsheet },
-  { key: "production", label: "生产执行", title: "生产执行", subtitle: "生产指令、排产、领料与 BOM", icon: Factory },
-  { key: "inventory", label: "采购仓储", title: "采购仓储", subtitle: "供应商、采购单、库存批次与预警", icon: Warehouse },
-  { key: "quality", label: "质检收率", title: "质检收率", subtitle: "请验、检验结果、成品入库与收率", icon: FlaskConical },
-  { key: "finance", label: "财务台账", title: "财务台账", subtitle: "应收、应付、收付款与账龄", icon: Download },
-  { key: "reports", label: "报表中心", title: "报表中心", subtitle: "日报、周报、月报、对账与积压库存报表", icon: FileSpreadsheet },
-  { key: "approval", label: "审批算价", title: "审批算价", subtitle: "办公 OA 审批、授权配方试算与历史统计", icon: Calculator },
-  { key: "archive", label: "本地归档", title: "本地归档", subtitle: "数据盘、冷备份、导出记录与审计", icon: DatabaseBackup },
-  { key: "system", label: "系统管理", title: "系统管理", subtitle: "账号登录、角色权限、密码与审计", icon: ShieldCheck },
-  { key: "parallel", label: "平行账套", title: "平行账套", subtitle: "经营数据测算沙盘：快照·调整·复盘·合并预览", icon: Calculator, roles: ["manager", "admin", "finance"] },
-] satisfies Array<{ key: ModuleKey; label: string; title: string; subtitle: string; icon: typeof ClipboardList; roles?: string[] }>;
 
 const roleOptions = [
   { value: "sales", label: "销售员" },
@@ -794,7 +800,7 @@ function alertActionPayload(alert: Row, actorId: string) {
 
 export function ErpApp() {
   const [actorId, setActorId] = useState("");
-  const [activeModule, setActiveModule] = useState<ModuleKey>("overview");
+  const [activeModule, setActiveModule] = useState<ModuleKey>("workbench");
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [detail, setDetail] = useState<DetailState | null>(null);
   const [loading, setLoading] = useState(true);
@@ -806,7 +812,13 @@ export function ErpApp() {
 
   const currentUser = snapshot?.currentUser;
   const CurrentIcon = currentUser ? roleIcon[currentUser.role] ?? LogIn : LogIn;
-  const activeNav = navItems.find((item) => item.key === activeModule) ?? navItems[0];
+  const navigationGroups = useMemo(() => navigationForRole(currentUser?.role ?? ""), [currentUser?.role]);
+  const activeNav = moduleCatalog[activeModule];
+
+  const openModule = (module: ModuleKey) => {
+    const role = currentUser?.role ?? "";
+    setActiveModule(resolveAccessibleModule(role, module));
+  };
 
   const load = async (nextActorId = actorId) => {
     setLoading(true);
@@ -824,6 +836,7 @@ export function ErpApp() {
     }
     setSnapshot(data);
     setActorId(data.currentUser.id);
+    setActiveModule((current) => resolveAccessibleModule(data.currentUser.role, current));
     setMessage("数据已同步");
     setLoading(false);
   };
@@ -848,6 +861,7 @@ export function ErpApp() {
     }
     setSnapshot(data);
     setActorId(data.currentUser.id);
+    setActiveModule("workbench");
     setMessage("登录成功，数据已同步");
     setLoading(false);
   };
@@ -856,7 +870,7 @@ export function ErpApp() {
     await fetch("/api/auth/logout", { method: "POST" });
     setSnapshot(null);
     setActorId("");
-    setActiveModule("overview");
+    setActiveModule("workbench");
     setMessage("已退出登录");
     setError("");
   };
@@ -976,27 +990,13 @@ export function ErpApp() {
               </div>
             </div>
           </div>
-          <nav className="space-y-1 px-3 py-4">
-            {navItems
-              .filter((item) => !item.roles || item.roles.includes(snapshot.currentUser.role))
-              .map((item) => {
-              const Icon = item.icon;
-              const active = item.key === activeModule;
-              return (
-                <button
-                  key={item.label}
-                  type="button"
-                  onClick={() => setActiveModule(item.key)}
-                  className={`flex h-10 w-full items-center gap-3 rounded-md px-3 text-sm transition ${
-                    active ? "bg-blue-600 text-white" : "text-slate-300 hover:bg-white/8 hover:text-white"
-                  }`}
-                >
-                  <Icon className="h-4 w-4" />
-                  <span>{item.label}</span>
-                </button>
-              );
-            })}
-          </nav>
+          <RoleNavigation
+            groups={navigationGroups}
+            role={snapshot.currentUser.role}
+            activeModule={activeModule}
+            pendingTasks={snapshot.tasks.length}
+            onOpenModule={openModule}
+          />
           <div className="mt-auto border-t border-white/10 px-5 py-4 text-xs leading-6 text-slate-400">
             <div className="truncate">数据盘：{snapshot.dataRoot}</div>
             <div>最近备份：{snapshot.storage.latestBackup}</div>
@@ -1028,29 +1028,11 @@ export function ErpApp() {
                   <Search className="h-4 w-4 shrink-0" />
                   <span className="truncate">搜索单据 / 客户 / 物料</span>
                 </div>
-                <div className="scrollbar-thin flex max-w-full gap-2 overflow-x-auto lg:hidden">
-                  {navItems
-                    .filter((item) => !item.roles || item.roles.includes(snapshot.currentUser.role))
-                    .map((item) => {
-                    const Icon = item.icon;
-                    const active = item.key === activeModule;
-                    return (
-                      <button
-                        key={item.key}
-                        type="button"
-                        onClick={() => setActiveModule(item.key)}
-                        className={`inline-flex h-10 shrink-0 items-center gap-2 rounded-md border px-3 text-xs font-semibold transition ${
-                          active
-                            ? "border-blue-600 bg-blue-600 text-white"
-                            : "border-slate-200 bg-white text-slate-600"
-                        }`}
-                      >
-                        <Icon className="h-4 w-4" />
-                        {item.label}
-                      </button>
-                    );
-                  })}
-                </div>
+                <MobileRoleNavigation
+                  groups={navigationGroups}
+                  activeModule={activeModule}
+                  onOpenModule={openModule}
+                />
                 <div className="flex h-10 shrink-0 items-center gap-2 rounded-md border border-slate-200 bg-white px-3 text-xs text-slate-600">
                   <CurrentIcon className="h-4 w-4 text-blue-600" />
                   <span className="font-semibold text-slate-800">{currentUser?.role_label}</span>
@@ -1076,32 +1058,16 @@ export function ErpApp() {
               </div>
             ) : null}
 
-            <ModuleHeader
-              title={activeNav.title}
-              subtitle={activeNav.subtitle}
-              action={
-                activeModule === "finance"
-                  ? { label: "导出台账", onClick: () => downloadExport(actorId, "ledger") }
-                  : activeModule === "approval" &&
-                      ["manager", "admin", "purchasing", "production"].includes(snapshot.currentUser.role)
-                    ? { label: "试算配方", onClick: () => void runAction({ action: "createFormulaCalculation" }) }
-                  : activeModule === "archive"
-                    ? { label: "冷备份", onClick: () => downloadBackup(actorId) }
-                    : undefined
-              }
-            />
-
-            {activeModule === "overview" ? (
-              <OverviewModule
+            {activeModule === "workbench" ? (
+              <RoleWorkbenchModule
                 snapshot={snapshot}
                 busy={busy}
                 lifecycleRows={lifecycleRows}
                 runAction={runAction}
-                actorId={actorId}
-                onOpenModule={setActiveModule}
+                onOpenModule={openModule}
               />
             ) : null}
-            {activeModule === "process" ? <ProcessCockpitModule snapshot={snapshot} onOpenModule={setActiveModule} /> : null}
+            {activeModule === "process" ? <ProcessCockpitModule snapshot={snapshot} onOpenModule={openModule} /> : null}
             {activeModule === "master" ? (
               <MasterDataModule
                 snapshot={snapshot}
@@ -1139,8 +1105,9 @@ export function ErpApp() {
                 openDetail={setDetail}
               />
             ) : null}
-            {activeModule === "inventory" ? (
+            {["purchase", "warehouse", "suppliers"].includes(activeModule) ? (
               <InventoryModule
+                area={activeModule as "purchase" | "warehouse" | "suppliers"}
                 snapshot={snapshot}
                 actorId={actorId}
                 busy={busy}
@@ -1170,6 +1137,9 @@ export function ErpApp() {
             ) : null}
             {activeModule === "reports" ? (
               <ReportsModule snapshot={snapshot} actorId={actorId} busy={busy} runAction={runAction} openDetail={setDetail} />
+            ) : null}
+            {activeModule === "alerts" ? (
+              <AlertOperationsModule snapshot={snapshot} actorId={actorId} busy={busy} runAction={runAction} openDetail={setDetail} />
             ) : null}
             {activeModule === "approval" ? (
               <ApprovalFormulaModule
@@ -1213,6 +1183,121 @@ export function ErpApp() {
       </div>
       <DetailModal detail={detail} onClose={() => setDetail(null)} />
     </main>
+  );
+}
+
+function RoleNavigation({
+  groups,
+  role,
+  activeModule,
+  pendingTasks,
+  onOpenModule,
+}: {
+  groups: NavigationGroup[];
+  role: string;
+  activeModule: ModuleKey;
+  pendingTasks: number;
+  onOpenModule: (module: ModuleKey) => void;
+}) {
+  const defaultExpanded = () => new Set(role === "admin" ? ["work"] : groups.map((group) => group.key));
+  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(defaultExpanded);
+
+  useEffect(() => {
+    setExpandedGroups(defaultExpanded());
+  }, [role]);
+
+  const toggleGroup = (groupKey: string) => {
+    setExpandedGroups((current) => {
+      const next = new Set(current);
+      if (next.has(groupKey)) next.delete(groupKey);
+      else next.add(groupKey);
+      return next;
+    });
+  };
+
+  return (
+    <nav className="scrollbar-thin flex-1 space-y-3 overflow-y-auto px-3 py-4" aria-label="主要导航">
+      {groups.map((group) => {
+        const expanded = expandedGroups.has(group.key);
+        const containsActive = group.items.some((item) => item.key === activeModule);
+        return (
+          <div key={group.key}>
+            <button
+              type="button"
+              aria-expanded={expanded}
+              onClick={() => toggleGroup(group.key)}
+              className={`mb-1 flex h-8 w-full items-center justify-between rounded-md px-3 text-[11px] font-semibold tracking-[0.12em] transition ${
+                containsActive ? "text-blue-300" : "text-slate-500 hover:text-slate-300"
+              }`}
+            >
+              <span>{group.label}</span>
+              {expanded ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+            </button>
+            {expanded ? (
+              <div className="space-y-1">
+                {group.items.map((item) => {
+                  const Icon = navigationIcon[item.icon];
+                  const active = item.key === activeModule;
+                  return (
+                    <button
+                      key={item.key}
+                      type="button"
+                      onClick={() => onOpenModule(item.key)}
+                      aria-current={active ? "page" : undefined}
+                      className={`flex h-10 w-full items-center gap-3 rounded-md px-3 text-sm transition ${
+                        active ? "bg-blue-600 text-white" : "text-slate-300 hover:bg-white/8 hover:text-white"
+                      }`}
+                    >
+                      <Icon className="h-4 w-4 shrink-0" />
+                      <span className="min-w-0 flex-1 truncate text-left">{item.label}</span>
+                      {item.key === "workbench" && pendingTasks > 0 ? (
+                        <span className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${active ? "bg-white/20" : "bg-amber-400/15 text-amber-300"}`}>
+                          {pendingTasks}
+                        </span>
+                      ) : null}
+                    </button>
+                  );
+                })}
+              </div>
+            ) : null}
+          </div>
+        );
+      })}
+    </nav>
+  );
+}
+
+function MobileRoleNavigation({
+  groups,
+  activeModule,
+  onOpenModule,
+}: {
+  groups: NavigationGroup[];
+  activeModule: ModuleKey;
+  onOpenModule: (module: ModuleKey) => void;
+}) {
+  const items = groups.flatMap((group) => group.items);
+  return (
+    <div className="scrollbar-thin flex max-w-full gap-2 overflow-x-auto lg:hidden" aria-label="移动端导航">
+      {items.map((item) => {
+        const Icon = navigationIcon[item.icon];
+        const active = item.key === activeModule;
+        return (
+          <button
+            key={item.key}
+            type="button"
+            onClick={() => onOpenModule(item.key)}
+            aria-current={active ? "page" : undefined}
+            className={`inline-flex h-10 shrink-0 items-center gap-2 rounded-md border px-3 text-xs font-semibold transition ${
+              active ? "border-blue-600 bg-blue-600 text-white" : "border-slate-200 bg-white text-slate-600"
+            }`}
+          >
+            <Icon className="h-4 w-4" />
+            {item.label}
+          </button>
+        );
+      })}
+    </div>
   );
 }
 
@@ -1332,7 +1417,7 @@ function ProcessCockpitModule({
             <button
               key={String(row.key)}
               type="button"
-              onClick={() => onOpenModule(String(row.target_module ?? "overview") as ModuleKey)}
+              onClick={() => onOpenModule(moduleFromLegacyTarget(row.target_module))}
               className={`group flex min-h-[170px] min-w-0 flex-col rounded-md border p-3 text-left transition hover:-translate-y-0.5 hover:border-blue-300 hover:shadow-md ${processNodeClass(String(row.status))}`}
             >
               <div className="flex items-start justify-between gap-2">
@@ -1375,7 +1460,7 @@ function ProcessCockpitModule({
               key: "target_module",
               label: "入口",
               render: (value) => (
-                <InlineActionButton label="进入" onClick={() => onOpenModule(String(value ?? "overview") as ModuleKey)} />
+                <InlineActionButton label="进入" onClick={() => onOpenModule(moduleFromLegacyTarget(value))} />
               ),
             },
           ]}
@@ -1419,7 +1504,7 @@ function ProcessCockpitModule({
             key: "target_module",
             label: "处理入口",
             render: (value) => (
-              <InlineActionButton label="处理" onClick={() => onOpenModule(String(value ?? "overview") as ModuleKey)} />
+              <InlineActionButton label="处理" onClick={() => onOpenModule(moduleFromLegacyTarget(value))} />
             ),
           },
         ]}
@@ -2678,6 +2763,189 @@ function SystemModule({
   );
 }
 
+function formatWorkbenchMetric(metric: WorkbenchMetric) {
+  if (metric.format === "currency") return formatCurrency(metric.value);
+  if (metric.format === "percent") return `${metric.value.toFixed(2)}%`;
+  return `${metric.value} 项`;
+}
+
+function RoleWorkbenchModule({
+  snapshot,
+  busy,
+  lifecycleRows,
+  runAction,
+  onOpenModule,
+}: {
+  snapshot: Snapshot;
+  busy: string | null;
+  lifecycleRows: Array<{ name: string; rows: Row[]; label: string; status: string }>;
+  runAction: (task: ActionRequest) => Promise<void>;
+  onOpenModule: (module: ModuleKey) => void;
+}) {
+  const model = buildWorkbenchModel(
+    snapshot.currentUser.role,
+    snapshot.tasks,
+    snapshot.board.alertCenter,
+    snapshot.summary,
+  );
+  const recentDocuments = lifecycleRows
+    .flatMap((group) =>
+      group.rows.slice(0, 1).map((row) => ({
+        type: group.name,
+        number: String(row[group.label] ?? "-"),
+        status: String(row[group.status] ?? row.status ?? "-"),
+      })),
+    )
+    .slice(0, 5);
+
+  return (
+    <div className="space-y-5">
+      <section className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
+        <div className="grid gap-5 bg-gradient-to-r from-slate-950 via-slate-900 to-blue-950 px-5 py-6 text-white lg:grid-cols-[minmax(0,1fr)_auto] lg:items-center lg:px-7">
+          <div>
+            <p className="text-sm font-medium text-blue-200">{snapshot.currentUser.role_label}工作台</p>
+            <h2 className="mt-2 text-2xl font-semibold tracking-tight">你好，{snapshot.currentUser.name}</h2>
+            <p className="mt-2 text-sm leading-6 text-slate-300">{model.headline}</p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {model.quickLinks.slice(0, 3).map((link, index) => (
+              <button
+                key={link.key}
+                type="button"
+                onClick={() => onOpenModule(link.key)}
+                className={`inline-flex h-10 items-center gap-2 rounded-md px-4 text-sm font-semibold transition ${
+                  index === 0 ? "bg-blue-600 text-white hover:bg-blue-500" : "border border-white/15 bg-white/5 text-slate-100 hover:bg-white/10"
+                }`}
+              >
+                {link.label}
+                <ArrowRight className="h-4 w-4" />
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className="grid gap-3 p-4 sm:grid-cols-2 xl:grid-cols-4">
+          {model.metrics.map((metric) => (
+            <div key={metric.key} className="rounded-lg border border-slate-200 bg-slate-50/70 px-4 py-3">
+              <p className="text-xs font-medium text-slate-500">{metric.label}</p>
+              <p className="mt-1 text-xl font-semibold text-slate-950">{formatWorkbenchMetric(metric)}</p>
+            </div>
+          ))}
+        </div>
+      </section>
+
+      <section className="grid gap-5 2xl:grid-cols-[minmax(0,1.35fr)_minmax(360px,0.65fr)]">
+        <Panel title="我的待办" icon={ClipboardList} action={`共 ${snapshot.tasks.length} 项 / 优先 ${model.priorityTaskCount} 项`}>
+          <div className="space-y-2">
+            {model.tasks.length === 0 ? (
+              <EmptyText text="当前没有需要你处理的任务。" />
+            ) : (
+              model.tasks.map((task) => (
+                <WorkbenchTaskRow key={task.id} task={task} busy={busy} runAction={runAction} />
+              ))
+            )}
+          </div>
+          {snapshot.tasks.length > model.tasks.length ? (
+            <p className="mt-3 text-center text-xs text-slate-500">首屏显示优先级最高的 6 项，其余任务请进入对应业务模块。</p>
+          ) : null}
+        </Panel>
+
+        <Panel title="异常与风险" icon={AlertTriangle} action={`${snapshot.board.alertCenter.length} 条`}>
+          <div className="space-y-2">
+            {model.alerts.length === 0 ? (
+              <EmptyText text="当前没有与你相关的经营异常。" />
+            ) : (
+              model.alerts.map((alert, index) => (
+                <div key={String(alert.id ?? index)} className="rounded-md border border-slate-200 bg-slate-50/70 px-3 py-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="truncate text-sm font-semibold text-slate-900">{String(alert.title ?? "经营预警")}</p>
+                      <p className="mt-1 line-clamp-2 text-xs leading-5 text-slate-500">{String(alert.detail ?? "请进入相关业务单据查看影响和处理建议。")}</p>
+                    </div>
+                    <StatusBadge value={String(alert.severity_label ?? alert.severity ?? "关注")} />
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+          {["manager", "finance", "admin"].includes(snapshot.currentUser.role) ? (
+            <button
+              type="button"
+              onClick={() => onOpenModule("alerts")}
+              className="mt-3 inline-flex h-9 w-full items-center justify-center gap-2 rounded-md border border-slate-200 bg-white text-sm font-semibold text-slate-700 hover:border-blue-300 hover:text-blue-700"
+            >
+              查看全部预警与整改
+              <ArrowRight className="h-4 w-4" />
+            </button>
+          ) : null}
+        </Panel>
+      </section>
+
+      <section className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_minmax(320px,0.45fr)]">
+        <Panel title="最近业务" icon={ReceiptText} action="从最近单据继续工作">
+          <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+            {recentDocuments.length === 0 ? (
+              <EmptyText text="暂无最近业务单据。" />
+            ) : (
+              recentDocuments.map((document) => (
+                <div key={`${document.type}-${document.number}`} className="rounded-md border border-slate-200 px-3 py-3">
+                  <p className="text-xs font-medium text-slate-500">{document.type}</p>
+                  <p className="mt-1 truncate text-sm font-semibold text-slate-900">{document.number}</p>
+                  <div className="mt-2"><StatusBadge value={document.status} /></div>
+                </div>
+              ))
+            )}
+          </div>
+        </Panel>
+
+        <Panel title="工作入口" icon={ArrowRight} action="按职责显示">
+          <div className="space-y-2">
+            {model.quickLinks.map((link) => (
+              <InlineActionButton key={link.key} label={`${link.label} →`} onClick={() => onOpenModule(link.key)} />
+            ))}
+          </div>
+        </Panel>
+      </section>
+    </div>
+  );
+}
+
+function WorkbenchTaskRow({
+  task,
+  busy,
+  runAction,
+}: {
+  task: Task;
+  busy: string | null;
+  runAction: (task: ActionRequest) => Promise<void>;
+}) {
+  const Icon = taskIcon[task.action ?? ""] ?? ClipboardList;
+  const actionBusy = busy === `${task.action}-${task.entityId ?? "system"}-primary`;
+  return (
+    <article className={`flex flex-col gap-3 rounded-md border border-slate-200 border-l-4 px-3 py-3 sm:flex-row sm:items-center ${toneClass[task.tone]}`}>
+      <div className="flex min-w-0 flex-1 items-start gap-3">
+        <div className="grid h-9 w-9 shrink-0 place-items-center rounded-md bg-white text-slate-700 shadow-sm ring-1 ring-slate-200">
+          <Icon className="h-4 w-4" />
+        </div>
+        <div className="min-w-0">
+          <p className="truncate text-sm font-semibold text-slate-950">{task.title}</p>
+          <p className="mt-1 line-clamp-1 text-xs leading-5 text-slate-600">{task.detail}</p>
+        </div>
+      </div>
+      {task.action ? (
+        <button
+          type="button"
+          disabled={Boolean(busy)}
+          onClick={() => runAction(task)}
+          className="inline-flex h-9 shrink-0 items-center justify-center gap-2 rounded-md bg-blue-600 px-3 text-xs font-semibold text-white hover:bg-blue-700"
+        >
+          {actionBusy ? "处理中" : task.primaryLabel ?? "开始处理"}
+          <ArrowRight className="h-3.5 w-3.5" />
+        </button>
+      ) : null}
+    </article>
+  );
+}
+
 function OverviewModule({
   snapshot,
   busy,
@@ -2732,7 +3000,7 @@ function OverviewModule({
           <Panel title="业务台账入口" icon={ArrowRight} action="明细台账在各业务模块">
             <div className="grid gap-3 md:grid-cols-2">
               <InlineActionButton label="应收应付 / 收付款 → 财务台账" onClick={() => onOpenModule("finance")} />
-              <InlineActionButton label="实时库存 / 批次追溯 → 采购仓储" onClick={() => onOpenModule("inventory")} />
+              <InlineActionButton label="实时库存 / 批次追溯 → 库存仓储" onClick={() => onOpenModule("warehouse")} />
               <InlineActionButton label="成品批次 / 检验 → 质检收率" onClick={() => onOpenModule("quality")} />
               <InlineActionButton label="附件 / 导出 / 冷备份 → 本地归档" onClick={() => onOpenModule("archive")} />
             </div>
@@ -2748,6 +3016,87 @@ function OverviewModule({
         </div>
       </section>
     </>
+  );
+}
+
+function AlertOperationsModule({
+  snapshot,
+  actorId,
+  busy,
+  runAction,
+  openDetail,
+}: {
+  snapshot: Snapshot;
+  actorId: string;
+  busy: string | null;
+  runAction: (task: ActionRequest) => Promise<void>;
+  openDetail: (detail: DetailState) => void;
+}) {
+  const warningEvents = snapshot.board.costAnomalyWarningEvents ?? [];
+  const remediations: Row[] = [
+    ...(snapshot.board.costAnomalyRemediations ?? []).map((row) => ({ ...row, source_label: "成本异常" })),
+    ...(snapshot.board.systemHealthRemediations ?? []).map((row) => ({ ...row, source_label: "系统健康" })),
+  ];
+  return (
+    <div className="space-y-5">
+      <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        <Metric label="全部预警" value={`${snapshot.summary.alertCount} 条`} icon={BellRing} tone="rose" />
+        <Metric label="未读预警" value={`${snapshot.summary.unreadAlertCount} 条`} icon={MessagesSquare} tone="amber" />
+        <Metric label="紧急预警" value={`${snapshot.summary.criticalAlertCount} 条`} icon={AlertTriangle} tone="rose" />
+        <Metric label="待整改" value={`${remediations.filter((row) => !["closed", "completed"].includes(String(row.status ?? ""))).length} 项`} icon={FileCheck2} tone="blue" />
+      </section>
+
+      <AlertCenterPanel snapshot={snapshot} actorId={actorId} busy={busy} runAction={runAction} />
+
+      <div className="grid gap-5 xl:grid-cols-2">
+        <DataTable
+          title="成本异常事件"
+          icon={AlertTriangle}
+          rows={warningEvents}
+          columns={[
+            { key: "event_no", label: "事件编号", render: (value, row) => String(value ?? row.id ?? "-") },
+            { key: "severity", label: "级别", render: (value, row) => <StatusBadge value={String(row.severity_label ?? value ?? "-")} /> },
+            { key: "message", label: "异常说明", render: (value, row) => String(value ?? row.title ?? row.reason ?? "-") },
+            { key: "status", label: "状态", render: (value, row) => <StatusBadge value={String(row.status_label ?? value ?? "-")} /> },
+          ]}
+        />
+        <DataTable
+          title="整改任务"
+          icon={FileCheck2}
+          rows={remediations}
+          columns={[
+            { key: "source_label", label: "来源" },
+            { key: "title", label: "整改事项", render: (value, row) => String(value ?? row.remediation_no ?? row.id ?? "-") },
+            { key: "owner_name", label: "责任人", render: (value, row) => String(value ?? row.owner_role_label ?? row.owner_role ?? "-") },
+            { key: "status", label: "状态", render: (value, row) => <StatusBadge value={String(row.status_label ?? value ?? "-")} /> },
+            {
+              key: "id",
+              label: "详情",
+              render: (_value, row) => (
+                <button
+                  type="button"
+                  onClick={() =>
+                    openDetail({
+                      title: String(row.title ?? row.remediation_no ?? "整改任务"),
+                      subtitle: String(row.source_label ?? "预警与整改"),
+                      fields: [
+                        { label: "当前状态", value: <StatusBadge value={String(row.status_label ?? row.status ?? "-")} /> },
+                        { label: "责任人", value: String(row.owner_name ?? row.owner_role_label ?? row.owner_role ?? "-") },
+                        { label: "整改说明", value: String(row.result_note ?? row.detail ?? row.description ?? "-") },
+                        { label: "期限", value: shortDate(row.due_date) },
+                      ],
+                    })
+                  }
+                  className="text-xs font-semibold text-blue-700 hover:text-blue-900"
+                >
+                  查看
+                </button>
+              ),
+            },
+          ]}
+        />
+      </div>
+    </div>
   );
 }
 
@@ -5694,9 +6043,6 @@ function ProductionModule({
           <ProductionChart snapshot={snapshot} />
         )}
       </div>
-      {canIssue ? (
-        <WarehouseIssueDesk snapshot={snapshot} busy={busy} runAction={runAction} />
-      ) : null}
       <DataTable
         title="生产工单成本归集"
         icon={ReceiptText}
@@ -6084,6 +6430,7 @@ function WarehouseIssueDesk({
 }
 
 function InventoryModule({
+  area,
   snapshot,
   actorId,
   busy,
@@ -6092,6 +6439,7 @@ function InventoryModule({
   onSnapshot,
   onError,
 }: {
+  area: "purchase" | "warehouse" | "suppliers";
   snapshot: Snapshot;
   actorId: string;
   busy: string | null;
@@ -6434,33 +6782,32 @@ function InventoryModule({
 
   return (
     <div className="space-y-5">
-      <div className="grid gap-3 md:grid-cols-3 xl:grid-cols-12">
-        <MiniMetric label="供应商" value={`${snapshot.board.suppliers.length} 家`} />
-        <MiniMetric label="采购申请" value={`${snapshot.board.purchaseRequisitions.length} 张`} />
-        <MiniMetric label="采购单" value={`${snapshot.board.purchaseOrders.length} 张`} />
-        <MiniMetric label="采购合同" value={`${snapshot.board.purchaseContracts.length} 份`} />
-        <MiniMetric label="待签收到货" value={`${snapshot.board.purchaseArrivalNotices.filter((item) => item.status === "pending_signoff").length} 张`} />
-        <MiniMetric label="到货差异" value={`${openArrivalDiscrepancyCount} 张`} />
-        <MiniMetric label="MRP缺料" value={formatCurrency(snapshot.summary.mrpShortageAmount)} />
-        <MiniMetric label="IQC 待检" value={`${snapshot.board.materialIqcInspections.filter((item) => item.status === "pending").length} 张`} />
-        <MiniMetric label="库存总值" value={formatCurrency(snapshot.summary.inventoryValue)} />
-        <MiniMetric label="低库存" value={`${snapshot.summary.lowStockCount} 项`} />
-        <MiniMetric label="3个月未动" value={`${snapshot.summary.staleWarningCount} 项`} />
-        <MiniMetric label="6个月积压" value={formatCurrency(snapshot.summary.overstockValue)} />
-        <MiniMetric label="供应商风险" value={`${snapshot.summary.supplierRiskCount} 家`} />
-        <MiniMetric label="准入限制" value={`${snapshot.summary.supplierRestrictedCount} 家`} />
-        <MiniMetric label="整改待办" value={`${snapshot.summary.supplierCorrectiveOpenCount} 项`} />
-        <MiniMetric label="整改逾期" value={`${snapshot.summary.supplierCorrectionOverdueCount} 项`} />
-        <MiniMetric label="恢复采购" value={`${snapshot.summary.supplierReleaseCount} 次`} />
-        <MiniMetric label="观察中" value={`${snapshot.summary.supplierObservationActiveCount} 家`} />
-        <MiniMetric label="资质临期" value={`${snapshot.summary.supplierCertificateDueCount} 项`} />
-        <MiniMetric label="必备缺失" value={`${snapshot.summary.supplierQualificationMissingCount} 项`} />
-        <MiniMetric label="下单拦截" value={`${snapshot.summary.supplierQualificationBlockingCount} 项`} />
-        <MiniMetric label="年度待评" value={`${snapshot.summary.supplierAnnualReviewDueCount} 家`} />
-        <MiniMetric label="自动规则" value={`${snapshot.summary.supplierAutoRuleCount} 条`} />
-        <MiniMetric label="规则触发" value={`${snapshot.summary.supplierAutoTriggerCount} 次`} />
-        <MiniMetric label="规则审批" value={`${snapshot.summary.supplierRuleChangePendingCount} 单`} />
+      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        {area === "purchase" ? (
+          <>
+            <MiniMetric label="待转采购申请" value={`${snapshot.board.mrpRequirementRuns.filter((item) => item.status === "draft").length} 张`} />
+            <MiniMetric label="采购申请" value={`${snapshot.board.purchaseRequisitions.length} 张`} />
+            <MiniMetric label="待到货" value={`${snapshot.board.purchaseOrders.filter((item) => item.status === "pending_receipt").length} 张`} />
+            <MiniMetric label="MRP 缺料" value={formatCurrency(snapshot.summary.mrpShortageAmount)} />
+          </>
+        ) : area === "warehouse" ? (
+          <>
+            <MiniMetric label="待签收到货" value={`${snapshot.board.purchaseArrivalNotices.filter((item) => item.status === "pending_signoff").length} 张`} />
+            <MiniMetric label="到货差异" value={`${openArrivalDiscrepancyCount} 张`} />
+            <MiniMetric label="低库存" value={`${snapshot.summary.lowStockCount} 项`} />
+            <MiniMetric label="库存总值" value={formatCurrency(snapshot.summary.inventoryValue)} />
+          </>
+        ) : (
+          <>
+            <MiniMetric label="供应商" value={`${snapshot.board.suppliers.length} 家`} />
+            <MiniMetric label="风险供应商" value={`${snapshot.summary.supplierRiskCount} 家`} />
+            <MiniMetric label="资质临期" value={`${snapshot.summary.supplierCertificateDueCount} 项`} />
+            <MiniMetric label="整改待办" value={`${snapshot.summary.supplierCorrectiveOpenCount} 项`} />
+          </>
+        )}
       </div>
+      {area === "purchase" ? (
+        <>
       <div className="grid gap-5 xl:grid-cols-[420px_1fr]">
         <Panel title="MRP 缺料净需求" icon={ClipboardList} action={canCreatePurchaseRequisition ? "BOM净需求" : "只读"}>
           {canCreatePurchaseRequisition ? (
@@ -6937,6 +7284,53 @@ function InventoryModule({
           },
         ]}
       />
+        </>
+      ) : null}
+      {area === "warehouse" ? (
+        <>
+      <WarehouseIssueDesk snapshot={snapshot} busy={busy} runAction={runAction} />
+      <DataTable
+        title="今日到货与签收"
+        icon={Truck}
+        rows={snapshot.board.purchaseArrivalNotices}
+        columns={[
+          { key: "arrival_no", label: "到货通知" },
+          { key: "purchase_no", label: "采购单" },
+          { key: "supplier_name", label: "供应商" },
+          { key: "arrived_at", label: "到货日期", render: shortDate },
+          { key: "status", label: "状态", render: (value, row) => <StatusBadge value={String(row.status_label ?? value)} /> },
+          {
+            key: "warehouse_arrival_ops",
+            label: "下一步",
+            render: (_value, row) => (
+              <div className="flex flex-wrap gap-2">
+                {canWarehouse && row.status === "pending_signoff" ? (
+                  <>
+                    <InlineActionButton
+                      label="确认签收"
+                      busy={busy === `signPurchaseArrivalNotice-${String(row.id)}-primary`}
+                      onClick={() => void runAction({ action: "signPurchaseArrivalNotice", entityId: String(row.id) })}
+                    />
+                    <InlineActionButton
+                      label="登记差异"
+                      busy={busy === `registerPurchaseArrivalDiscrepancy-${String(row.id)}-primary`}
+                      onClick={() =>
+                        void runAction({
+                          action: "registerPurchaseArrivalDiscrepancy",
+                          entityId: String(row.id),
+                          payload: buildArrivalDiscrepancyPayload(row),
+                        })
+                      }
+                    />
+                  </>
+                ) : (
+                  <span className="text-xs text-slate-500">{String(row.next_step ?? "等待后续处理")}</span>
+                )}
+              </div>
+            ),
+          },
+        ]}
+      />
       <div className="grid gap-5 xl:grid-cols-[420px_1fr]">
         <Panel title="库存盘点录入" icon={ClipboardList} action={canStocktake ? "待审批调整" : "只读"}>
           {canStocktake ? (
@@ -7059,6 +7453,10 @@ function InventoryModule({
           action={{ label: "盘点单导出", onClick: () => downloadExport(actorId, "stocktake") }}
         />
       </div>
+        </>
+      ) : null}
+      {area === "purchase" || area === "suppliers" ? (
+        <>
       <div className="grid gap-5 xl:grid-cols-2">
         <DataTable
           title="供应商"
@@ -7226,6 +7624,10 @@ function InventoryModule({
           action={{ label: "采购对账", onClick: () => downloadExport(actorId, "purchase-statement") }}
         />
       </div>
+        </>
+      ) : null}
+      {area === "purchase" ? (
+        <>
       <div className="grid gap-5 xl:grid-cols-[420px_1fr]">
         <Panel title="采购合同附件归档" icon={Upload} action="本地数据盘">
           {snapshot.board.purchaseContracts.length > 0 ? (
@@ -7494,6 +7896,10 @@ function InventoryModule({
           action={{ label: "留痕导出", onClick: () => downloadExport(actorId, "purchase-arrival-change-log") }}
         />
       </div>
+        </>
+      ) : null}
+      {area === "suppliers" ? (
+        <>
       <DataTable
         title="供应商绩效评分"
         icon={Gauge}
@@ -8301,6 +8707,10 @@ function InventoryModule({
         ]}
         empty="暂无供应商观察期。恢复采购后系统会自动生成 30 天或首批合格的观察期。"
       />
+        </>
+      ) : null}
+      {area === "warehouse" ? (
+        <>
       <DataTable
         title="到货差异处理闭环"
         icon={AlertTriangle}
@@ -8554,6 +8964,8 @@ function InventoryModule({
           { key: "aging_status_label", label: "状态", render: (value, row) => <StatusBadge value={String(row.aging_status ?? value)} /> },
         ]}
       />
+        </>
+      ) : null}
       <FormalPrintPreviewModal preview={formalPreview} onClose={() => setFormalPreview(null)} />
     </div>
   );
