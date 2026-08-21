@@ -99,8 +99,7 @@ const PERMISSION_LABELS: Record<ParallelPermission, string> = {
 };
 
 export function requireParallelPermission(database: Database.Database, actorId: string, ledgerId: string, permission: ParallelPermission) {
-  const user = getUser(database, actorId);
-  if (user.role === "admin") return;
+  getUser(database, actorId);
   const owner = database.prepare("SELECT owner_user_id FROM parallel_ledgers WHERE id = ?").get(ledgerId) as { owner_user_id: string } | undefined;
   if (!owner) throw new Error("平行账套不存在。");
   if (owner.owner_user_id === actorId) return;
@@ -411,15 +410,19 @@ export function removeParallelAdjustment(database: Database.Database, actorId: s
 }
 
 export function listParallelLedgersForUser(database: Database.Database, actorId: string): ParallelLedgerRow[] {
-  const role = (database.prepare("SELECT role FROM users WHERE id = ?").get(actorId) as { role: string } | undefined)?.role;
-  if (role !== "admin") {
-    return database
-      .prepare(
-        "SELECT l.* FROM parallel_ledgers l LEFT JOIN parallel_ledger_members m ON m.ledger_id = l.id AND m.user_id = ? WHERE l.owner_user_id = ? OR m.user_id = ? ORDER BY l.created_at DESC",
-      )
-      .all(actorId, actorId, actorId) as ParallelLedgerRow[];
-  }
-  return database.prepare("SELECT * FROM parallel_ledgers ORDER BY created_at DESC").all() as ParallelLedgerRow[];
+  getUser(database, actorId);
+  return database
+    .prepare(
+      `SELECT DISTINCT l.*
+       FROM parallel_ledgers l
+       LEFT JOIN parallel_ledger_members m
+         ON m.ledger_id = l.id
+        AND m.user_id = ?
+        AND m.can_view = 1
+       WHERE l.owner_user_id = ? OR m.user_id = ?
+       ORDER BY l.created_at DESC`,
+    )
+    .all(actorId, actorId, actorId) as ParallelLedgerRow[];
 }
 
 export function listParallelAdjustments(database: Database.Database, ledgerId: string): ParallelAdjustmentRow[] {

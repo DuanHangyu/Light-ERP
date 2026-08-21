@@ -30,6 +30,8 @@ import { createParallelLedger, freezeParallelLedger, unfreezeParallelLedger, arc
 import { runParallelCalculation } from "./parallel-calculation-engine";
 import { confirmParallelSuggestion, previewParallelMerge } from "./parallel-impact-service";
 import { submitParallelMerge, approveParallelMerge, rejectParallelMerge, publishParallelMerge } from "./parallel-merge-service";
+import { authorizeErpSnapshot } from "./erp-access-control";
+import { requireReportExportPermission } from "./erp-report-access";
 
 export type Role =
   | "sales"
@@ -4081,7 +4083,7 @@ export function getSnapshot(actorId = "U-SALES") {
   });
   const systemHealthSummary = buildSystemHealthSummary(systemHealthChecks);
 
-  return {
+  const snapshot = {
     dataRoot: getDataPaths().root,
     users: users.map(publicUser),
     currentUser,
@@ -4302,6 +4304,7 @@ export function getSnapshot(actorId = "U-SALES") {
     parallel: buildParallelSnapshotData(database, safeActor),
     safeActor,
   };
+  return authorizeErpSnapshot(snapshot);
 }
 
 function buildQualityExceptionAnalytics(
@@ -15322,12 +15325,7 @@ export async function buildExport(input: {
   const database = getDb();
   const user = getUser(database, input.actorId);
   const filters = normalizeReportFilters(input.filters);
-  if (!["finance", "manager", "admin", "sales", "assistant", "purchasing", "production", "warehouse", "quality", "technical"].includes(user.role)) {
-    throw new Error("当前角色无导出权限。");
-  }
-  if (["finance", "ledger"].includes(input.type) && !["finance", "manager", "admin"].includes(user.role)) {
-    throw new Error("只有财务、管理层或管理员可导出财务数据。");
-  }
+  requireReportExportPermission(user.role, input.type);
 
   const sheets: Array<{ name: string; rows: Array<Record<string, unknown>> }> = [];
   if (input.type === "finance") {

@@ -1671,15 +1671,14 @@ describe("ERP service document attachment archive", () => {
       latest_attachment_no: attachment.attachment_no,
       latest_attachment_name: "CHEM-RENEWED-2028-001-盖章件.pdf",
     });
-    expect(snapshot.board.auditLogs).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          action: "renewSupplierCertificate",
-          entity_type: "supplier_qualification_certificate",
-          entity_id: newCertificate.id,
-        }),
-      ]),
-    );
+    const auditRow = (await import("./db")).getDb().prepare(
+      "SELECT action, entity_type, entity_id FROM audit_logs WHERE action = ? AND entity_id = ?",
+    ).get("renewSupplierCertificate", newCertificate.id);
+    expect(auditRow).toMatchObject({
+      action: "renewSupplierCertificate",
+      entity_type: "supplier_qualification_certificate",
+      entity_id: newCertificate.id,
+    });
   });
 
   it("builds a required qualification matrix and blocks purchase orders with missing mandatory certificates", async () => {
@@ -2413,10 +2412,12 @@ describe("ERP service formal authentication and RBAC administration", () => {
     expect(() => service.authenticateUser({ account: "sales", password: "bad-password" })).toThrow("账号或密码不正确");
 
     const snapshot = service.getSnapshot(login.user.id);
+    expect(snapshot.users.map((user) => user.id)).toEqual(["U-SALES"]);
     expect(snapshot.users[0]).not.toHaveProperty("password");
     expect(snapshot.users[0]).not.toHaveProperty("password_hash");
     expect(snapshot.security.currentPermissions).toContain("createQuote");
-    expect(snapshot.security.rolePermissions.some((item) => item.role === "admin" && item.action === "resetUserPassword")).toBe(true);
+    expect(snapshot.security.rolePermissions).toEqual([]);
+    expect(snapshot.security.permissionMatrix).toEqual([]);
 
     service.performAction({
       actorId: "U-ADMIN",
@@ -3353,17 +3354,8 @@ describe("ERP service formal controls for document numbering and inventory aging
       disposition_status: "tracking",
       disposition_status_label: "跟进中",
     });
-    expect(after.security.rolePermissions).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          role: "warehouse",
-          action: "recordInventoryAgingDisposition",
-          action_label: "登记积压处置",
-          module_label: "采购仓储",
-          risk_level: "中",
-        }),
-      ]),
-    );
+    expect(after.security.currentPermissions).toContain("recordInventoryAgingDisposition");
+    expect(after.security.rolePermissions).toEqual([]);
   });
 });
 
@@ -3653,15 +3645,10 @@ describe("ERP service formal stocktake and inventory adjustment", () => {
       status: "pending_approval",
       status_label: "待审批",
     });
-    expect(created.board.documentSequences).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          doc_type: "stocktakes",
-          prefix: "PD",
-          current_no: 1,
-        }),
-      ]),
-    );
+    const stocktakeSequence = (await import("./db")).getDb().prepare(
+      "SELECT doc_type, prefix, current_no FROM document_sequences WHERE doc_type = 'stocktakes' ORDER BY updated_at DESC LIMIT 1",
+    ).get();
+    expect(stocktakeSequence).toMatchObject({ doc_type: "stocktakes", prefix: "PD", current_no: 1 });
 
     expect(() =>
       service.performAction({
@@ -4269,19 +4256,25 @@ describe("ERP service formal purchase entry", () => {
       stock_qty: expectedQty,
       average_cost: expectedAverageCost,
     });
-    expect(accepted.board.purchaseReceipts).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          purchase_no: purchaseOrder.purchase_no,
-          iqc_no: iqc.iqc_no,
-          iqc_result: "discount_accept",
-          qty: 10,
-          unit_cost: 54,
-          line_amount: 540,
-        }),
-      ]),
-    );
-    expect(accepted.board.payables.find((item) => item.purchase_order_id === purchaseOrder.id)).toMatchObject({
+    const qualityClosureDatabase = (await import("./db")).getDb();
+    const receiptRow = qualityClosureDatabase.prepare(`
+      SELECT po.purchase_no, iqc.iqc_no, iqc.result AS iqc_result,
+             im.qty, im.unit_cost, ROUND(im.qty * im.unit_cost, 2) AS line_amount
+      FROM inventory_movements im
+      JOIN material_iqc_inspections iqc ON iqc.id = im.source_id
+      JOIN purchase_orders po ON po.id = iqc.purchase_order_id
+      WHERE im.source_type = 'material_iqc_inspection' AND im.source_id = ?
+    `).get(iqc.id);
+    expect(receiptRow).toMatchObject({
+      purchase_no: purchaseOrder.purchase_no,
+      iqc_no: iqc.iqc_no,
+      iqc_result: "discount_accept",
+      qty: 10,
+      unit_cost: 54,
+      line_amount: 540,
+    });
+    const payableRow = qualityClosureDatabase.prepare("SELECT * FROM payables WHERE purchase_order_id = ?").get(purchaseOrder.id);
+    expect(payableRow).toMatchObject({
       purchase_order_id: purchaseOrder.id,
       total_amount: 540,
       balance_amount: 540,
@@ -5782,16 +5775,15 @@ describe("ERP service formal after-sales return refund and replacement loop", ()
     expect(replaced.board.receivables.some((item) => item.shipment_id === replacement.id)).toBe(false);
     expect(replacedReturn.replacement_status).toBe("replaced");
     expect(finalBatch.qty).toBe(Number(finishedBatch.qty));
-    expect(replaced.board.inventoryTrace).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          movement_type: "replacement_shipment_outbound",
-          source_type: "shipment",
-          source_id: replacement.id,
-          qty: -returnQty,
-        }),
-      ]),
-    );
+    const replacementMovement = (await import("./db")).getDb().prepare(
+      "SELECT movement_type, source_type, source_id, qty FROM inventory_movements WHERE movement_type = 'replacement_shipment_outbound' AND source_id = ?",
+    ).get(replacement.id);
+    expect(replacementMovement).toMatchObject({
+      movement_type: "replacement_shipment_outbound",
+      source_type: "shipment",
+      source_id: replacement.id,
+      qty: -returnQty,
+    });
 
     const salesReturnExport = await service.buildExport({
       actorId: "U-ASSIST",

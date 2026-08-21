@@ -48,6 +48,10 @@ export type NavigationGroup = {
   items: NavigationItem[];
 };
 
+export type NavigationAccess = {
+  hasParallelAccess?: boolean;
+};
+
 const navigationGroups: Array<{ key: NavigationGroupKey; label: string }> = [
   { key: "work", label: "工作" },
   { key: "operations", label: "业务运营" },
@@ -215,7 +219,6 @@ const roleModules: Record<ErpRole, ModuleKey[]> = {
     "approval",
     "archive",
     "system",
-    "parallel",
   ],
 };
 
@@ -223,14 +226,17 @@ function knownRole(role: string): ErpRole | undefined {
   return erpRoles.find((candidate) => candidate === role);
 }
 
-export function flatNavigationForRole(role: string): NavigationItem[] {
+export function flatNavigationForRole(role: string, access: NavigationAccess = {}): NavigationItem[] {
   const normalizedRole = knownRole(role);
-  const keys = normalizedRole ? roleModules[normalizedRole] : ["workbench" as const];
+  const baseKeys = normalizedRole ? roleModules[normalizedRole] : ["workbench" as const];
+  const keys = access.hasParallelAccess && !baseKeys.includes("parallel")
+    ? [...baseKeys, "parallel" as const]
+    : baseKeys;
   return keys.map((key) => moduleCatalog[key]);
 }
 
-export function navigationForRole(role: string): NavigationGroup[] {
-  const items = flatNavigationForRole(role);
+export function navigationForRole(role: string, access: NavigationAccess = {}): NavigationGroup[] {
+  const items = flatNavigationForRole(role, access);
   return navigationGroups
     .map((group) => ({
       ...group,
@@ -239,10 +245,10 @@ export function navigationForRole(role: string): NavigationGroup[] {
     .filter((group) => group.items.length > 0);
 }
 
-export function isModuleAccessible(role: string, module: ModuleKey): boolean {
-  return flatNavigationForRole(role).some((item) => item.key === module);
+export function isModuleAccessible(role: string, module: ModuleKey, access: NavigationAccess = {}): boolean {
+  return flatNavigationForRole(role, access).some((item) => item.key === module);
 }
 
-export function resolveAccessibleModule(role: string, requested: ModuleKey): ModuleKey {
-  return isModuleAccessible(role, requested) ? requested : "workbench";
+export function resolveAccessibleModule(role: string, requested: ModuleKey, access: NavigationAccess = {}): ModuleKey {
+  return isModuleAccessible(role, requested, access) ? requested : "workbench";
 }
