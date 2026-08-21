@@ -11,6 +11,7 @@ export type ParallelLedgerStatus =
   | "merge_rejected"
   | "conflicted"
   | "publishing"
+  | "merge_failed"
   | "merged"
   | "archived"
   | "discarded";
@@ -74,7 +75,8 @@ export const LEDGER_STATUS_LABELS: Record<ParallelLedgerStatus, string> = {
   merge_pending: "合并审批中",
   merge_rejected: "合并已驳回",
   conflicted: "存在冲突",
-  publishing: "发布中",
+  publishing: "正式纠错执行中",
+  merge_failed: "正式执行或对账失败",
   merged: "已合并",
   archived: "已归档",
   discarded: "已放弃",

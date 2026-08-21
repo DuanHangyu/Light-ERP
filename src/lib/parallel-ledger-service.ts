@@ -464,12 +464,15 @@ export type ParallelSnapshotData = {
   mergeRequests: Array<Record<string, unknown>>;
   mergeItems: Array<Record<string, unknown>>;
   publishedCorrections: Array<Record<string, unknown>>;
+  executionRuns: Array<Record<string, unknown>>;
+  executionSteps: Array<Record<string, unknown>>;
+  reconciliationResults: Array<Record<string, unknown>>;
 };
 
 export function buildParallelSnapshotData(database: Database.Database, actorId: string): ParallelSnapshotData {
   const ledgers = listParallelLedgersForUser(database, actorId);
   if (ledgers.length === 0) {
-    return { ledgers: [], members: [], adjustments: [], adjustmentLines: [], runs: [], costProjections: [], inventoryProjections: [], materialAllocations: [], impacts: [], gaps: [], suggestions: [], mergeConflicts: [], mergeRequests: [], mergeItems: [], publishedCorrections: [] };
+    return { ledgers: [], members: [], adjustments: [], adjustmentLines: [], runs: [], costProjections: [], inventoryProjections: [], materialAllocations: [], impacts: [], gaps: [], suggestions: [], mergeConflicts: [], mergeRequests: [], mergeItems: [], publishedCorrections: [], executionRuns: [], executionSteps: [], reconciliationResults: [] };
   }
   const ledgerIds = ledgers.map((l) => l.id);
   const placeholders = ledgerIds.map(() => "?").join(",");
@@ -508,5 +511,9 @@ export function buildParallelSnapshotData(database: Database.Database, actorId: 
   const mergeRequestIds = mergeRequests.map((r) => String(r.id));
   const mergeItems: Array<Record<string, unknown>> = mergeRequestIds.length === 0 ? [] : (database.prepare(`SELECT * FROM parallel_merge_items WHERE merge_request_id IN (${mergeRequestIds.map(() => "?").join(",")}) ORDER BY sequence_no`).all(...mergeRequestIds) as Array<Record<string, unknown>>);
   const publishedCorrections = database.prepare(`SELECT * FROM formal_correction_orders WHERE source_ledger_id IN (${placeholders}) ORDER BY created_at DESC`).all(...ledgerIds) as Array<Record<string, unknown>>;
-  return { ledgers, members, adjustments, adjustmentLines, runs, costProjections, inventoryProjections, materialAllocations, impacts, gaps, suggestions, mergeConflicts, mergeRequests, mergeItems, publishedCorrections };
+  const executionRuns: Array<Record<string, unknown>> = mergeRequestIds.length === 0 ? [] : (database.prepare(`SELECT * FROM correction_execution_runs WHERE merge_request_id IN (${mergeRequestIds.map(() => "?").join(",")}) ORDER BY started_at DESC`).all(...mergeRequestIds) as Array<Record<string, unknown>>);
+  const executionRunIds = executionRuns.map((row) => String(row.id));
+  const executionSteps: Array<Record<string, unknown>> = executionRunIds.length === 0 ? [] : (database.prepare(`SELECT * FROM correction_execution_steps WHERE execution_run_id IN (${executionRunIds.map(() => "?").join(",")}) ORDER BY dependency_order, id`).all(...executionRunIds) as Array<Record<string, unknown>>);
+  const reconciliationResults: Array<Record<string, unknown>> = mergeRequestIds.length === 0 ? [] : (database.prepare(`SELECT * FROM reconciliation_results WHERE merge_request_id IN (${mergeRequestIds.map(() => "?").join(",")}) ORDER BY checked_at, rule_code`).all(...mergeRequestIds) as Array<Record<string, unknown>>);
+  return { ledgers, members, adjustments, adjustmentLines, runs, costProjections, inventoryProjections, materialAllocations, impacts, gaps, suggestions, mergeConflicts, mergeRequests, mergeItems, publishedCorrections, executionRuns, executionSteps, reconciliationResults };
 }

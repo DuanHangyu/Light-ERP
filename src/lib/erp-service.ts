@@ -29,7 +29,7 @@ import { hashPassword, hashSessionToken, randomSessionToken, verifyPassword } fr
 import { createParallelLedger, freezeParallelLedger, unfreezeParallelLedger, archiveParallelLedger, discardParallelLedger, rebaseParallelLedger, upsertParallelLedgerMember, addParallelAdjustment, removeParallelAdjustment, buildParallelSnapshotData, seedParallelDemoData, requireParallelPermission } from "./parallel-ledger-service";
 import { runParallelCalculation } from "./parallel-calculation-engine";
 import { confirmParallelSuggestion, previewParallelMerge } from "./parallel-impact-service";
-import { submitParallelMerge, approveParallelMerge, rejectParallelMerge, publishParallelMerge } from "./parallel-merge-service";
+import { submitParallelMerge, approveParallelMerge, rejectParallelMerge, publishParallelMerge, resumeParallelMergeExecution } from "./parallel-merge-service";
 import { authorizeErpSnapshot } from "./erp-access-control";
 import { requireReportExportPermission } from "./erp-report-access";
 
@@ -263,6 +263,7 @@ const roleActionMap: Record<string, Role[]> = {
   parallelLedgerApproveMerge: ["manager", "admin"],
   parallelLedgerRejectMerge: ["manager", "admin"],
   parallelLedgerPublishMerge: ["manager", "admin", "finance"],
+  parallelLedgerResumeMergeExecution: ["manager", "admin", "finance"],
 };
 
 const actionLabels: Record<string, string> = {
@@ -373,6 +374,7 @@ const actionLabels: Record<string, string> = {
   parallelLedgerApproveMerge: "审批平行账套发布",
   parallelLedgerRejectMerge: "驳回平行账套发布",
   parallelLedgerPublishMerge: "发布平行账套纠错单",
+  parallelLedgerResumeMergeExecution: "继续执行平行账套正式纠错包",
 };
 
 export function now() {
@@ -6915,6 +6917,9 @@ export function performAction(input: ActionInput) {
         break;
       case "parallelLedgerPublishMerge":
         publishParallelMerge(database, input.actorId, mustEntity(input.entityId));
+        break;
+      case "parallelLedgerResumeMergeExecution":
+        resumeParallelMergeExecution(database, input.actorId, mustEntity(input.entityId));
         break;
     }
   })();

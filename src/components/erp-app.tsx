@@ -350,6 +350,9 @@ type Snapshot = {
     mergeRequests: Row[];
     mergeItems: Row[];
     publishedCorrections: Row[];
+    executionRuns: Row[];
+    executionSteps: Row[];
+    reconciliationResults: Row[];
   };
 };
 
@@ -14479,8 +14482,9 @@ const PARALLEL_STATUS_LABELS: Record<string, string> = {
   merge_pending: "合并审批中",
   merge_rejected: "合并已驳回",
   conflicted: "存在冲突",
-  publishing: "发布中",
-  merged: "已发布纠错单",
+  publishing: "正式纠错执行中",
+  merge_failed: "执行或对账失败",
+  merged: "已执行并对账完成",
   archived: "已归档",
   discarded: "已放弃",
 };
@@ -14553,6 +14557,9 @@ function ParallelLedgerModule({
   const conflicts = parallel.mergeConflicts.filter((c) => !c.ledger_id || String(c.ledger_id) === selectedId);
   const ledgerMergeRequest = parallel.mergeRequests.find((m) => String(m.ledger_id) === selectedId) as Row | undefined;
   const mergeItems = ledgerMergeRequest ? parallel.mergeItems.filter((i) => String(i.merge_request_id) === String(ledgerMergeRequest.id)) : [];
+  const executionRun = ledgerMergeRequest ? parallel.executionRuns.find((run) => String(run.merge_request_id) === String(ledgerMergeRequest.id)) as Row | undefined : undefined;
+  const executionSteps = executionRun ? parallel.executionSteps.filter((step) => String(step.execution_run_id) === String(executionRun.id)) : [];
+  const reconciliationResults = ledgerMergeRequest ? parallel.reconciliationResults.filter((result) => String(result.merge_request_id) === String(ledgerMergeRequest.id)) : [];
   const ledgerMembers = parallel.members.filter((member) => String(member.ledger_id) === selectedId);
   const canApproveMerge = ["manager", "admin"].includes(snapshot.currentUser.role);
   const scopeOptions: Row[] = createForm.scope_type === "production_order"
@@ -14684,6 +14691,9 @@ function ParallelLedgerModule({
         {ledgerMergeRequest && String(ledgerMergeRequest.status) === "approved" ? (
           <button type="button" disabled={busy?.startsWith("parallelLedger")} onClick={() => void runAction({ action: "parallelLedgerPublishMerge", entityId: String(ledgerMergeRequest.id) })} className="rounded-md bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-700 disabled:opacity-50">发布到正式账套</button>
         ) : null}
+        {ledgerMergeRequest && ["execution_pending", "execution_failed"].includes(String(ledgerMergeRequest.status)) ? (
+          <button type="button" disabled={busy?.startsWith("parallelLedger")} onClick={() => void runAction({ action: "parallelLedgerResumeMergeExecution", entityId: String(ledgerMergeRequest.id) })} className="rounded-md bg-amber-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-amber-700 disabled:opacity-50">复检并继续正式执行</button>
+        ) : null}
         <button type="button" disabled={busy?.startsWith("parallelLedger")} onClick={() => void runAction({ action: "parallelLedgerArchive", entityId: selectedId })} className="rounded-md border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 disabled:opacity-50">归档</button>
         <button type="button" disabled={busy?.startsWith("parallelLedger")} onClick={() => void runAction({ action: "parallelLedgerDiscard", entityId: selectedId })} className="rounded-md border border-rose-200 bg-rose-50 px-3 py-1.5 text-xs font-semibold text-rose-700 disabled:opacity-50">放弃方案</button>
       </div>
@@ -14803,6 +14813,8 @@ function ParallelLedgerModule({
             ) : <EmptyText text="尚未提交合并。请先冻结版本并接受建议后，点击「提交合并」。" />}
           </div>
           <DataTable title="纠错单据包" icon={FileCheck2} rows={mergeItems} columns={[{ key: "sequence_no", label: "序号" }, { key: "document_type", label: "单据类型" }, { key: "action_type", label: "动作" }, { key: "publish_status", label: "发布状态" }, { key: "published_document_id", label: "正式单据号", render: (v) => (v ? String(v) : "—") }]} empty="无纠错单据" />
+          <DataTable title="正式执行步骤" icon={Calculator} rows={executionSteps} columns={[{ key: "dependency_order", label: "顺序" }, { key: "document_type", label: "领域单据" }, { key: "status", label: "执行状态" }, { key: "error_message", label: "异常", render: (v) => (v ? String(v) : "—") }]} empty="尚未生成执行批次" />
+          <DataTable title="发布后对账" icon={ShieldCheck} rows={reconciliationResults} columns={[{ key: "domain", label: "业务域" }, { key: "rule_code", label: "规则" }, { key: "status", label: "结果" }, { key: "message", label: "说明" }]} empty="尚未执行对账" />
           <DataTable title="已发布正式纠错单" icon={FileCheck2} rows={parallel.publishedCorrections.filter((row) => String(row.source_ledger_id) === selectedId)} columns={[{ key: "correction_no", label: "纠错单号" }, { key: "correction_type", label: "类型" }, { key: "target_entity_id", label: "业务对象" }, { key: "status", label: "执行状态" }, { key: "created_at", label: "发布时间" }]} empty="暂无正式纠错单" />
           {conflicts.length > 0 ? <DataTable title="合并冲突" icon={AlertTriangle} rows={conflicts} columns={[{ key: "entity_type", label: "对象类型" }, { key: "entity_id", label: "对象" }, { key: "conflict_type", label: "冲突类型" }]} /> : null}
         </div>

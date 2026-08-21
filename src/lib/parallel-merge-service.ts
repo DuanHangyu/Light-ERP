@@ -1,5 +1,6 @@
 import type Database from "better-sqlite3";
 import { audit, decideApproval, getUser, matchApprovalRule, now, serial, uid } from "./erp-service";
+import { roundMoney, roundQty } from "./domain";
 import { previewParallelMerge } from "./parallel-impact-service";
 import { requireParallelPermission } from "./parallel-ledger-service";
 
@@ -72,7 +73,14 @@ export function submitParallelMerge(database: Database.Database, actorId: string
       AND g.resolution_status NOT IN ('suggested', 'resolved')
   `).get(ledgerId) as { count: number }).count;
   if (unresolvedGapCount > 0) throw new Error(`仍有 ${unresolvedGapCount} 个阻断缺口未确认处理，不能提交合并。`);
-  const adjustmentItems = activeAdjustmentItems(database, ledgerId);
+  const coveredAdjustmentIds = new Set(
+    suggestions
+      .map((suggestion) => JSON.parse(suggestion.payload_json) as Record<string, unknown>)
+      .map((payload) => String(payload.source_adjustment_id ?? ""))
+      .filter(Boolean),
+  );
+  const adjustmentItems = activeAdjustmentItems(database, ledgerId)
+    .filter((adjustment) => !coveredAdjustmentIds.has(adjustment.id));
   if (suggestions.length === 0 && adjustmentItems.length === 0) throw new Error("当前账套没有可发布的调整或纠错建议。");
 
   const mergeRequestId = uid("PMR");
@@ -230,6 +238,7 @@ type MergeItem = {
   source_entity_id: string;
   action_type: string;
   document_payload_json: string;
+  published_document_id: string | null;
 };
 
 function publishPurchaseRequisition(database: Database.Database, actorId: string, ledgerId: string, payload: Record<string, unknown>): string {
@@ -347,6 +356,467 @@ function writeProcurementReadiness(
   return { ready: shortages.length === 0, message };
 }
 
+type FormalCorrectionRow = {
+  id: string;
+  correction_no: string;
+  correction_type: string;
+  status: string;
+  payload_json: string;
+  resulting_document_type: string | null;
+  resulting_document_id: string | null;
+};
+
+function correctionForItem(database: Database.Database, itemId: string): FormalCorrectionRow {
+  const correction = database.prepare(`
+    SELECT * FROM formal_correction_orders WHERE source_merge_item_id = ?
+  `).get(itemId) as FormalCorrectionRow | undefined;
+  if (!correction) throw new Error(`合并项 ${itemId} 缺少正式纠错单。`);
+  return correction;
+}
+
+function finishCorrection(
+  database: Database.Database,
+  actorId: string,
+  correctionId: string,
+  resultType: string,
+  resultId: string,
+  note: string,
+) {
+  database.prepare(`
+    UPDATE formal_correction_orders
+    SET status = 'executed', executed_by = ?, executed_at = ?,
+        resulting_document_type = ?, resulting_document_id = ?, execution_note = ?
+    WHERE id = ?
+  `).run(actorId, now(), resultType, resultId, note, correctionId);
+}
+
+function payloadEvidence(payload: Record<string, unknown>) {
+  return payload.evidence && typeof payload.evidence === "object"
+    ? payload.evidence as Record<string, unknown>
+    : {};
+}
+
+function executeBomChange(
+  database: Database.Database,
+  actorId: string,
+  mergeRequestId: string,
+  correction: FormalCorrectionRow,
+  payload: Record<string, unknown>,
+) {
+  const productId = String(payload.product_id ?? "");
+  const productionOrderId = String(payload.production_order_id ?? "");
+  const sourceMaterialId = String(payload.source_material_id ?? "");
+  const targetMaterialId = String(payload.target_material_id ?? "");
+  const evidence = payloadEvidence(payload);
+  if (!productId || !productionOrderId || !sourceMaterialId || !targetMaterialId) {
+    throw new Error("BOM 变更单缺少产品、工单或替换物料信息。");
+  }
+  const order = database.prepare(`
+    SELECT o.qty
+    FROM production_orders po
+    JOIN orders o ON o.id = po.order_id
+    WHERE po.id = ? AND o.product_id = ?
+  `).get(productionOrderId, productId) as { qty: number } | undefined;
+  if (!order || Number(order.qty) <= 0) throw new Error("BOM 变更单关联的工单或订单数量无效。");
+  const activeBom = database.prepare(`
+    SELECT * FROM boms
+    WHERE product_id = ? AND status = 'active'
+    ORDER BY created_at DESC LIMIT 1
+  `).get(productId) as { id: string; version: string } | undefined;
+  if (!activeBom) throw new Error(`产品 ${productId} 没有可变更的生效 BOM。`);
+  const oldLines = database.prepare(`
+    SELECT parent_product_id, component_type, component_id, qty_per, is_primary
+    FROM bom_lines WHERE bom_id = ? ORDER BY id
+  `).all(activeBom.id) as Array<{
+    parent_product_id: string;
+    component_type: string;
+    component_id: string;
+    qty_per: number;
+    is_primary: number;
+  }>;
+  const sourceRequiredAfter = Number(evidence.source_required_after ?? 0);
+  const targetRequiredAfter = Number(evidence.target_required_after ?? 0);
+  const sourceQtyPer = roundQty(sourceRequiredAfter / Number(order.qty));
+  const targetQtyPer = roundQty(targetRequiredAfter / Number(order.qty));
+  const nextBomId = uid("BOM");
+  const nextVersion = `${activeBom.version}-PX-${correction.correction_no}`;
+  const timestamp = now();
+
+  database.prepare("UPDATE boms SET status = 'superseded', updated_at = ?, row_version = row_version + 1 WHERE id = ?")
+    .run(timestamp, activeBom.id);
+  database.prepare(`
+    INSERT INTO boms (id, product_id, version, status, remark, created_at, updated_at, row_version)
+    VALUES (?, ?, ?, 'active', ?, ?, ?, 0)
+  `).run(nextBomId, productId, nextVersion, `平行账套合并 ${mergeRequestId} 生成`, timestamp, timestamp);
+  const insertLine = database.prepare(`
+    INSERT INTO bom_lines (
+      bom_id, parent_product_id, component_type, component_id, qty_per, is_primary, row_version
+    ) VALUES (?, ?, ?, ?, ?, ?, 0)
+  `);
+  let targetFound = false;
+  for (const line of oldLines) {
+    let qtyPer = Number(line.qty_per);
+    if (line.component_type === "material" && line.component_id === sourceMaterialId) qtyPer = sourceQtyPer;
+    if (line.component_type === "material" && line.component_id === targetMaterialId) {
+      qtyPer = targetQtyPer;
+      targetFound = true;
+    }
+    if (qtyPer <= 0) continue;
+    insertLine.run(nextBomId, line.parent_product_id, line.component_type, line.component_id, qtyPer, line.is_primary);
+  }
+  if (!targetFound && targetQtyPer > 0) {
+    insertLine.run(nextBomId, productId, "material", targetMaterialId, targetQtyPer, 0);
+  }
+  database.prepare(`
+    UPDATE requisitions
+    SET bom_id = ?, bom_version = ?, row_version = row_version + 1
+    WHERE production_order_id = ?
+  `).run(nextBomId, nextVersion, productionOrderId);
+  finishCorrection(database, actorId, correction.id, "bom", nextBomId, `已生成并启用 BOM ${nextVersion}`);
+  return { document_type: "bom", document_id: nextBomId, version: nextVersion };
+}
+
+function requisitionIdFromPayload(payload: Record<string, unknown>) {
+  const requisitionIds = Array.isArray(payload.requisition_ids) ? payload.requisition_ids.map(String) : [];
+  const requisitionId = requisitionIds[0] ?? "";
+  if (!requisitionId) throw new Error("补退料单缺少关联领料单。需人工补充业务依据后再执行。");
+  return requisitionId;
+}
+
+function executeMaterialReturn(
+  database: Database.Database,
+  actorId: string,
+  mergeRequestId: string,
+  correction: FormalCorrectionRow,
+  payload: Record<string, unknown>,
+) {
+  const materialId = String(payload.material_id ?? payload.source_material_id ?? "");
+  const qty = roundQty(Number(payload.suggested_qty ?? 0));
+  const evidence = payloadEvidence(payload);
+  const theoreticalQty = roundQty(Number(evidence.theoretical_required_qty ?? 0));
+  const requisitionId = requisitionIdFromPayload(payload);
+  if (!materialId || qty <= 0) throw new Error("退料单的物料或数量无效。");
+  const material = database.prepare("SELECT stock_qty, average_cost FROM materials WHERE id = ?").get(materialId) as
+    | { stock_qty: number; average_cost: number }
+    | undefined;
+  if (!material) throw new Error(`退料物料 ${materialId} 不存在。`);
+  const line = database.prepare(`
+    SELECT id, issued_qty FROM requisition_lines
+    WHERE requisition_id = ? AND material_id = ?
+  `).get(requisitionId, materialId) as { id: string; issued_qty: number } | undefined;
+  if (!line || Number(line.issued_qty) < qty) throw new Error(`领料单中 ${materialId} 的已领数量不足以退回 ${qty}。`);
+  const batch = database.prepare(`
+    SELECT id, batch_no, qty FROM material_batches
+    WHERE material_id = ? ORDER BY received_at, id LIMIT 1
+  `).get(materialId) as { id: string; batch_no: string; qty: number } | undefined;
+  const timestamp = now();
+  const batchId = batch?.id ?? uid("MB");
+  const batchNo = batch?.batch_no ?? `PX-RET-${mergeRequestId.slice(-8)}`;
+  if (batch) {
+    database.prepare("UPDATE material_batches SET qty = qty + ?, status = 'available', row_version = row_version + 1 WHERE id = ?")
+      .run(qty, batch.id);
+  } else {
+    database.prepare(`
+      INSERT INTO material_batches (
+        id, material_id, batch_no, qty, unit_cost, received_at, status, row_version
+      ) VALUES (?, ?, ?, ?, ?, ?, 'available', 0)
+    `).run(batchId, materialId, batchNo, qty, Number(material.average_cost), timestamp);
+  }
+  database.prepare("UPDATE materials SET stock_qty = stock_qty + ?, updated_at = ?, row_version = row_version + 1 WHERE id = ?")
+    .run(qty, timestamp, materialId);
+  database.prepare(`
+    UPDATE requisition_lines
+    SET required_qty = ?, issued_qty = ?, status = 'issued', row_version = row_version + 1
+    WHERE id = ?
+  `).run(theoreticalQty, roundQty(Number(line.issued_qty) - qty), line.id);
+  const movementId = uid("IM");
+  database.prepare(`
+    INSERT INTO inventory_movements (
+      id, item_type, item_id, batch_no, qty, unit_cost, movement_type,
+      source_type, source_id, created_at
+    ) VALUES (?, 'material', ?, ?, ?, ?, 'parallel_material_return', 'parallel_merge', ?, ?)
+  `).run(movementId, materialId, batchNo, qty, Number(material.average_cost), mergeRequestId, timestamp);
+  finishCorrection(database, actorId, correction.id, "inventory_movement", movementId, `已执行退料 ${materialId} ${qty}`);
+  return { document_type: "inventory_movement", document_id: movementId, material_id: materialId, qty };
+}
+
+function executeMaterialSupplement(
+  database: Database.Database,
+  actorId: string,
+  mergeRequestId: string,
+  correction: FormalCorrectionRow,
+  payload: Record<string, unknown>,
+) {
+  const materialId = String(payload.material_id ?? payload.target_material_id ?? "");
+  const qty = roundQty(Number(payload.suggested_qty ?? 0));
+  const evidence = payloadEvidence(payload);
+  const theoreticalQty = roundQty(Number(evidence.theoretical_required_qty ?? qty));
+  const requisitionId = requisitionIdFromPayload(payload);
+  if (!materialId || qty <= 0) throw new Error("补料单的物料或数量无效。");
+  const material = database.prepare("SELECT stock_qty, average_cost FROM materials WHERE id = ?").get(materialId) as
+    | { stock_qty: number; average_cost: number }
+    | undefined;
+  if (!material || Number(material.stock_qty) < qty) throw new Error(`物料 ${materialId} 可用库存不足，无法补料 ${qty}。`);
+  const batches = database.prepare(`
+    SELECT id, batch_no, qty, unit_cost
+    FROM material_batches
+    WHERE material_id = ? AND qty > 0
+    ORDER BY received_at, id
+  `).all(materialId) as Array<{ id: string; batch_no: string; qty: number; unit_cost: number }>;
+  if (roundQty(batches.reduce((sum, batch) => sum + Number(batch.qty), 0)) < qty) {
+    throw new Error(`物料 ${materialId} 的可用批次数量不足，无法补料 ${qty}。`);
+  }
+  let remaining = qty;
+  const movementIds: string[] = [];
+  const timestamp = now();
+  for (const batch of batches) {
+    if (remaining <= 0) break;
+    const issued = roundQty(Math.min(remaining, Number(batch.qty)));
+    if (issued <= 0) continue;
+    database.prepare(`
+      UPDATE material_batches
+      SET qty = qty - ?, status = CASE WHEN qty - ? <= 0 THEN 'depleted' ELSE status END,
+          row_version = row_version + 1
+      WHERE id = ?
+    `).run(issued, issued, batch.id);
+    const movementId = uid("IM");
+    database.prepare(`
+      INSERT INTO inventory_movements (
+        id, item_type, item_id, batch_no, qty, unit_cost, movement_type,
+        source_type, source_id, created_at
+      ) VALUES (?, 'material', ?, ?, ?, ?, 'parallel_material_supplement', 'parallel_merge', ?, ?)
+    `).run(movementId, materialId, batch.batch_no, -issued, Number(batch.unit_cost), mergeRequestId, timestamp);
+    movementIds.push(movementId);
+    remaining = roundQty(remaining - issued);
+  }
+  database.prepare("UPDATE materials SET stock_qty = stock_qty - ?, updated_at = ?, row_version = row_version + 1 WHERE id = ?")
+    .run(qty, timestamp, materialId);
+  const line = database.prepare(`
+    SELECT id, issued_qty FROM requisition_lines
+    WHERE requisition_id = ? AND material_id = ?
+  `).get(requisitionId, materialId) as { id: string; issued_qty: number } | undefined;
+  if (line) {
+    database.prepare(`
+      UPDATE requisition_lines
+      SET required_qty = ?, issued_qty = ?, status = 'issued', row_version = row_version + 1
+      WHERE id = ?
+    `).run(theoreticalQty, roundQty(Number(line.issued_qty) + qty), line.id);
+  } else {
+    database.prepare(`
+      INSERT INTO requisition_lines (
+        id, requisition_id, material_id, required_qty, issued_qty, is_primary, status, row_version
+      ) VALUES (?, ?, ?, ?, ?, 0, 'issued', 0)
+    `).run(uid("RL"), requisitionId, materialId, theoreticalQty, qty);
+  }
+  const resultId = movementIds[0] ?? correction.id;
+  finishCorrection(database, actorId, correction.id, "inventory_movement", resultId, `已执行补料 ${materialId} ${qty}`);
+  return { document_type: "inventory_movement", document_id: resultId, movement_ids: movementIds, material_id: materialId, qty };
+}
+
+function executeProductionCostAdjustment(
+  database: Database.Database,
+  actorId: string,
+  mergeRequestId: string,
+  correction: FormalCorrectionRow,
+  payload: Record<string, unknown>,
+) {
+  const productionOrderId = String(payload.production_order_id ?? "");
+  const previousTotalCost = roundMoney(Number(payload.before_total_cost ?? 0));
+  const newTotalCost = roundMoney(Number(payload.after_total_cost ?? 0));
+  const adjustmentAmount = roundMoney(Number(payload.delta_amount ?? newTotalCost - previousTotalCost));
+  const production = database.prepare(`
+    SELECT po.order_id, o.qty
+    FROM production_orders po JOIN orders o ON o.id = po.order_id
+    WHERE po.id = ?
+  `).get(productionOrderId) as { order_id: string; qty: number } | undefined;
+  if (!production || Number(production.qty) <= 0) throw new Error("成本调整单关联的生产工单无效。");
+  const adjustmentId = uid("PCA");
+  const adjustmentNo = serial(database, "production_cost_adjustments", "CBTZ");
+  const timestamp = now();
+  database.prepare(`
+    INSERT INTO production_cost_adjustments (
+      id, adjustment_no, production_order_id, order_id, cost_summary_id,
+      exception_id, adjustment_amount, previous_total_cost, new_total_cost,
+      previous_unit_cost, new_unit_cost, status, approval_request_id,
+      adjustment_note, created_by, created_at, applied_by, applied_at,
+      reversal_id, reversed_by, reversed_at, reversal_reason
+    ) VALUES (?, ?, ?, ?, '', NULL, ?, ?, ?, ?, ?, 'applied', NULL, ?, ?, ?, ?, ?, NULL, NULL, NULL, '')
+  `).run(
+    adjustmentId,
+    adjustmentNo,
+    productionOrderId,
+    production.order_id,
+    adjustmentAmount,
+    previousTotalCost,
+    newTotalCost,
+    roundMoney(previousTotalCost / Number(production.qty)),
+    roundMoney(newTotalCost / Number(production.qty)),
+    `平行账套合并 ${mergeRequestId} 成本纠错`,
+    actorId,
+    timestamp,
+    actorId,
+    timestamp,
+  );
+  database.prepare(`
+    UPDATE production_cost_summaries
+    SET material_cost = material_cost + ?, total_cost = ?, unit_cost = ?
+    WHERE production_order_id = ?
+  `).run(adjustmentAmount, newTotalCost, roundMoney(newTotalCost / Number(production.qty)), productionOrderId);
+  finishCorrection(database, actorId, correction.id, "production_cost_adjustment", adjustmentId, `已执行成本调整 ${adjustmentNo}`);
+  return { document_type: "production_cost_adjustment", document_id: adjustmentId, adjustment_amount: adjustmentAmount };
+}
+
+function executeMergeItem(
+  database: Database.Database,
+  actorId: string,
+  mergeRequestId: string,
+  item: MergeItem,
+) {
+  if (item.document_type === "purchase_requisition") {
+    const purchase = database.prepare("SELECT id, status FROM purchase_requisitions WHERE id = ?").get(item.published_document_id) as
+      | { id: string; status: string }
+      | undefined;
+    if (!purchase) throw new Error("采购申请正式单据不存在。");
+    return { document_type: "purchase_requisition", document_id: purchase.id, status: purchase.status };
+  }
+  const correction = correctionForItem(database, item.id);
+  if (correction.status === "executed" && correction.resulting_document_id) {
+    return { document_type: correction.resulting_document_type, document_id: correction.resulting_document_id };
+  }
+  const payload = JSON.parse(item.document_payload_json) as Record<string, unknown>;
+  if (item.document_type === "bom_change") return executeBomChange(database, actorId, mergeRequestId, correction, payload);
+  if (item.document_type === "material_return") return executeMaterialReturn(database, actorId, mergeRequestId, correction, payload);
+  if (item.document_type === "material_supplement") return executeMaterialSupplement(database, actorId, mergeRequestId, correction, payload);
+  if (item.document_type === "production_cost_adjustment") return executeProductionCostAdjustment(database, actorId, mergeRequestId, correction, payload);
+  throw new Error(`正式纠错单 ${correction.correction_no} 尚无领域执行器：${item.document_type}`);
+}
+
+function upsertReconciliation(
+  database: Database.Database,
+  executionRunId: string,
+  mergeRequestId: string,
+  input: {
+    ruleCode: string;
+    domain: string;
+    passed: boolean;
+    expected: unknown;
+    actual: unknown;
+    delta?: unknown;
+    message: string;
+  },
+) {
+  database.prepare(`
+    INSERT INTO reconciliation_results (
+      id, execution_run_id, merge_request_id, rule_code, domain, status,
+      blocking, expected_json, actual_json, delta_json, message, checked_at
+    ) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)
+    ON CONFLICT(execution_run_id, rule_code) DO UPDATE SET
+      status = excluded.status,
+      expected_json = excluded.expected_json,
+      actual_json = excluded.actual_json,
+      delta_json = excluded.delta_json,
+      message = excluded.message,
+      checked_at = excluded.checked_at
+  `).run(
+    uid("RCR"),
+    executionRunId,
+    mergeRequestId,
+    input.ruleCode,
+    input.domain,
+    input.passed ? "passed" : "failed",
+    JSON.stringify(input.expected),
+    JSON.stringify(input.actual),
+    JSON.stringify(input.delta ?? {}),
+    input.message,
+    now(),
+  );
+  return input.passed;
+}
+
+function reconcileExecutedPackage(
+  database: Database.Database,
+  executionRunId: string,
+  mergeRequestId: string,
+  items: MergeItem[],
+) {
+  const results: boolean[] = [];
+  const succeededSteps = (database.prepare(`
+    SELECT COUNT(*) AS count FROM correction_execution_steps
+    WHERE execution_run_id = ? AND status = 'succeeded'
+  `).get(executionRunId) as { count: number }).count;
+  results.push(upsertReconciliation(database, executionRunId, mergeRequestId, {
+    ruleCode: "formal_documents_executed",
+    domain: "execution",
+    passed: succeededSteps === items.length,
+    expected: { succeeded_steps: items.length },
+    actual: { succeeded_steps: succeededSteps },
+    message: succeededSteps === items.length ? "全部正式纠错单据已执行。" : "仍有正式纠错单据未执行。",
+  }));
+
+  const materialItemCount = items.filter((item) => ["material_return", "material_supplement"].includes(item.document_type)).length;
+  const movementCount = (database.prepare(`
+    SELECT COUNT(*) AS count FROM inventory_movements
+    WHERE source_type = 'parallel_merge' AND source_id = ?
+  `).get(mergeRequestId) as { count: number }).count;
+  results.push(upsertReconciliation(database, executionRunId, mergeRequestId, {
+    ruleCode: "material_movements_posted",
+    domain: "inventory_production",
+    passed: movementCount >= materialItemCount,
+    expected: { minimum_movement_count: materialItemCount },
+    actual: { movement_count: movementCount },
+    message: movementCount >= materialItemCount ? "补退料库存流水已完整过账。" : "补退料库存流水不完整。",
+  }));
+
+  const bomItemCount = items.filter((item) => item.document_type === "bom_change").length;
+  const activeBomCount = (database.prepare(`
+    SELECT COUNT(*) AS count
+    FROM formal_correction_orders f
+    JOIN boms b ON b.id = f.resulting_document_id AND b.status = 'active'
+    WHERE f.source_merge_request_id = ? AND f.correction_type = 'bom_change' AND f.status = 'executed'
+  `).get(mergeRequestId) as { count: number }).count;
+  results.push(upsertReconciliation(database, executionRunId, mergeRequestId, {
+    ruleCode: "bom_basis_applied",
+    domain: "bom",
+    passed: activeBomCount === bomItemCount,
+    expected: { active_bom_count: bomItemCount },
+    actual: { active_bom_count: activeBomCount },
+    message: activeBomCount === bomItemCount ? "正式 BOM 依据已生效。" : "正式 BOM 依据未完整生效。",
+  }));
+
+  const costItemCount = items.filter((item) => item.document_type === "production_cost_adjustment").length;
+  const costCount = (database.prepare(`
+    SELECT COUNT(*) AS count
+    FROM formal_correction_orders f
+    JOIN production_cost_adjustments c ON c.id = f.resulting_document_id AND c.status = 'applied'
+    WHERE f.source_merge_request_id = ? AND f.correction_type = 'production_cost_adjustment'
+  `).get(mergeRequestId) as { count: number }).count;
+  results.push(upsertReconciliation(database, executionRunId, mergeRequestId, {
+    ruleCode: "production_cost_posted",
+    domain: "cost",
+    passed: costCount === costItemCount,
+    expected: { applied_cost_adjustment_count: costItemCount },
+    actual: { applied_cost_adjustment_count: costCount },
+    message: costCount === costItemCount ? "生产成本调整已入账。" : "生产成本调整未完整入账。",
+  }));
+
+  const purchaseItemCount = items.filter((item) => item.document_type === "purchase_requisition").length;
+  const purchaseCount = (database.prepare(`
+    SELECT COUNT(*) AS count
+    FROM parallel_merge_items i
+    JOIN purchase_requisitions p ON p.id = i.published_document_id
+    WHERE i.merge_request_id = ? AND i.document_type = 'purchase_requisition'
+  `).get(mergeRequestId) as { count: number }).count;
+  results.push(upsertReconciliation(database, executionRunId, mergeRequestId, {
+    ruleCode: "purchase_document_traceable",
+    domain: "purchase",
+    passed: purchaseCount === purchaseItemCount,
+    expected: { purchase_document_count: purchaseItemCount },
+    actual: { purchase_document_count: purchaseCount },
+    message: purchaseCount === purchaseItemCount ? "采购申请已生成并可反查平行账套来源。" : "采购申请链路不完整。",
+  }));
+  return results.every(Boolean);
+}
+
 export function publishParallelMerge(database: Database.Database, actorId: string, mergeRequestId: string): PublishParallelMergeResult {
   const user = getUser(database, actorId);
   void user;
@@ -447,6 +917,124 @@ export function publishParallelMerge(database: Database.Database, actorId: strin
     throw error;
   }
   void ledger;
+}
+
+export function resumeParallelMergeExecution(
+  database: Database.Database,
+  actorId: string,
+  mergeRequestId: string,
+): PublishParallelMergeResult {
+  getUser(database, actorId);
+  const ledgerId = mergeRequestIdToLedgerId(database, mergeRequestId);
+  assertLedger(database, ledgerId, actorId);
+  requireParallelPermission(database, actorId, ledgerId, "publish_merge");
+  const mergeRequest = database.prepare(`
+    SELECT id, status, idempotency_key FROM parallel_merge_requests WHERE id = ?
+  `).get(mergeRequestId) as { id: string; status: string; idempotency_key: string } | undefined;
+  if (!mergeRequest) throw new Error("合并申请不存在。");
+  if (mergeRequest.status === "published") return existingPublishResult(database, mergeRequestId, "merged");
+  if (!["execution_pending", "execution_failed"].includes(mergeRequest.status)) {
+    throw new Error(`合并申请状态 ${mergeRequest.status} 不允许继续执行。`);
+  }
+  const executionRun = database.prepare(`
+    SELECT id, status FROM correction_execution_runs WHERE merge_request_id = ?
+  `).get(mergeRequestId) as { id: string; status: string } | undefined;
+  if (!executionRun) throw new Error("未找到正式纠错执行批次，请先发布纠错包。");
+  if (executionRun.status === "completed") return existingPublishResult(database, mergeRequestId, "merged");
+
+  const items = database.prepare(`
+    SELECT * FROM parallel_merge_items WHERE merge_request_id = ? ORDER BY sequence_no
+  `).all(mergeRequestId) as MergeItem[];
+  const publishedCount = items.filter((item) => Boolean(item.published_document_id)).length;
+  const readiness = writeProcurementReadiness(database, executionRun.id, mergeRequestId, items);
+  if (!readiness.ready) {
+    const timestamp = now();
+    database.prepare(`
+      UPDATE correction_execution_runs
+      SET status = 'waiting_external', failure_reason = ?, attempt_no = attempt_no + 1,
+          updated_at = ? WHERE id = ?
+    `).run(readiness.message, timestamp, executionRun.id);
+    database.prepare("UPDATE parallel_merge_requests SET status = 'execution_pending', failure_reason = ? WHERE id = ?")
+      .run(readiness.message, mergeRequestId);
+    database.prepare("UPDATE parallel_ledgers SET status = 'publishing', updated_at = ? WHERE id = ?")
+      .run(timestamp, ledgerId);
+    audit(database, actorId, "parallelLedgerResumeMergeExecution", "parallel_merge", mergeRequestId, `正式纠错执行仍在等待：${readiness.message}`);
+    return { publishedCount, advisoryCount: 0, completed: false, status: "execution_pending" };
+  }
+
+  const execute = database.transaction(() => {
+    const startedAt = now();
+    database.prepare(`
+      UPDATE correction_execution_runs
+      SET status = 'executing', attempt_no = attempt_no + 1, failure_reason = '',
+          failed_steps = 0, updated_at = ? WHERE id = ?
+    `).run(startedAt, executionRun.id);
+    database.prepare("UPDATE parallel_ledgers SET status = 'publishing', updated_at = ? WHERE id = ?")
+      .run(startedAt, ledgerId);
+
+    const orderedItems = [...items].sort(
+      (a, b) => dependencyOrder(a.document_type) - dependencyOrder(b.document_type) || a.sequence_no - b.sequence_no,
+    );
+    for (const item of orderedItems) {
+      const step = database.prepare(`
+        SELECT id, status FROM correction_execution_steps WHERE merge_item_id = ?
+      `).get(item.id) as { id: string; status: string } | undefined;
+      if (!step) throw new Error(`合并项 ${item.id} 缺少执行步骤。`);
+      if (step.status === "succeeded") continue;
+      database.prepare("UPDATE correction_execution_steps SET status = 'executing', error_message = '', updated_at = ? WHERE id = ?")
+        .run(now(), step.id);
+      const result = executeMergeItem(database, actorId, mergeRequestId, item);
+      const executedAt = now();
+      database.prepare(`
+        UPDATE correction_execution_steps
+        SET status = 'succeeded', result_json = ?, error_message = '',
+            executed_at = ?, updated_at = ? WHERE id = ?
+      `).run(JSON.stringify(result), executedAt, executedAt, step.id);
+      database.prepare("UPDATE parallel_merge_items SET publish_status = 'executed' WHERE id = ?").run(item.id);
+    }
+
+    database.prepare("UPDATE correction_execution_runs SET status = 'reconciling', updated_at = ? WHERE id = ?")
+      .run(now(), executionRun.id);
+    if (!reconcileExecutedPackage(database, executionRun.id, mergeRequestId, items)) {
+      throw new Error("正式纠错执行完成，但跨域对账未全部通过。");
+    }
+    const completedAt = now();
+    database.prepare(`
+      UPDATE correction_execution_runs
+      SET status = 'completed', succeeded_steps = total_steps,
+          waiting_steps = 0, failed_steps = 0, failure_reason = '',
+          finished_at = ?, updated_at = ? WHERE id = ?
+    `).run(completedAt, completedAt, executionRun.id);
+    database.prepare(`
+      UPDATE parallel_merge_requests
+      SET status = 'published', published_by = ?, published_at = ?, failure_reason = NULL
+      WHERE id = ?
+    `).run(actorId, completedAt, mergeRequestId);
+    database.prepare(`
+      UPDATE parallel_ledgers
+      SET status = 'merged', merged_at = ?, updated_at = ? WHERE id = ?
+    `).run(completedAt, completedAt, ledgerId);
+    audit(database, actorId, "parallelLedgerResumeMergeExecution", "parallel_merge", mergeRequestId, `正式纠错单据全部执行并通过对账，账套已合并：${items.length} 个步骤`);
+  });
+
+  try {
+    execute();
+    return { publishedCount: items.length, advisoryCount: 0, completed: true, status: "merged" };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const failedAt = now();
+    database.prepare(`
+      UPDATE correction_execution_runs
+      SET status = 'failed', failed_steps = 1, failure_reason = ?, updated_at = ?
+      WHERE id = ?
+    `).run(message, failedAt, executionRun.id);
+    database.prepare("UPDATE parallel_merge_requests SET status = 'execution_failed', failure_reason = ? WHERE id = ?")
+      .run(message, mergeRequestId);
+    database.prepare("UPDATE parallel_ledgers SET status = 'merge_failed', updated_at = ? WHERE id = ?")
+      .run(failedAt, ledgerId);
+    audit(database, actorId, "parallelLedgerResumeMergeExecutionFailed", "parallel_merge", mergeRequestId, `正式纠错执行失败并已回滚：${message}`);
+    throw error;
+  }
 }
 
 export function listParallelMergeRequests(database: Database.Database, ledgerId: string) {
