@@ -180,4 +180,38 @@ describe("平行账套原料 A 替换 B 的整链复盘", () => {
       expect(payload.evidence).toBeTypeOf("object");
     }
   });
+
+  it("拒绝缺少替换数量或原料相同的模糊调整", () => {
+    const adminId = (database.prepare("SELECT id FROM users WHERE role = 'admin' LIMIT 1").get() as { id: string }).id;
+    expect(() => addParallelAdjustment(database, adminId, ledgerId, {
+      adjustment_type: "material_substitute",
+      effective_at: baseAsOf,
+      reason: "未填写替换数量",
+      lines: [
+        {
+          entity_type: "production_order",
+          entity_id: "PO-PAL-DEMO",
+          field_code: "material_id",
+          source_material_id: "M-PAL-A",
+          target_material_id: "M-PAL-B",
+        },
+      ],
+    })).toThrow(/替换数量/);
+
+    expect(() => addParallelAdjustment(database, adminId, ledgerId, {
+      adjustment_type: "material_substitute",
+      effective_at: baseAsOf,
+      reason: "原料相同",
+      lines: [
+        {
+          entity_type: "production_order",
+          entity_id: "PO-PAL-DEMO",
+          field_code: "material_id",
+          source_material_id: "M-PAL-A",
+          target_material_id: "M-PAL-A",
+          quantity: 2,
+        },
+      ],
+    })).toThrow(/不能相同/);
+  });
 });
