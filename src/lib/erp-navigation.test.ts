@@ -58,9 +58,11 @@ describe("role-task navigation", () => {
       "财务与分析",
       "基础与协作",
       "系统管理",
+      "隔离工作区",
     ]);
     expect(keys).toContain("system");
     expect(keys).toContain("parallel");
+    expect(groups.find((group) => group.label === "隔离工作区")?.items.map((item) => item.key)).toEqual(["parallel"]);
     expect(new Set(keys).size).toBe(keys.length);
   });
 
