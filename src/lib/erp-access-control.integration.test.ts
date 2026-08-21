@@ -49,6 +49,15 @@ describe("PRD 阶段 0：正式账套数据最小化与平行账套隔离", () =
       buildExport({ actorId: "U-SALES", type: "master-suppliers", format: "xlsx" }),
     ).rejects.toThrow(/无权导出|无导出权限/);
 
+    const deniedAudit = database.prepare(
+      "SELECT action, entity_type, entity_id, message FROM audit_logs WHERE actor_id = ? AND action = 'reportExportDenied' ORDER BY created_at DESC LIMIT 1",
+    ).get("U-SALES");
+    expect(deniedAudit).toMatchObject({
+      action: "reportExportDenied",
+      entity_type: "report",
+      entity_id: "master-suppliers",
+    });
+
     const authorized = await buildExport({
       actorId: "U-PUR",
       type: "master-suppliers",
