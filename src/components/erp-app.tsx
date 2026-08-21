@@ -1023,7 +1023,7 @@ export function ErpApp() {
                 </div>
               </div>
 
-              <div className="flex flex-col gap-2 md:flex-row md:items-center">
+              <div className="grid grid-cols-[minmax(0,1fr)_40px_auto] gap-2 lg:flex lg:items-center">
                 <GlobalSearch
                   snapshot={snapshot}
                   onSelect={(result) => {
@@ -1291,7 +1291,7 @@ function MobileRoleNavigation({
 }) {
   const items = groups.flatMap((group) => group.items);
   return (
-    <div className="scrollbar-thin flex max-w-full gap-2 overflow-x-auto lg:hidden" aria-label="移动端导航">
+    <div className="scrollbar-thin order-4 col-span-3 flex max-w-full gap-2 overflow-x-auto lg:hidden" aria-label="移动端导航">
       {items.map((item) => {
         const Icon = navigationIcon[item.icon];
         const active = item.key === activeModule;
@@ -1430,10 +1430,10 @@ function UserAccountMenu({
   runAction: (task: ActionRequest) => Promise<void>;
   onLogout: () => Promise<void>;
 }) {
-  const [open, setOpen] = useState(false);
   const [passwordOpen, setPasswordOpen] = useState(false);
   const [form, setForm] = useState({ current_password: "", new_password: "", confirm_password: "" });
   const [validation, setValidation] = useState("");
+  const menuRef = useRef<HTMLDetailsElement>(null);
 
   const submitPassword = async () => {
     if (form.new_password.length < 6) {
@@ -1454,21 +1454,18 @@ function UserAccountMenu({
   };
 
   return (
-    <div className="relative shrink-0">
-      <button
-        type="button"
-        aria-expanded={open}
-        onClick={() => setOpen((current) => !current)}
-        className="flex h-10 items-center gap-2 rounded-md border border-slate-200 bg-white px-3 text-xs text-slate-600 transition hover:border-blue-300"
+    <>
+      <details ref={menuRef} className="group relative shrink-0">
+      <summary
+        className="flex h-10 cursor-pointer list-none items-center gap-2 rounded-md border border-slate-200 bg-white px-3 text-xs text-slate-600 transition hover:border-blue-300 [&::-webkit-details-marker]:hidden"
       >
         <Icon className="h-4 w-4 text-blue-600" />
         <span className="font-semibold text-slate-800">{user.role_label}</span>
         <span className="hidden text-slate-300 sm:inline">/</span>
         <span className="hidden sm:inline">{user.username}</span>
-        <ChevronDown className="h-3.5 w-3.5 text-slate-400" />
-      </button>
-      {open ? (
-        <div className="absolute right-0 top-12 z-40 w-56 rounded-lg border border-slate-200 bg-white p-2 shadow-xl">
+        <ChevronDown className="h-3.5 w-3.5 text-slate-400 transition group-open:rotate-180" />
+      </summary>
+      <div className="absolute right-0 top-12 z-40 w-56 rounded-lg border border-slate-200 bg-white p-2 shadow-xl">
           <div className="border-b border-slate-100 px-3 py-2">
             <p className="text-sm font-semibold text-slate-900">{user.name}</p>
             <p className="mt-0.5 text-xs text-slate-500">{user.title}</p>
@@ -1476,7 +1473,7 @@ function UserAccountMenu({
           <button
             type="button"
             onClick={() => {
-              setOpen(false);
+              menuRef.current?.removeAttribute("open");
               setPasswordOpen(true);
             }}
             className="mt-1 flex h-9 w-full items-center gap-2 rounded-md px-3 text-sm text-slate-700 hover:bg-slate-50"
@@ -1492,8 +1489,8 @@ function UserAccountMenu({
             <LogIn className="h-4 w-4" />
             退出登录
           </button>
-        </div>
-      ) : null}
+      </div>
+      </details>
       {passwordOpen ? (
         <div className="fixed inset-0 z-[70] grid place-items-center bg-slate-950/35 p-4" role="dialog" aria-modal="true" aria-labelledby="password-title">
           <div className="w-full max-w-md rounded-xl border border-slate-200 bg-white p-5 shadow-2xl">
@@ -1526,7 +1523,7 @@ function UserAccountMenu({
           </div>
         </div>
       ) : null}
-    </div>
+    </>
   );
 }
 
@@ -1885,7 +1882,7 @@ function MasterDataWorkspace({
               columns={[
                 { key: "product_name", label: "产品" },
                 { key: "material_name", label: "物料" },
-                { key: "qty_per", label: "单位用量", render: formatQty },
+                { key: "qty_per", label: "单位用量", render: (value, row) => formatQty(value, row.unit) },
                 { key: "is_primary", label: "主材" },
                 { key: "version", label: "版本" },
                 detailColumn("BOM 详情"),
@@ -1948,7 +1945,7 @@ function SalesWorkspace({
               { key: "quote_no", label: "报价单" },
               { key: "customer_name", label: "客户" },
               { key: "product_name", label: "产品" },
-              { key: "qty", label: "数量", render: formatQty },
+              { key: "qty", label: "数量", render: (value, row) => formatQty(value, row.unit) },
               { key: "total_amount", label: "金额", render: formatCurrency },
               { key: "status_label", label: "状态", render: (value) => <StatusBadge value={String(value)} /> },
               {
@@ -2385,7 +2382,7 @@ function ProductionWorkspace({
               { key: "prod_no", label: "生产单" },
               { key: "order_no", label: "销售订单" },
               { key: "product_name", label: "产品" },
-              { key: "order_qty", label: "数量", render: formatQty },
+              { key: "order_qty", label: "数量", render: (value, row) => formatQty(value, row.unit) },
               { key: "planned_date", label: "计划日期", render: shortDate },
               { key: "owner", label: "负责人" },
               { key: "status", label: "状态", render: (value) => <StatusBadge value={productionStatusLabel(String(value))} /> },
@@ -2475,7 +2472,7 @@ function QualityWorkspace({
                 { key: "inspection_no", label: "请验单" },
                 { key: "prod_no", label: "生产单" },
                 { key: "product_name", label: "产品" },
-                { key: "sample_qty", label: "抽检数量", render: formatQty },
+                { key: "sample_qty", label: "抽检数量", render: (value, row) => formatQty(value, row.unit) },
                 { key: "status", label: "状态", render: (value) => <StatusBadge value={String(value)} /> },
                 { key: "detail", label: "详情", render: (_value, row) => <DetailButton onClick={() => openDetail(compactRowDetail("生产请验详情", row))} /> },
               ]}
@@ -13630,6 +13627,38 @@ function preferredLineKeys(lines: Row[]) {
 
 function detailColumnLabel(key: string) {
   const labels: Record<string, string> = {
+    id: "业务标识",
+    quote_no: "报价单号",
+    order_no: "销售订单号",
+    prod_no: "生产单号",
+    req_no: "领料单号",
+    inspection_no: "请验单号",
+    purchase_no: "采购单号",
+    shipment_no: "发货单号",
+    receivable_no: "应收单号",
+    payable_no: "应付单号",
+    customer_id: "客户标识",
+    customer_code: "客户编码",
+    customer_name: "客户",
+    supplier_id: "供应商标识",
+    supplier_code: "供应商编码",
+    supplier_name: "供应商",
+    product_id: "产品标识",
+    product_code: "产品编码",
+    product_name: "产品",
+    material_id: "物料标识",
+    material_code: "物料编码",
+    material_name: "物料",
+    qty_per: "单位用量",
+    total_amount: "总金额",
+    balance_amount: "未结余额",
+    due_date: "到期日期",
+    planned_date: "计划日期",
+    created_at: "创建时间",
+    updated_at: "更新时间",
+    status: "状态编码",
+    status_label: "当前状态",
+    remark: "备注",
     materialName: "物料",
     qty: "数量",
     unit: "单位",
