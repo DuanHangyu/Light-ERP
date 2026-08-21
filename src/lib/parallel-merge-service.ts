@@ -817,6 +817,54 @@ function reconcileExecutedPackage(
   return results.every(Boolean);
 }
 
+function createCorrectionRecoveryPoint(
+  database: Database.Database,
+  actorId: string,
+  executionRunId: string,
+  items: MergeItem[],
+) {
+  const materialIds = new Set<string>();
+  const productIds = new Set<string>();
+  const productionOrderIds = new Set<string>();
+  const requisitionIds = new Set<string>();
+  for (const item of items) {
+    const payload = JSON.parse(item.document_payload_json) as Record<string, unknown>;
+    for (const value of [payload.material_id, payload.source_material_id, payload.target_material_id]) {
+      if (value) materialIds.add(String(value));
+    }
+    if (payload.product_id) productIds.add(String(payload.product_id));
+    if (payload.production_order_id) productionOrderIds.add(String(payload.production_order_id));
+    if (Array.isArray(payload.requisition_ids)) {
+      for (const requisitionId of payload.requisition_ids) requisitionIds.add(String(requisitionId));
+    }
+  }
+  const rowsForIds = (table: string, column: string, ids: Set<string>) => {
+    if (ids.size === 0) return [];
+    const values = [...ids];
+    return database.prepare(`SELECT * FROM ${table} WHERE ${column} IN (${values.map(() => "?").join(",")})`).all(...values) as Array<Record<string, unknown>>;
+  };
+  const activeBoms = rowsForIds("boms", "product_id", productIds);
+  const bomIds = new Set(activeBoms.map((row) => String(row.id)));
+  const snapshot = {
+    materials: rowsForIds("materials", "id", materialIds),
+    material_batches: rowsForIds("material_batches", "material_id", materialIds),
+    boms: activeBoms,
+    bom_lines: rowsForIds("bom_lines", "bom_id", bomIds),
+    requisitions: rowsForIds("requisitions", "id", requisitionIds),
+    requisition_lines: rowsForIds("requisition_lines", "requisition_id", requisitionIds),
+    production_cost_adjustments: rowsForIds("production_cost_adjustments", "production_order_id", productionOrderIds),
+  };
+  const attempt = database.prepare("SELECT attempt_no FROM correction_execution_runs WHERE id = ?").get(executionRunId) as { attempt_no: number };
+  const recoveryPointId = uid("CRP");
+  database.prepare(`
+    INSERT INTO correction_recovery_points (
+      id, execution_run_id, attempt_no, status, snapshot_json,
+      completion_note, created_by, created_at, restored_at
+    ) VALUES (?, ?, ?, 'active', ?, '', ?, ?, NULL)
+  `).run(recoveryPointId, executionRunId, Number(attempt.attempt_no) + 1, JSON.stringify(snapshot), actorId, now());
+  return recoveryPointId;
+}
+
 export function publishParallelMerge(database: Database.Database, actorId: string, mergeRequestId: string): PublishParallelMergeResult {
   const user = getUser(database, actorId);
   void user;
@@ -962,6 +1010,8 @@ export function resumeParallelMergeExecution(
     return { publishedCount, advisoryCount: 0, completed: false, status: "execution_pending" };
   }
 
+  const recoveryPointId = createCorrectionRecoveryPoint(database, actorId, executionRun.id, items);
+
   const execute = database.transaction(() => {
     const startedAt = now();
     database.prepare(`
@@ -1014,6 +1064,11 @@ export function resumeParallelMergeExecution(
       UPDATE parallel_ledgers
       SET status = 'merged', merged_at = ?, updated_at = ? WHERE id = ?
     `).run(completedAt, completedAt, ledgerId);
+    database.prepare(`
+      UPDATE correction_recovery_points
+      SET status = 'completed', completion_note = '正式纠错执行及强制对账全部通过'
+      WHERE id = ?
+    `).run(recoveryPointId);
     audit(database, actorId, "parallelLedgerResumeMergeExecution", "parallel_merge", mergeRequestId, `正式纠错单据全部执行并通过对账，账套已合并：${items.length} 个步骤`);
   });
 
@@ -1032,6 +1087,20 @@ export function resumeParallelMergeExecution(
       .run(message, mergeRequestId);
     database.prepare("UPDATE parallel_ledgers SET status = 'merge_failed', updated_at = ? WHERE id = ?")
       .run(failedAt, ledgerId);
+    database.prepare(`
+      UPDATE correction_recovery_points
+      SET status = 'rolled_back', completion_note = ?, restored_at = ?
+      WHERE id = ?
+    `).run(`数据库事务已整体回滚：${message}`, failedAt, recoveryPointId);
+    upsertReconciliation(database, executionRun.id, mergeRequestId, {
+      ruleCode: "execution_transaction_rollback",
+      domain: "recovery",
+      passed: false,
+      expected: { transaction: "all_steps_committed" },
+      actual: { transaction: "rolled_back", recovery_point_id: recoveryPointId },
+      delta: { failure_reason: message },
+      message: `正式纠错执行失败，数据库事务已整体回滚：${message}`,
+    });
     audit(database, actorId, "parallelLedgerResumeMergeExecutionFailed", "parallel_merge", mergeRequestId, `正式纠错执行失败并已回滚：${message}`);
     throw error;
   }

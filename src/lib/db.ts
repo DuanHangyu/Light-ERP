@@ -1573,6 +1573,18 @@ function applySchema(database: Database.Database) {
       UNIQUE (execution_run_id, rule_code)
     );
 
+    CREATE TABLE IF NOT EXISTS correction_recovery_points (
+      id TEXT PRIMARY KEY,
+      execution_run_id TEXT NOT NULL REFERENCES correction_execution_runs(id),
+      attempt_no INTEGER NOT NULL,
+      status TEXT NOT NULL,
+      snapshot_json TEXT NOT NULL DEFAULT '{}',
+      completion_note TEXT NOT NULL DEFAULT '',
+      created_by TEXT NOT NULL REFERENCES users(id),
+      created_at TEXT NOT NULL,
+      restored_at TEXT
+    );
+
     CREATE TABLE IF NOT EXISTS parallel_merge_conflicts (
       id TEXT PRIMARY KEY,
       merge_request_id TEXT NOT NULL REFERENCES parallel_merge_requests(id),
@@ -3921,6 +3933,27 @@ function applyMigrations(database: Database.Database) {
             ON correction_execution_steps(execution_run_id, dependency_order, status);
           CREATE INDEX IF NOT EXISTS idx_reconciliation_results_merge
             ON reconciliation_results(merge_request_id, status, blocking);
+        `);
+      },
+    },
+    {
+      id: "062_parallel_correction_recovery_points",
+      description: "平行账套正式纠错执行前恢复点与事务回滚凭据",
+      up: () => {
+        database.exec(`
+          CREATE TABLE IF NOT EXISTS correction_recovery_points (
+            id TEXT PRIMARY KEY,
+            execution_run_id TEXT NOT NULL REFERENCES correction_execution_runs(id),
+            attempt_no INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            snapshot_json TEXT NOT NULL DEFAULT '{}',
+            completion_note TEXT NOT NULL DEFAULT '',
+            created_by TEXT NOT NULL REFERENCES users(id),
+            created_at TEXT NOT NULL,
+            restored_at TEXT
+          );
+          CREATE INDEX IF NOT EXISTS idx_correction_recovery_points_run
+            ON correction_recovery_points(execution_run_id, attempt_no, created_at);
         `);
       },
     },
