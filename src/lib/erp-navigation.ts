@@ -31,7 +31,7 @@ export type ModuleKey =
   | "system"
   | "parallel";
 
-export type NavigationGroupKey = "work" | "operations" | "supply" | "finance" | "foundation" | "system";
+export type NavigationGroupKey = "work" | "operations" | "supply" | "finance" | "foundation" | "system" | "isolated";
 
 export type NavigationItem = {
   key: ModuleKey;
@@ -55,6 +55,7 @@ const navigationGroups: Array<{ key: NavigationGroupKey; label: string }> = [
   { key: "finance", label: "财务与分析" },
   { key: "foundation", label: "基础与协作" },
   { key: "system", label: "系统管理" },
+  { key: "isolated", label: "隔离工作区" },
 ];
 
 export const moduleCatalog: Record<ModuleKey, NavigationItem> = {
@@ -183,7 +184,7 @@ export const moduleCatalog: Record<ModuleKey, NavigationItem> = {
     label: "平行账套",
     title: "平行账套",
     subtitle: "独立测算、影响评估与合并预览",
-    group: "system",
+    group: "isolated",
     icon: "parallel",
   },
 };
