@@ -15325,7 +15325,19 @@ export async function buildExport(input: {
   const database = getDb();
   const user = getUser(database, input.actorId);
   const filters = normalizeReportFilters(input.filters);
-  requireReportExportPermission(user.role, input.type);
+  try {
+    requireReportExportPermission(user.role, input.type);
+  } catch (error) {
+    audit(
+      database,
+      input.actorId,
+      "reportExportDenied",
+      "report",
+      input.type,
+      `拒绝导出未授权标准报表 ${input.type}`,
+    );
+    throw error;
+  }
 
   const sheets: Array<{ name: string; rows: Array<Record<string, unknown>> }> = [];
   if (input.type === "finance") {
