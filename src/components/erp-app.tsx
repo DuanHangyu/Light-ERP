@@ -4343,6 +4343,7 @@ function MasterDataModule({
   const [openingError, setOpeningError] = useState("");
   const [openingValidationRows, setOpeningValidationRows] = useState<Row[]>([]);
   const [openingValidating, setOpeningValidating] = useState(false);
+  const masterImportSectionRef = useRef<HTMLElement>(null);
   const canEdit =
     snapshot.currentUser.role === "admin" ||
     (tab === "customers" && ["sales", "assistant"].includes(snapshot.currentUser.role)) ||
@@ -4470,7 +4471,22 @@ function MasterDataModule({
         <MiniMetric label="BOM 版本" value={`${snapshot.board.boms.length} 个`} />
       </div>
 
-      <Panel title="正式上线初始化向导" icon={Upload} action="期初数据">
+      <Panel title="第 2 步：期初余额导入" icon={Upload} action="先完成主数据">
+        <div className="mb-4 flex flex-col gap-3 rounded-md border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900 md:flex-row md:items-center md:justify-between">
+          <div>
+            <p className="font-semibold">这里不导入客户、供应商、物料、产品或 BOM 主数据。</p>
+            <p className="mt-1 text-xs leading-5 text-amber-800">
+              请先在下方“第 1 步：主数据导入”选择对应页签完成导入，再回到这里导入期初库存、期初应收和期初应付。
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => masterImportSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" })}
+            className="inline-flex h-9 shrink-0 items-center justify-center rounded-md border border-amber-300 bg-white px-3 text-xs font-semibold text-amber-900 hover:bg-amber-100"
+          >
+            前往第 1 步主数据导入
+          </button>
+        </div>
         <div className="grid gap-4 xl:grid-cols-[1.2fr_1fr]">
           <div className="grid gap-3 md:grid-cols-3">
             {openingImportTypes.map((item, index) => (
@@ -4491,6 +4507,9 @@ function MasterDataModule({
             ))}
           </div>
           <div className="rounded-md border border-slate-200 bg-slate-50 p-3">
+            <p className="mb-2 text-xs font-semibold text-slate-700">
+              当前入口：{openingImportTypes.find((item) => item.key === openingType)?.label}
+            </p>
             <div className="flex flex-wrap items-center gap-2">
               <input
                 ref={openingInputRef}
@@ -4573,7 +4592,13 @@ function MasterDataModule({
         empty="暂无导入错误行"
       />
 
-      <section className="rounded-lg border border-slate-200 bg-white shadow-sm">
+      <section ref={masterImportSectionRef} className="scroll-mt-20 rounded-lg border border-slate-200 bg-white shadow-sm">
+        <div className="border-b border-blue-100 bg-blue-50 px-4 py-3">
+          <p className="text-sm font-semibold text-blue-950">第 1 步：主数据导入</p>
+          <p className="mt-1 text-xs leading-5 text-blue-800">
+            按“客户 → 供应商 → 物料 → 产品 → BOM”的顺序选择页签；每次只在当前页签上传对应文件，先预校验，再正式导入。
+          </p>
+        </div>
         <div className="scrollbar-thin flex gap-2 overflow-x-auto border-b border-slate-200 px-4 py-3">
           {masterTabs.map((item) => {
             const Icon = item.icon;
