@@ -16091,6 +16091,11 @@ function validateOpeningDataRowsInternal(
   database: Database.Database,
   input: ImportValidationInput & { type: OpeningDataType },
 ) {
+  const typeMismatch = openingImportTypeMismatch(input.type, input.rows);
+  if (typeMismatch) {
+    return { validRows: 0, totalAmount: 0, errors: [typeMismatch] };
+  }
+
   const errors: ImportValidationErrorRow[] = [];
   const seenBatchKeys = new Set<string>();
   let validRows = 0;
@@ -16114,6 +16119,61 @@ function validateOpeningDataRowsInternal(
   });
 
   return { validRows, totalAmount, errors };
+}
+
+function openingImportTypeMismatch(
+  expectedType: OpeningDataType,
+  rows: Array<Record<string, unknown>>,
+): ImportValidationErrorRow | null {
+  const detectedType = detectInitializationImportType(rows);
+  if (!detectedType || detectedType === expectedType) return null;
+
+  const expectedLabel = initializationImportTypeLabel(expectedType);
+  const detectedLabel = initializationImportTypeLabel(
+    detectedType.startsWith("opening-") ? detectedType : `master-${detectedType}`,
+  );
+  const entryHint =
+    detectedType === "customers"
+      ? "请到下方“客户”页签的“客户导入导出”区域上传该文件。"
+      : detectedType === "suppliers"
+        ? "请到下方“供应商”页签的“供应商导入导出”区域上传该文件。"
+        : detectedType === "materials"
+          ? "请到下方“物料”页签的“物料导入导出”区域上传该文件。"
+          : detectedType === "products"
+            ? "请到下方“产品”页签的“产品导入导出”区域上传该文件。"
+            : detectedType === "boms"
+              ? "请到下方“BOM”页签的“BOM 导入导出”区域上传该文件。"
+              : `请在“${detectedLabel}”入口上传该文件。`;
+
+  return {
+    rowNo: 1,
+    fieldName: "import_type",
+    message: `文件内容识别为“${detectedLabel}”，但当前入口是“${expectedLabel}”。${entryHint}`,
+    rawData: rows[0] ?? {},
+  };
+}
+
+type InitializationImportType = MasterDataType | OpeningDataType;
+
+function detectInitializationImportType(rows: Array<Record<string, unknown>>): InitializationImportType | null {
+  const fields = new Set(rows.slice(0, 20).flatMap((row) => Object.keys(row).map((key) => key.trim().toLowerCase())));
+  const hasAny = (...keys: string[]) => keys.some((key) => fields.has(key.toLowerCase()));
+
+  if (hasAny("customer_code", "客户编码") && hasAny("total_amount", "应收金额", "期初应收", "receivable_no")) {
+    return "opening-receivables";
+  }
+  if (hasAny("supplier_code", "供应商编码") && hasAny("total_amount", "应付金额", "期初应付", "payable_no")) {
+    return "opening-payables";
+  }
+  if (hasAny("material_code", "物料编码") && hasAny("qty", "数量", "期初数量", "unit_cost", "期初单价", "batch_no")) {
+    return "opening-inventory";
+  }
+  if (hasAny("component_code", "组件编码", "component_id", "组件id", "qty_per", "单位用量")) return "boms";
+  if (hasAny("customer_code", "客户编码")) return "customers";
+  if (hasAny("supplier_code", "供应商编码")) return "suppliers";
+  if (hasAny("material_code", "物料编码")) return "materials";
+  if (hasAny("product_code", "产品编码")) return "products";
+  return null;
 }
 
 function validateOpeningRow(
