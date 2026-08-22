@@ -1755,6 +1755,36 @@ describe("ERP service document attachment archive", () => {
 });
 
 describe("ERP service formal go-live initialization", () => {
+  it("explains when customer master data is uploaded through the opening inventory entry", async () => {
+    const service = await loadService();
+
+    const result = service.validateOpeningDataRows({
+      actorId: "U-ADMIN",
+      type: "opening-inventory",
+      sourceName: "01-客户主数据.xlsx",
+      rows: [
+        { customer_code: "C-UAT-001", name: "华东精工装备有限公司", contact: "吴总" },
+        { customer_code: "C-UAT-LEGACY", name: "华东存量客户有限公司", contact: "陈经理" },
+      ],
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      importedRows: 2,
+      validRows: 0,
+      failedRows: 1,
+      status: "validation_failed",
+    });
+    expect(result.errors).toEqual([
+      expect.objectContaining({
+        rowNo: 1,
+        fieldName: "import_type",
+        message: expect.stringContaining("文件内容识别为“客户主数据”"),
+      }),
+    ]);
+    expect(result.errors[0]?.message).toContain("请到下方“客户”页签");
+  });
+
   it("prevalidates master data imports and records row-level errors without writing dirty rows", async () => {
     const service = await loadService();
 
