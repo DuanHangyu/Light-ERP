@@ -64,6 +64,19 @@ describe("role-task navigation", () => {
     expect(new Set(keys).size).toBe(keys.length);
   });
 
+  it("shows the empty parallel-ledger workspace to authorized creators without exposing it to ordinary roles", () => {
+    for (const role of ["manager", "finance", "admin"] as const) {
+      const keys = flatNavigationForRole(role, { canCreateParallelLedger: true }).map((item) => item.key);
+
+      expect(keys).toContain("parallel");
+      expect(resolveAccessibleModule(role, "parallel", { canCreateParallelLedger: true })).toBe("parallel");
+    }
+
+    expect(flatNavigationForRole("sales", { canCreateParallelLedger: false }).map((item) => item.key)).not.toContain(
+      "parallel",
+    );
+  });
+
   it("falls back to the workbench when a role requests an inaccessible module", () => {
     expect(isModuleAccessible("sales", "finance")).toBe(false);
     expect(resolveAccessibleModule("sales", "finance")).toBe("workbench");
