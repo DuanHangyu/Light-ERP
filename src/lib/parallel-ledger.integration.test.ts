@@ -120,17 +120,17 @@ describe("平行账套正式闭环", () => {
     expect(() => submitParallelMerge(database, adminId, ledgerId)).toThrow(/不允许合并/);
   });
 
-  it("合并申请人不能审批自己的申请", () => {
-    const { ledgerId } = createParallelLedger(database, adminId, {
+  it("非管理员合并申请人不能审批自己的申请", () => {
+    const { ledgerId } = createParallelLedger(database, managerId, {
       name: "合并职责分离验证",
       purpose: "禁止自批",
       base_as_of: baseAsOf,
       scope_type: "production_order",
       scope_entities: [{ scope_entity_type: "production_order", scope_entity_id: "PO-PAL-DEMO" }],
       merge_allowed: 1,
-      allowed_user_ids: [managerId],
+      allowed_user_ids: [adminId],
     });
-    addParallelAdjustment(database, adminId, ledgerId, {
+    addParallelAdjustment(database, managerId, ledgerId, {
       adjustment_type: "bom_ratio",
       effective_at: baseAsOf,
       reason: "触发采购缺口",
@@ -139,30 +139,86 @@ describe("平行账套正式闭环", () => {
         { entity_type: "product", entity_id: "P-PAL-DEMO", field_code: "qty_per", target_material_id: "M-PAL-B", quantity: 0.2 },
       ],
     });
-    addParallelAdjustment(database, adminId, ledgerId, {
+    addParallelAdjustment(database, managerId, ledgerId, {
       adjustment_type: "purchase_price",
       effective_at: baseAsOf,
       reason: "采购价格测算",
       lines: [{ entity_type: "material", entity_id: "M-PAL-B", field_code: "purchase_price", target_material_id: "M-PAL-B", unit_price: 13000 }],
     });
-    runParallelCalculation(database, adminId, ledgerId);
+    runParallelCalculation(database, managerId, ledgerId);
     const suggestion = database
       .prepare("SELECT id FROM parallel_suggestions WHERE ledger_id = ? ORDER BY id LIMIT 1")
       .get(ledgerId) as { id: string };
-    confirmParallelSuggestion(database, adminId, suggestion.id, { decision: "accept" });
-    freezeParallelLedger(database, adminId, ledgerId);
-    const { mergeRequestId } = submitParallelMerge(database, adminId, ledgerId);
-    expect(() => approveParallelMerge(database, adminId, mergeRequestId, {})).toThrow(/申请人不能审批/);
+    confirmParallelSuggestion(database, managerId, suggestion.id, { decision: "accept" });
+    freezeParallelLedger(database, managerId, ledgerId);
+    const { mergeRequestId } = submitParallelMerge(database, managerId, ledgerId);
+    expect(() => approveParallelMerge(database, managerId, mergeRequestId, {})).toThrow(/申请人不能审批/);
 
     database.prepare(`
       UPDATE parallel_ledger_members
       SET can_approve_merge = 1, can_publish_merge = 1
       WHERE ledger_id = ? AND user_id = ?
-    `).run(ledgerId, managerId);
-    approveParallelMerge(database, managerId, mergeRequestId, { approval_note: "复核通过" });
-    const published = publishParallelMerge(database, managerId, mergeRequestId);
+    `).run(ledgerId, adminId);
+    approveParallelMerge(database, adminId, mergeRequestId, { approval_note: "复核通过" });
+    const published = publishParallelMerge(database, adminId, mergeRequestId);
     expect(published).toMatchObject({ publishedCount: 3, advisoryCount: 0 });
     expect((database.prepare("SELECT COUNT(*) AS count FROM formal_correction_orders WHERE source_ledger_id = ?").get(ledgerId) as { count: number }).count).toBe(2);
     expect((database.prepare("SELECT COUNT(*) AS count FROM purchase_requisitions WHERE source_type = 'parallel_merge' AND source_document_id = ?").get(ledgerId) as { count: number }).count).toBe(1);
+  });
+
+  it("允许系统管理员审批并直接发布自己提交的合并申请", () => {
+    const { ledgerId } = createParallelLedger(database, adminId, {
+      name: "管理员直接合并验证",
+      purpose: "管理员提交后可直接审批并发布",
+      base_as_of: baseAsOf,
+      scope_type: "production_order",
+      scope_entities: [{ scope_entity_type: "production_order", scope_entity_id: "PO-PAL-DEMO" }],
+      merge_allowed: 1,
+    });
+    addParallelAdjustment(database, adminId, ledgerId, {
+      adjustment_type: "purchase_price",
+      effective_at: baseAsOf,
+      reason: "管理员直接合并价格测算",
+      lines: [
+        {
+          entity_type: "material",
+          entity_id: "M-PAL-B",
+          field_code: "purchase_price",
+          target_material_id: "M-PAL-B",
+          unit_price: 13000,
+        },
+      ],
+    });
+    runParallelCalculation(database, adminId, ledgerId);
+    const suggestions = database
+      .prepare("SELECT id FROM parallel_suggestions WHERE ledger_id = ? AND status = 'pending' ORDER BY id")
+      .all(ledgerId) as Array<{ id: string }>;
+    for (const suggestion of suggestions) {
+      confirmParallelSuggestion(database, adminId, suggestion.id, { decision: "accept" });
+    }
+    freezeParallelLedger(database, adminId, ledgerId);
+    const { mergeRequestId } = submitParallelMerge(database, adminId, ledgerId);
+
+    expect(() =>
+      approveParallelMerge(database, adminId, mergeRequestId, {
+        approval_note: "系统管理员直接审批并发布",
+      }),
+    ).not.toThrow();
+    expect(() => publishParallelMerge(database, adminId, mergeRequestId)).not.toThrow();
+
+    const merge = database
+      .prepare("SELECT submitted_by, approved_by, published_by, status FROM parallel_merge_requests WHERE id = ?")
+      .get(mergeRequestId) as {
+        submitted_by: string;
+        approved_by: string;
+        published_by: string;
+        status: string;
+      };
+    expect(merge).toMatchObject({
+      submitted_by: adminId,
+      approved_by: adminId,
+      published_by: adminId,
+    });
+    expect(["execution_pending", "published"]).toContain(merge.status);
   });
 });
