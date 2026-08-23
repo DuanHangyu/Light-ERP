@@ -1,6 +1,6 @@
 import type Database from "better-sqlite3";
 import { audit, getUser, now, serial, uid } from "./erp-service";
-import { requireParallelPermission } from "./parallel-ledger-service";
+import { addParallelAdjustment, requireParallelPermission } from "./parallel-ledger-service";
 
 export type ParallelSimulationDocumentType =
   | "bom_change"
@@ -284,6 +284,33 @@ export function completeParallelSimulationDocument(
   if (row.status === "completed") return { idempotent: true };
   if (row.status !== "ready") {
     throw new Error(row.blocking_reason || `单据当前状态 ${row.status}，不能完成。`);
+  }
+  if (row.document_type === "purchase_receipt") {
+    const payload = parseJsonObject(row.payload_json);
+    const materialId = String(payload.material_id ?? "");
+    const actualQty = Number(payload.actual_qty ?? 0);
+    const unitCost = Number(payload.unit_cost ?? 0);
+    if (!materialId || !Number.isFinite(actualQty) || actualQty <= 0) {
+      throw new Error("采购入库单缺少有效的物料和实际入库数量。");
+    }
+    addParallelAdjustment(database, actorId, ledgerId, {
+      adjustment_type: "purchase_qty",
+      effective_at: String(payload.receipt_date ?? row.business_date),
+      reason: `完成采购入库单 ${row.document_no}`,
+      reference_type: "parallel_simulation_document",
+      reference_id: row.id,
+      lines: [
+        {
+          entity_type: "material",
+          entity_id: materialId,
+          field_code: "purchase_qty",
+          target_material_id: materialId,
+          quantity: actualQty,
+          unit_price: unitCost,
+          remark: `批次 ${String(payload.batch_no ?? "")}`,
+        },
+      ],
+    });
   }
   const timestamp = now();
   database
