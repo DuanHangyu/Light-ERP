@@ -346,6 +346,7 @@ type Snapshot = {
     impacts: Row[];
     gaps: Row[];
     suggestions: Row[];
+    simulationDocuments: Row[];
     mergeConflicts: Row[];
     mergeRequests: Row[];
     mergeItems: Row[];
@@ -14564,6 +14565,38 @@ const PARALLEL_EXPORTS: Array<{ type: string; label: string }> = [
   { type: "parallel_adjustments", label: "调整明细" },
 ];
 
+const PARALLEL_DOCUMENT_LABELS: Record<string, string> = {
+  bom_change: "BOM变更单",
+  purchase_requisition: "采购申请",
+  purchase_order: "采购订单",
+  purchase_arrival: "采购到货单",
+  purchase_receipt: "采购入库单",
+  material_return: "生产退料单",
+  material_supplement: "生产补料单",
+  production_cost_adjustment: "工单成本调整单",
+};
+
+const PARALLEL_DOCUMENT_STATUS_LABELS: Record<string, string> = {
+  ready: "可以完成",
+  waiting_input: "等待补充信息",
+  waiting_dependency: "等待上游单据",
+  waiting_inventory: "等待模拟库存",
+  completed: "已完成",
+  needs_review: "需要复核",
+};
+
+const PARALLEL_DOCUMENT_FIELD_LABELS: Record<string, string> = {
+  supplier_id: "供应商",
+  unit_price: "采购单价",
+  unit_cost: "入库单价",
+  planned_arrival_date: "预计到货日期",
+  arrival_date: "实际到货日期",
+  actual_qty: "实际数量",
+  receipt_date: "入库日期",
+  batch_no: "批次号",
+  warehouse_id: "仓库",
+};
+
 function ParallelLedgerModule({
   snapshot,
   actorId,
@@ -14579,8 +14612,10 @@ function ParallelLedgerModule({
   const [selectedId, setSelectedId] = useState<string>("");
   const [showCreate, setShowCreate] = useState(false);
   const [showAdjust, setShowAdjust] = useState(false);
-  const [subTab, setSubTab] = useState<"overview" | "adjust" | "impact" | "gap" | "diff" | "export" | "merge" | "members" | "compare" | "monitor">("overview");
+  const [subTab, setSubTab] = useState<"overview" | "adjust" | "documents" | "impact" | "gap" | "diff" | "export" | "merge" | "members" | "compare" | "monitor">("overview");
   const [compareTargetId, setCompareTargetId] = useState<string>("");
+  const [editingDocumentId, setEditingDocumentId] = useState<string>("");
+  const [documentForm, setDocumentForm] = useState<Record<string, string>>({});
   const [memberForm, setMemberForm] = useState({ user_id: "", member_role: "calculator" });
   const [createForm, setCreateForm] = useState({ name: "", purpose: "经营数据测算", base_as_of: new Date().toISOString().slice(0, 10), scope_type: "company", scope_entity_id: "", merge_allowed: 1, seed_demo: false });
   const [adjustForm, setAdjustForm] = useState({
@@ -14605,6 +14640,7 @@ function ParallelLedgerModule({
   const impacts = parallel.impacts.filter((i) => String(i.run_id) === runId);
   const gaps = parallel.gaps.filter((g) => String(g.run_id) === runId);
   const suggestions = parallel.suggestions.filter((s) => String(s.ledger_id) === selectedId);
+  const simulationDocuments = parallel.simulationDocuments.filter((document) => String(document.ledger_id) === selectedId);
   const conflicts = parallel.mergeConflicts.filter((c) => !c.ledger_id || String(c.ledger_id) === selectedId);
   const ledgerMergeRequest = parallel.mergeRequests.find((m) => String(m.ledger_id) === selectedId) as Row | undefined;
   const mergeItems = ledgerMergeRequest ? parallel.mergeItems.filter((i) => String(i.merge_request_id) === String(ledgerMergeRequest.id)) : [];
@@ -14660,6 +14696,13 @@ function ParallelLedgerModule({
   const downloadExport = (type: string) => {
     if (!selectedId) return;
     window.location.href = `/api/export?actorId=${encodeURIComponent(actorId)}&type=${type}&entityId=${encodeURIComponent(selectedId)}&format=xlsx`;
+  };
+
+  const editSimulationDocument = (row: Row) => {
+    const payload = row.payload_json ? JSON.parse(String(row.payload_json)) as Record<string, unknown> : {};
+    const requiredFields = row.required_fields_json ? JSON.parse(String(row.required_fields_json)) as string[] : [];
+    setDocumentForm(Object.fromEntries(requiredFields.map((field) => [field, String(payload[field] ?? "")])));
+    setEditingDocumentId(String(row.id));
   };
 
   const loadingDemo = busy === "parallelLedgerCreate-parallel-primary";
@@ -14750,7 +14793,7 @@ function ParallelLedgerModule({
       </div>
 
       <div className="flex flex-wrap gap-2 border-b border-slate-200">
-        {([["overview", "总览"], ["adjust", "调整工作区"], ["impact", "影响分析"], ["gap", "缺口与建议"], ["diff", "差异对比"], ["export", "报表导出"], ["merge", "合并中心"], ["members", "成员权限"], ["compare", "方案对比"], ["monitor", "运维监控"]] as const).map(([key, label]) => (
+        {([["overview", "总览"], ["adjust", "调整工作区"], ["documents", "业务单据"], ["impact", "影响分析"], ["gap", "缺口与建议"], ["diff", "差异对比"], ["export", "报表导出"], ["merge", "合并中心"], ["members", "成员权限"], ["compare", "方案对比"], ["monitor", "运维监控"]] as const).map(([key, label]) => (
           <button key={key} type="button" onClick={() => setSubTab(key)} className={`border-b-2 px-3 py-2 text-sm font-medium ${subTab === key ? "border-blue-600 text-blue-700" : "border-transparent text-slate-500 hover:text-slate-700"}`}>{label}</button>
         ))}
       </div>
@@ -14815,6 +14858,62 @@ function ParallelLedgerModule({
             </div>
           )}
           <DataTable title="调整项" icon={Calculator} rows={ledgerAdjustments} columns={[{ key: "adjustment_no", label: "单号" }, { key: "adjustment_type", label: "类型" }, { key: "effective_at", label: "生效日期" }, { key: "reason", label: "原因" }, { key: "status", label: "状态" }, { key: "action", label: "操作", render: (_v, row) => <button type="button" disabled={busy?.startsWith("parallelLedger")} onClick={() => void runAction({ action: "parallelLedgerRemoveAdjustment", entityId: selectedId, payload: { adjustment_id: String(row.id) } })} className="rounded-md border border-rose-200 px-2 py-0.5 text-xs text-rose-700 hover:bg-rose-50">撤销</button> }]} empty="暂无调整项" />
+        </div>
+      ) : null}
+
+      {subTab === "documents" ? (
+        <div className="space-y-4">
+          <div className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <h3 className="text-sm font-semibold text-slate-900">历史业务单据链</h3>
+                <p className="mt-1 text-xs text-slate-500">系统按业务顺序自动生成正常单据。上游未完成、信息不完整或模拟库存不足时，后续单据不会强行完成。</p>
+              </div>
+              <div className="rounded-md bg-blue-50 px-3 py-2 text-xs font-semibold text-blue-700">
+                已完成 {simulationDocuments.filter((row) => String(row.status) === "completed").length} / {simulationDocuments.length}
+              </div>
+            </div>
+          </div>
+
+          {editingDocumentId ? (() => {
+            const editing = simulationDocuments.find((row) => String(row.id) === editingDocumentId);
+            if (!editing) return null;
+            const requiredFields = editing.required_fields_json ? JSON.parse(String(editing.required_fields_json)) as string[] : [];
+            return (
+              <div className="rounded-lg border border-blue-200 bg-blue-50/40 p-4 shadow-sm">
+                <h3 className="text-sm font-semibold text-slate-900">完善 {String(editing.document_no)} · {PARALLEL_DOCUMENT_LABELS[String(editing.document_type)] ?? String(editing.document_type)}</h3>
+                <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-3">
+                  {requiredFields.map((field) => {
+                    const isNumber = ["unit_price", "unit_cost", "actual_qty"].includes(field);
+                    const isDate = field.endsWith("_date");
+                    return <label key={field} className="text-sm text-slate-600">{PARALLEL_DOCUMENT_FIELD_LABELS[field] ?? field}<input type={isNumber ? "number" : isDate ? "date" : "text"} min={isNumber ? "0" : undefined} step={isNumber ? "0.001" : undefined} value={documentForm[field] ?? ""} onChange={(event) => setDocumentForm({ ...documentForm, [field]: event.target.value })} className="mt-1 block h-9 w-full rounded-md border border-slate-200 bg-white px-3 text-sm" /></label>;
+                  })}
+                </div>
+                <div className="mt-3 flex gap-2">
+                  <button type="button" disabled={busy?.startsWith("parallelLedger")} onClick={() => { const fields = Object.fromEntries(Object.entries(documentForm).map(([field, value]) => [field, ["unit_price", "unit_cost", "actual_qty"].includes(field) && value !== "" ? Number(value) : value])); void runAction({ action: "parallelLedgerUpdateSimulationDocument", entityId: editingDocumentId, payload: { ledger_id: selectedId, fields } }); setEditingDocumentId(""); }} className="h-9 rounded-md bg-blue-600 px-4 text-sm font-semibold text-white disabled:opacity-50">保存信息</button>
+                  <button type="button" onClick={() => setEditingDocumentId("")} className="h-9 rounded-md border border-slate-200 bg-white px-4 text-sm font-semibold text-slate-600">取消</button>
+                </div>
+              </div>
+            );
+          })() : null}
+
+          <DataTable
+            title="业务单据"
+            icon={FileCheck2}
+            rows={simulationDocuments}
+            columns={[
+              { key: "sequence_no", label: "顺序" },
+              { key: "document_no", label: "单据编号" },
+              { key: "document_type", label: "单据类型", render: (value) => PARALLEL_DOCUMENT_LABELS[String(value)] ?? String(value) },
+              { key: "business_date", label: "业务日期" },
+              { key: "title", label: "业务内容" },
+              { key: "status", label: "状态", render: (value) => PARALLEL_DOCUMENT_STATUS_LABELS[String(value)] ?? String(value) },
+              { key: "blocking_reason", label: "待办/阻断", render: (value) => value ? String(value) : "—" },
+              { key: "action", label: "操作", render: (_value, row) => <div className="flex gap-1">{String(row.status) === "waiting_input" ? <button type="button" onClick={() => editSimulationDocument(row)} className="rounded-md border border-blue-200 px-2 py-0.5 text-xs font-semibold text-blue-700">补充信息</button> : null}{String(row.status) === "ready" ? <button type="button" disabled={busy?.startsWith("parallelLedger")} onClick={() => void runAction({ action: "parallelLedgerCompleteSimulationDocument", entityId: String(row.id), payload: { ledger_id: selectedId } })} className="rounded-md border border-emerald-200 px-2 py-0.5 text-xs font-semibold text-emerald-700 disabled:opacity-50">完成</button> : null}</div> },
+            ]}
+            empty="重新测算后，系统将在这里生成受影响的历史业务单据。"
+          />
+          {simulationDocuments.some((row) => String(row.document_type) === "purchase_receipt" && String(row.status) === "completed") && status === "draft" ? <EmptyText text="模拟入库已经形成平行采购数量，请点击页面上方“重新测算”，系统将刷新库存、补料和成本单据状态。" /> : null}
         </div>
       ) : null}
 

@@ -1,5 +1,5 @@
 import type Database from "better-sqlite3";
-import { audit, getUser, now, serial, uid } from "./erp-service";
+import { audit, getUser, now, uid } from "./erp-service";
 import { addParallelAdjustment, requireParallelPermission } from "./parallel-ledger-service";
 
 export type ParallelSimulationDocumentType =
@@ -56,6 +56,13 @@ const DOCUMENT_PREFIX: Record<ParallelSimulationDocumentType, string> = {
   material_supplement: "BL",
   production_cost_adjustment: "CB",
 };
+
+function simulationDocumentNo(database: Database.Database, documentType: ParallelSimulationDocumentType, businessDate: string) {
+  const prefix = DOCUMENT_PREFIX[documentType];
+  const dateKey = businessDate.slice(0, 10).replaceAll("-", "");
+  const count = (database.prepare("SELECT COUNT(*) AS count FROM parallel_simulation_documents WHERE document_type = ? AND business_date = ?").get(documentType, businessDate) as { count: number }).count;
+  return `${prefix}-${dateKey}-${String(count + 1).padStart(3, "0")}`;
+}
 
 const EDITABLE_FIELDS: Record<ParallelSimulationDocumentType, ReadonlySet<string>> = {
   bom_change: new Set(["effective_date", "version", "remark"]),
@@ -171,9 +178,10 @@ export function syncParallelSimulationDocuments(
   for (const existing of existingRows) {
     if (activeKeys.has(existing.generation_key)) continue;
     if (existing.status === "completed") {
-      database
-        .prepare("UPDATE parallel_simulation_documents SET status = 'needs_review', blocking_reason = '重新计算后该业务条件已变化，请复核。', updated_at = ? WHERE id = ?")
-        .run(timestamp, existing.id);
+      // Completed documents are part of the simulated history. A downstream
+      // receipt can legitimately remove the original shortage on recalculation,
+      // but that must not make the completed purchasing chain disappear.
+      database.prepare("UPDATE parallel_simulation_documents SET is_active = 1, updated_at = ? WHERE id = ?").run(timestamp, existing.id);
     } else {
       database.prepare("UPDATE parallel_simulation_documents SET is_active = 0, updated_at = ? WHERE id = ?").run(timestamp, existing.id);
     }
@@ -229,7 +237,7 @@ export function syncParallelSimulationDocuments(
       runId,
       spec.generationKey,
       spec.documentType,
-      serial(database, "parallel_simulation_documents", DOCUMENT_PREFIX[spec.documentType]),
+      simulationDocumentNo(database, spec.documentType, spec.businessDate),
       spec.businessDate,
       spec.sequenceNo,
       JSON.stringify(spec.dependencyKeys ?? []),

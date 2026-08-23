@@ -479,7 +479,7 @@ function buildSimulationDocumentSpecs(
             material_name: targetName,
             purchase_arrival_key: arrivalKey,
           },
-          requiredFields: ["receipt_date", "actual_qty", "batch_no", "warehouse_id"],
+          requiredFields: ["receipt_date", "actual_qty", "batch_no", "warehouse_id", "unit_cost"],
           sourceAdjustmentId: result.adjustmentId,
         },
       );

@@ -112,6 +112,7 @@ describe("平行账套原生历史业务单据链", () => {
       "production_cost_adjustment",
     ]);
     expect(rows.every((row) => row.document_no.length > 0)).toBe(true);
+    expect(rows.every((row) => row.document_no.includes("20260610"))).toBe(true);
     expect(rows.every((row) => !/补录|纠错/.test(row.title))).toBe(true);
 
     const purchaseOrder = rows.find((row) => row.document_type === "purchase_order");
