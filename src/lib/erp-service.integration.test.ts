@@ -3737,6 +3737,88 @@ describe("ERP service formal stocktake and inventory adjustment", () => {
 });
 
 describe("ERP service formal sales entry", () => {
+  it("prices every level of a multilevel BOM and recalculates only draft quotes with an auditable cost snapshot", async () => {
+    const service = await loadService();
+
+    service.importMasterDataRows({
+      actorId: "U-ADMIN",
+      type: "materials",
+      rows: [
+        { material_code: "Q-RM-A", name: "报价主材A", unit: "kg" },
+        { material_code: "Q-AUX", name: "报价涂层", unit: "L" },
+        { material_code: "Q-PKG", name: "报价包装", unit: "套" },
+      ],
+    });
+    service.importMasterDataRows({
+      actorId: "U-ADMIN",
+      type: "products",
+      rows: [
+        { product_code: "Q-SF", name: "报价半成品", unit: "件", process_fee: 0, default_margin: 0.25 },
+        { product_code: "Q-FG", name: "报价成品", unit: "件", process_fee: 50, default_margin: 0.25 },
+      ],
+    });
+    service.importMasterDataRows({
+      actorId: "U-ADMIN",
+      type: "boms",
+      rows: [
+        { product_code: "Q-SF", parent_product_code: "Q-SF", component_type: "material", component_code: "Q-RM-A", qty_per: 2, is_primary: 1, version: "V1.0" },
+        { product_code: "Q-SF", parent_product_code: "Q-SF", component_type: "material", component_code: "Q-AUX", qty_per: 0.05, version: "V1.0" },
+        { product_code: "Q-FG", parent_product_code: "Q-FG", component_type: "product", component_code: "Q-SF", qty_per: 1, version: "V1.0" },
+        { product_code: "Q-FG", parent_product_code: "Q-FG", component_type: "material", component_code: "Q-PKG", qty_per: 1, version: "V1.0" },
+      ],
+    });
+    service.importOpeningDataRows({
+      actorId: "U-ADMIN",
+      type: "opening-inventory",
+      rows: [
+        { material_code: "Q-RM-A", batch_no: "Q-RMA-OPEN", qty: 150, unit_cost: 10, received_at: "2026-08-01" },
+        { material_code: "Q-AUX", batch_no: "Q-AUX-OPEN", qty: 20, unit_cost: 30, received_at: "2026-08-01" },
+        { material_code: "Q-PKG", batch_no: "Q-PKG-OPEN", qty: 80, unit_cost: 2.5, received_at: "2026-08-01" },
+      ],
+    });
+
+    let snapshot = service.getSnapshot("U-ADMIN");
+    const customer = snapshot.board.customers.find((item) => item.status === "active");
+    const product = snapshot.board.products.find((item) => item.product_code === "Q-FG");
+    service.performAction({
+      actorId: "U-ADMIN",
+      action: "createQuote",
+      payload: { customer_id: customer?.id, product_id: product?.id, qty: "100", margin_rate: "0.25" },
+    });
+
+    snapshot = service.getSnapshot("U-ADMIN");
+    let quote = snapshot.board.quotes.find((item) => item.product_id === product?.id) as Record<string, unknown>;
+    expect(quote).toMatchObject({ material_cost: 2400, process_fee: 5000, total_amount: 9250, status: "draft" });
+    expect(JSON.parse(String(quote.cost_breakdown_json))).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ materialCode: "Q-RM-A", requiredQty: 200, unitCost: 10, lineAmount: 2000 }),
+        expect.objectContaining({ materialCode: "Q-AUX", requiredQty: 5, unitCost: 30, lineAmount: 150 }),
+        expect.objectContaining({ materialCode: "Q-PKG", requiredQty: 100, unitCost: 2.5, lineAmount: 250 }),
+      ]),
+    );
+
+    service.importOpeningDataRows({
+      actorId: "U-ADMIN",
+      type: "opening-inventory",
+      rows: [{ material_code: "Q-RM-A", batch_no: "Q-RMA-NEW", qty: 150, unit_cost: 20, received_at: "2026-08-02" }],
+    });
+    service.performAction({ actorId: "U-ADMIN", action: "recalculateQuote", entityId: String(quote.id) });
+
+    snapshot = service.getSnapshot("U-ADMIN");
+    quote = snapshot.board.quotes.find((item) => item.id === quote.id) as Record<string, unknown>;
+    expect(quote).toMatchObject({ material_cost: 3400, process_fee: 5000, total_amount: 10500, status: "draft" });
+    expect(snapshot.board.auditLogs).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ entity_id: quote.id, action: "recalculateQuote", message: expect.stringContaining("重新计算") }),
+      ]),
+    );
+
+    service.performAction({ actorId: "U-ADMIN", action: "confirmQuote", entityId: String(quote.id) });
+    expect(() =>
+      service.performAction({ actorId: "U-ADMIN", action: "recalculateQuote", entityId: String(quote.id) }),
+    ).toThrow("只有草稿报价可以重新计算");
+  });
+
   it("creates a quote from active master data and converts it into a formal order", async () => {
     const service = await loadService();
     const before = service.getSnapshot("U-SALES");
