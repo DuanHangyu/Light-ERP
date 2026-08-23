@@ -50,6 +50,7 @@ export type NavigationGroup = {
 
 export type NavigationAccess = {
   hasParallelAccess?: boolean;
+  canCreateParallelLedger?: boolean;
 };
 
 const navigationGroups: Array<{ key: NavigationGroupKey; label: string }> = [
@@ -229,7 +230,8 @@ function knownRole(role: string): ErpRole | undefined {
 export function flatNavigationForRole(role: string, access: NavigationAccess = {}): NavigationItem[] {
   const normalizedRole = knownRole(role);
   const baseKeys = normalizedRole ? roleModules[normalizedRole] : ["workbench" as const];
-  const keys = access.hasParallelAccess && !baseKeys.includes("parallel")
+  const canOpenParallelWorkspace = access.hasParallelAccess || access.canCreateParallelLedger;
+  const keys = canOpenParallelWorkspace && !baseKeys.includes("parallel")
     ? [...baseKeys, "parallel" as const]
     : baseKeys;
   return keys.map((key) => moduleCatalog[key]);

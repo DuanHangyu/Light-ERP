@@ -820,14 +820,15 @@ export function ErpApp() {
   const currentUser = snapshot?.currentUser;
   const CurrentIcon = currentUser ? roleIcon[currentUser.role] ?? LogIn : LogIn;
   const hasParallelAccess = Boolean(snapshot?.parallel.ledgers.length);
+  const canCreateParallelLedger = Boolean(snapshot?.security.currentPermissions.includes("parallelLedgerCreate"));
   const navigationGroups = useMemo(
-    () => navigationForRole(currentUser?.role ?? "", { hasParallelAccess }),
-    [currentUser?.role, hasParallelAccess],
+    () => navigationForRole(currentUser?.role ?? "", { hasParallelAccess, canCreateParallelLedger }),
+    [currentUser?.role, hasParallelAccess, canCreateParallelLedger],
   );
 
   const openModule = (module: ModuleKey) => {
     const role = currentUser?.role ?? "";
-    setActiveModule(resolveAccessibleModule(role, module, { hasParallelAccess }));
+    setActiveModule(resolveAccessibleModule(role, module, { hasParallelAccess, canCreateParallelLedger }));
   };
 
   const load = async (nextActorId = actorId) => {
@@ -849,6 +850,7 @@ export function ErpApp() {
     setActiveModule((current) =>
       resolveAccessibleModule(data.currentUser.role, current, {
         hasParallelAccess: data.parallel.ledgers.length > 0,
+        canCreateParallelLedger: data.security.currentPermissions.includes("parallelLedgerCreate"),
       }),
     );
     setMessage("数据已同步");
