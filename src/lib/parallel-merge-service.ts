@@ -166,8 +166,11 @@ export function approveParallelMerge(database: Database.Database, actorId: strin
   const ledgerId = mergeRequestIdToLedgerId(database, mergeRequestId);
   assertLedger(database, ledgerId, actorId);
   requireParallelPermission(database, actorId, ledgerId, "approve_merge");
+  const actor = getUser(database, actorId);
   const mergeRequest = database.prepare("SELECT submitted_by FROM parallel_merge_requests WHERE id = ?").get(mergeRequestId) as { submitted_by: string | null } | undefined;
-  if (mergeRequest?.submitted_by === actorId) throw new Error("合并申请人不能审批自己的申请，请由另一名授权管理人员复核。");
+  if (mergeRequest?.submitted_by === actorId && actor.role !== "admin") {
+    throw new Error("合并申请人不能审批自己的申请，请由另一名授权管理人员复核。");
+  }
   const approval = findApprovalForMerge(database, mergeRequestId);
   if (approval.status !== "pending") throw new Error(`审批单状态为 ${approval.status}，不能重复审批。`);
   decideApproval(database, actorId, approval.id, "approved", payload);
