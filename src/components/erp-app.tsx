@@ -1966,16 +1966,27 @@ function SalesWorkspace({
                 label: "下一步",
                 render: (_value, row) =>
                   row.status === "draft" && snapshot.security.currentPermissions.includes("confirmQuote") ? (
-                    <InlineActionButton
-                      label="确认报价"
-                      busy={busy === `confirmQuote-${String(row.id)}-primary`}
-                      onClick={() => void runAction({ action: "confirmQuote", entityId: String(row.id) })}
-                    />
+                    <div className="flex gap-2">
+                      <InlineActionButton
+                        label="重新计算"
+                        busy={busy === `recalculateQuote-${String(row.id)}-primary`}
+                        onClick={() => void runAction({ action: "recalculateQuote", entityId: String(row.id) })}
+                      />
+                      <InlineActionButton
+                        label="确认报价"
+                        busy={busy === `confirmQuote-${String(row.id)}-primary`}
+                        onClick={() => void runAction({ action: "confirmQuote", entityId: String(row.id) })}
+                      />
+                    </div>
                   ) : (
                     <InlineActionButton label="补充订单信息" onClick={() => setTab("full")} />
                   ),
               },
-              { key: "detail", label: "详情", render: (_value, row) => <DetailButton onClick={() => openDetail(compactRowDetail("报价单详情", row))} /> },
+              {
+                key: "detail",
+                label: "详情",
+                render: (_value, row) => <DetailButton onClick={() => openDetail(quoteDetail(snapshot, row))} />,
+              },
             ]}
           />
           <div className="grid gap-5 xl:grid-cols-2">
@@ -5498,11 +5509,18 @@ function SalesModule({
                 if (!canSell) return <span className="text-xs text-slate-400">-</span>;
                 if (row.status === "draft") {
                   return (
-                    <InlineActionButton
-                      label="确认"
-                      busy={busy === `confirmQuote-${String(row.id)}-primary`}
-                      onClick={() => void runAction({ action: "confirmQuote", entityId: String(row.id) })}
-                    />
+                    <div className="flex gap-2">
+                      <InlineActionButton
+                        label="重新计算"
+                        busy={busy === `recalculateQuote-${String(row.id)}-primary`}
+                        onClick={() => void runAction({ action: "recalculateQuote", entityId: String(row.id) })}
+                      />
+                      <InlineActionButton
+                        label="确认"
+                        busy={busy === `confirmQuote-${String(row.id)}-primary`}
+                        onClick={() => void runAction({ action: "confirmQuote", entityId: String(row.id) })}
+                      />
+                    </div>
                   );
                 }
                 if (row.status === "confirmed") {
@@ -5539,21 +5557,7 @@ function SalesModule({
               label: "详情",
               render: (_value, row) => (
                 <DetailButton
-                  onClick={() =>
-                    openDetail(
-                      makeDetail("报价单详情", String(row.quote_no), row, [
-                        ["客户", "customer_name"],
-                        ["产品", "product_name"],
-                        ["数量", "qty"],
-                        ["材料成本", "material_cost", formatCurrency],
-                        ["加工费", "process_fee", formatCurrency],
-                        ["利润率", "margin_rate", percentValue],
-                        ["报价金额", "total_amount", formatCurrency],
-                        ["状态", "status_label"],
-                        ["创建时间", "created_at", shortDate],
-                      ]),
-                    )
-                  }
+                  onClick={() => openDetail(quoteDetail(snapshot, row))}
                 />
               ),
             },
@@ -13332,6 +13336,24 @@ function detailLines(value: unknown): Row[] {
   }
 }
 
+function quoteDetail(snapshot: Snapshot, row: Row): DetailState {
+  return {
+    ...makeDetail("报价单详情", String(row.quote_no), row, [
+      ["客户", "customer_name"],
+      ["产品", "product_name"],
+      ["数量", "qty"],
+      ["材料成本", "material_cost", formatCurrency],
+      ["加工费", "process_fee", formatCurrency],
+      ["利润率", "margin_rate", percentValue],
+      ["报价金额", "total_amount", formatCurrency],
+      ["状态", "status_label"],
+      ["创建时间", "created_at", shortDate],
+    ]),
+    lines: detailLines(row.cost_breakdown_json),
+    audits: auditRows(snapshot, row.id),
+  };
+}
+
 function auditRows(snapshot: Snapshot, entityId: unknown) {
   return snapshot.board.auditLogs.filter((log) => String(log.entity_id) === String(entityId));
 }
@@ -13635,6 +13657,7 @@ function DetailModal({ detail, onClose }: { detail: DetailState | null; onClose:
 
 function preferredLineKeys(lines: Row[]) {
   const preferred = [
+    "materialCode",
     "materialName",
     "qty",
     "unit",
@@ -13698,6 +13721,7 @@ function detailColumnLabel(key: string) {
     status_label: "当前状态",
     remark: "备注",
     materialName: "物料",
+    materialCode: "物料编码",
     qty: "数量",
     unit: "单位",
     averageCost: "当前均价",

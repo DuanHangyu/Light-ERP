@@ -3787,7 +3787,9 @@ describe("ERP service formal sales entry", () => {
     });
 
     snapshot = service.getSnapshot("U-ADMIN");
-    let quote = snapshot.board.quotes.find((item) => item.product_id === product?.id) as Record<string, unknown>;
+    let quote = (snapshot.board.quotes as unknown as Array<Record<string, unknown>>).find(
+      (item) => item.product_id === product?.id,
+    ) as Record<string, unknown>;
     expect(quote).toMatchObject({ material_cost: 2400, process_fee: 5000, total_amount: 9250, status: "draft" });
     expect(JSON.parse(String(quote.cost_breakdown_json))).toEqual(
       expect.arrayContaining([
@@ -3805,7 +3807,9 @@ describe("ERP service formal sales entry", () => {
     service.performAction({ actorId: "U-ADMIN", action: "recalculateQuote", entityId: String(quote.id) });
 
     snapshot = service.getSnapshot("U-ADMIN");
-    quote = snapshot.board.quotes.find((item) => item.id === quote.id) as Record<string, unknown>;
+    quote = (snapshot.board.quotes as unknown as Array<Record<string, unknown>>).find(
+      (item) => item.id === quote.id,
+    ) as Record<string, unknown>;
     expect(quote).toMatchObject({ material_cost: 3400, process_fee: 5000, total_amount: 10500, status: "draft" });
     expect(snapshot.board.auditLogs).toEqual(
       expect.arrayContaining([
