@@ -1373,6 +1373,33 @@ function applySchema(database: Database.Database) {
       remark TEXT NOT NULL DEFAULT ''
     );
 
+    CREATE TABLE IF NOT EXISTS parallel_simulation_documents (
+      id TEXT PRIMARY KEY,
+      ledger_id TEXT NOT NULL REFERENCES parallel_ledgers(id),
+      run_id TEXT REFERENCES parallel_calculation_runs(id),
+      generation_key TEXT NOT NULL,
+      document_type TEXT NOT NULL,
+      document_no TEXT NOT NULL,
+      business_date TEXT NOT NULL,
+      sequence_no INTEGER NOT NULL,
+      dependency_keys_json TEXT NOT NULL DEFAULT '[]',
+      status TEXT NOT NULL DEFAULT 'ready',
+      title TEXT NOT NULL,
+      payload_json TEXT NOT NULL DEFAULT '{}',
+      required_fields_json TEXT NOT NULL DEFAULT '[]',
+      missing_fields_json TEXT NOT NULL DEFAULT '[]',
+      blocking_reason TEXT NOT NULL DEFAULT '',
+      source_adjustment_id TEXT REFERENCES parallel_adjustments(id),
+      source_suggestion_id TEXT,
+      generated_by_engine INTEGER NOT NULL DEFAULT 1,
+      is_active INTEGER NOT NULL DEFAULT 1,
+      completed_by TEXT REFERENCES users(id),
+      completed_at TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE (ledger_id, generation_key)
+    );
+
     CREATE TABLE IF NOT EXISTS parallel_calculation_runs (
       id TEXT PRIMARY KEY,
       ledger_id TEXT NOT NULL REFERENCES parallel_ledgers(id),
@@ -1699,6 +1726,12 @@ function applySchema(database: Database.Database) {
   ensureColumn(database, "parallel_ledger_members", "can_admin", "INTEGER NOT NULL DEFAULT 0");
   ensureColumn(database, "parallel_ledgers", "last_merge_preview_json", "TEXT NOT NULL DEFAULT '{}'");
   ensureColumn(database, "parallel_ledgers", "last_merge_preview_at", "TEXT");
+  database.exec(`
+    CREATE INDEX IF NOT EXISTS idx_parallel_simulation_documents_ledger
+      ON parallel_simulation_documents(ledger_id, is_active, sequence_no);
+    CREATE INDEX IF NOT EXISTS idx_parallel_simulation_documents_run
+      ON parallel_simulation_documents(run_id);
+  `);
   backfillInventoryMovementDates(database);
 }
 

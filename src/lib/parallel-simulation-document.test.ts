@@ -36,7 +36,8 @@ describe("平行账套原生历史业务单据链", () => {
   let database: ReturnType<typeof getDb>;
   let ledgerId: string;
   let adminId: string;
-  const baseAsOf = "2026-06-10";
+  const baseAsOf = new Date().toISOString().slice(0, 10);
+  const businessDate = "2026-06-10";
 
   beforeAll(() => {
     freshDataDir();
@@ -52,7 +53,7 @@ describe("平行账套原生历史业务单据链", () => {
         'REQ-PAL-HISTORY', 'LL-20260608-001', 'PO-PAL-DEMO', 'BOM-PAL-DEMO', '1',
         '正常历史领料', 'issued', ?, 'CK-20260608-001', ?, ?
       )
-    `).run(`${baseAsOf}T08:00:00.000Z`, adminId, `${baseAsOf}T09:00:00.000Z`);
+    `).run(`${businessDate}T08:00:00.000Z`, adminId, `${businessDate}T09:00:00.000Z`);
     database.prepare(`
       INSERT INTO requisition_lines (
         id, requisition_id, material_id, required_qty, issued_qty, is_primary, status
@@ -74,7 +75,7 @@ describe("平行账套原生历史业务单据链", () => {
 
     addParallelAdjustment(database, adminId, ledgerId, {
       adjustment_type: "material_substitute",
-      effective_at: baseAsOf,
+      effective_at: businessDate,
       reason: "工单原料A替换为原料B 2吨",
       reference_type: "production_order",
       reference_id: "PO-PAL-DEMO",
@@ -166,4 +167,3 @@ describe("平行账套原生历史业务单据链", () => {
     expect(buildParallelSnapshotData(database, "U-SALES").simulationDocuments).toEqual([]);
   });
 });
-

@@ -30,6 +30,7 @@ import { createParallelLedger, freezeParallelLedger, unfreezeParallelLedger, arc
 import { runParallelCalculation } from "./parallel-calculation-engine";
 import { confirmParallelSuggestion, previewParallelMerge } from "./parallel-impact-service";
 import { submitParallelMerge, approveParallelMerge, rejectParallelMerge, publishParallelMerge, resumeParallelMergeExecution } from "./parallel-merge-service";
+import { completeParallelSimulationDocument, updateParallelSimulationDocument } from "./parallel-simulation-document-service";
 import { authorizeErpSnapshot } from "./erp-access-control";
 import { requireReportExportPermission } from "./erp-report-access";
 
@@ -259,6 +260,8 @@ const roleActionMap: Record<string, Role[]> = {
   parallelLedgerRemoveAdjustment: ["manager", "admin", "finance"],
   parallelLedgerRecalculate: ["manager", "admin", "finance"],
   parallelLedgerConfirmSuggestion: ["manager", "admin", "finance"],
+  parallelLedgerUpdateSimulationDocument: ["manager", "admin", "finance"],
+  parallelLedgerCompleteSimulationDocument: ["manager", "admin", "finance"],
   parallelLedgerMergePreview: ["manager", "admin", "finance"],
   parallelLedgerSubmitMerge: ["manager", "admin", "finance"],
   parallelLedgerApproveMerge: ["manager", "admin"],
@@ -371,6 +374,8 @@ const actionLabels: Record<string, string> = {
   parallelLedgerRemoveAdjustment: "撤销平行账套调整",
   parallelLedgerRecalculate: "执行平行账套测算",
   parallelLedgerConfirmSuggestion: "确认平行账套缺口建议",
+  parallelLedgerUpdateSimulationDocument: "完善平行账套业务单据",
+  parallelLedgerCompleteSimulationDocument: "完成平行账套业务单据",
   parallelLedgerMergePreview: "预览平行账套发布影响",
   parallelLedgerSubmitMerge: "提交平行账套发布审批",
   parallelLedgerApproveMerge: "审批平行账套发布",
@@ -6908,6 +6913,23 @@ export function performAction(input: ActionInput) {
       case "parallelLedgerConfirmSuggestion":
         confirmParallelSuggestion(database, input.actorId, mustEntity(input.entityId), input.payload ?? {});
         break;
+      case "parallelLedgerUpdateSimulationDocument":
+        updateParallelSimulationDocument(
+          database,
+          input.actorId,
+          mustLedgerFromPayload(input.payload),
+          mustEntity(input.entityId),
+          (input.payload?.fields as Record<string, unknown> | undefined) ?? {},
+        );
+        break;
+      case "parallelLedgerCompleteSimulationDocument":
+        completeParallelSimulationDocument(
+          database,
+          input.actorId,
+          mustLedgerFromPayload(input.payload),
+          mustEntity(input.entityId),
+        );
+        break;
       case "parallelLedgerMergePreview":
         previewParallelMerge(database, input.actorId, mustEntity(input.entityId));
         break;
@@ -6940,6 +6962,12 @@ function mustEntity(entityId?: string) {
 function mustEntityFromPayload(payload?: Record<string, unknown>) {
   const value = payload?.adjustment_id ?? payload?.entity_id;
   if (!value || typeof value !== "string") throw new Error("缺少调整项编号。");
+  return value;
+}
+
+function mustLedgerFromPayload(payload?: Record<string, unknown>) {
+  const value = payload?.ledger_id;
+  if (!value || typeof value !== "string") throw new Error("缺少平行账套编号。");
   return value;
 }
 

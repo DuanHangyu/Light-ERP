@@ -24,6 +24,10 @@ import {
   type ParallelAdjustmentLineRow,
   type ParallelAdjustmentRow,
 } from "./parallel-ledger-types";
+import {
+  syncParallelSimulationDocuments,
+  type ParallelSimulationDocumentSpec,
+} from "./parallel-simulation-document-service";
 
 type NumberRow = Record<string, unknown>;
 
@@ -366,6 +370,192 @@ type GapResult = {
   lineAmount: number;
 };
 
+function buildSimulationDocumentSpecs(
+  adjustments: ParallelAdjustmentRow[],
+  substitutionResults: MaterialSubstitutionResult[],
+  gapByMaterial: Map<string, GapResult>,
+  costResults: CostResult[],
+  model: AdjustedModel,
+): ParallelSimulationDocumentSpec[] {
+  const adjustmentById = new Map(adjustments.map((adjustment) => [adjustment.id, adjustment]));
+  const specs: ParallelSimulationDocumentSpec[] = [];
+
+  substitutionResults.forEach((result, index) => {
+    const adjustment = adjustmentById.get(result.adjustmentId);
+    const businessDate = adjustment?.effective_at ?? new Date().toISOString().slice(0, 10);
+    const baseSequence = index * 100;
+    const sourceMaterial = model.materials.get(result.sourceMaterialId);
+    const targetMaterial = model.materials.get(result.targetMaterialId);
+    const sourceName = str(sourceMaterial, "name", result.sourceMaterialId);
+    const targetName = str(targetMaterial, "name", result.targetMaterialId);
+    const key = (documentType: string) => `${result.adjustmentId}:${result.productionOrderId}:${result.targetMaterialId}:${documentType}`;
+    const bomKey = key("bom_change");
+
+    specs.push({
+      generationKey: bomKey,
+      documentType: "bom_change",
+      businessDate,
+      sequenceNo: baseSequence + 10,
+      title: `${targetName}配方变更单`,
+      payload: {
+        production_order_id: result.productionOrderId,
+        product_id: result.productId,
+        source_material_id: result.sourceMaterialId,
+        source_material_name: sourceName,
+        target_material_id: result.targetMaterialId,
+        target_material_name: targetName,
+        substitute_qty: result.substituteQty,
+        effective_date: businessDate,
+      },
+      sourceAdjustmentId: result.adjustmentId,
+    });
+
+    const gap = gapByMaterial.get(result.targetMaterialId);
+    let receiptKey: string | null = null;
+    if (gap && gap.shortageQty > 0) {
+      const requisitionKey = key("purchase_requisition");
+      const orderKey = key("purchase_order");
+      const arrivalKey = key("purchase_arrival");
+      receiptKey = key("purchase_receipt");
+      specs.push(
+        {
+          generationKey: requisitionKey,
+          documentType: "purchase_requisition",
+          businessDate,
+          sequenceNo: baseSequence + 20,
+          dependencyKeys: [bomKey],
+          title: `${targetName}采购申请`,
+          payload: {
+            material_id: result.targetMaterialId,
+            material_name: targetName,
+            quantity: gap.projectedPurchaseQty,
+            estimated_unit_cost: gap.projectedUnitCost,
+            amount: gap.lineAmount,
+            required_date: businessDate,
+            production_order_id: result.productionOrderId,
+          },
+          sourceAdjustmentId: result.adjustmentId,
+        },
+        {
+          generationKey: orderKey,
+          documentType: "purchase_order",
+          businessDate,
+          sequenceNo: baseSequence + 30,
+          dependencyKeys: [requisitionKey],
+          title: `${targetName}采购订单`,
+          payload: {
+            material_id: result.targetMaterialId,
+            material_name: targetName,
+            quantity: gap.projectedPurchaseQty,
+            purchase_requisition_key: requisitionKey,
+          },
+          requiredFields: ["supplier_id", "unit_price", "planned_arrival_date"],
+          sourceAdjustmentId: result.adjustmentId,
+        },
+        {
+          generationKey: arrivalKey,
+          documentType: "purchase_arrival",
+          businessDate,
+          sequenceNo: baseSequence + 40,
+          dependencyKeys: [orderKey],
+          title: `${targetName}采购到货单`,
+          payload: {
+            material_id: result.targetMaterialId,
+            material_name: targetName,
+            purchase_order_key: orderKey,
+          },
+          requiredFields: ["arrival_date", "actual_qty"],
+          sourceAdjustmentId: result.adjustmentId,
+        },
+        {
+          generationKey: receiptKey,
+          documentType: "purchase_receipt",
+          businessDate,
+          sequenceNo: baseSequence + 50,
+          dependencyKeys: [arrivalKey],
+          title: `${targetName}采购入库单`,
+          payload: {
+            material_id: result.targetMaterialId,
+            material_name: targetName,
+            purchase_arrival_key: arrivalKey,
+          },
+          requiredFields: ["receipt_date", "actual_qty", "batch_no", "warehouse_id"],
+          sourceAdjustmentId: result.adjustmentId,
+        },
+      );
+    }
+
+    const returnQty = roundQty(Math.max(0, result.issuedSourceQty - result.sourceRequiredAfter));
+    const returnKey = key("material_return");
+    if (returnQty > 0) {
+      specs.push({
+        generationKey: returnKey,
+        documentType: "material_return",
+        businessDate,
+        sequenceNo: baseSequence + 60,
+        dependencyKeys: [bomKey],
+        title: `${sourceName}生产退料单`,
+        payload: {
+          production_order_id: result.productionOrderId,
+          requisition_ids: result.requisitionIds,
+          material_id: result.sourceMaterialId,
+          material_name: sourceName,
+          quantity: returnQty,
+          business_date: businessDate,
+        },
+        sourceAdjustmentId: result.adjustmentId,
+      });
+    }
+
+    const supplementQty = roundQty(Math.max(0, result.targetRequiredAfter - result.issuedTargetQty));
+    const supplementKey = key("material_supplement");
+    if (supplementQty > 0) {
+      specs.push({
+        generationKey: supplementKey,
+        documentType: "material_supplement",
+        businessDate,
+        sequenceNo: baseSequence + 70,
+        dependencyKeys: receiptKey ? [bomKey, receiptKey] : [bomKey],
+        title: `${targetName}生产补料单`,
+        payload: {
+          production_order_id: result.productionOrderId,
+          requisition_ids: result.requisitionIds,
+          material_id: result.targetMaterialId,
+          material_name: targetName,
+          quantity: supplementQty,
+          business_date: businessDate,
+          inventory_sufficient: !gap,
+        },
+        sourceAdjustmentId: result.adjustmentId,
+      });
+    }
+
+    const cost = costResults.find((item) => item.productionOrderId === result.productionOrderId);
+    if (cost && roundMoney(cost.totalCost - cost.baselineTotalCost) !== 0) {
+      const dependencies = [supplementQty > 0 ? supplementKey : bomKey];
+      if (returnQty > 0) dependencies.push(returnKey);
+      specs.push({
+        generationKey: key("production_cost_adjustment"),
+        documentType: "production_cost_adjustment",
+        businessDate,
+        sequenceNo: baseSequence + 80,
+        dependencyKeys: dependencies,
+        title: `${result.productionOrderId}工单成本调整单`,
+        payload: {
+          production_order_id: result.productionOrderId,
+          before_total_cost: cost.baselineTotalCost,
+          after_total_cost: cost.totalCost,
+          adjustment_amount: roundMoney(cost.totalCost - cost.baselineTotalCost),
+          business_date: businessDate,
+        },
+        sourceAdjustmentId: result.adjustmentId,
+      });
+    }
+  });
+
+  return specs.sort((a, b) => a.sequenceNo - b.sequenceNo);
+}
+
 function computeBaseline(model: AdjustedModel, productionOrder: NumberRow): { materialCost: number; processingCost: number; total: number } {
   const order = model.orders.get(str(productionOrder, "order_id"));
   if (!order) return { materialCost: 0, processingCost: 0, total: 0 };
@@ -391,14 +581,14 @@ function computeBaseline(model: AdjustedModel, productionOrder: NumberRow): { ma
 
 function clearRunProjections(database: Database.Database, ledgerId: string) {
   const oldRuns = database.prepare("SELECT id FROM parallel_calculation_runs WHERE ledger_id = ?").all(ledgerId) as Array<{ id: string }>;
+  // Suggestions reference gaps, so dependent suggestions must be removed first.
+  database.prepare("DELETE FROM parallel_suggestions WHERE ledger_id = ?").run(ledgerId);
   if (oldRuns.length > 0) {
     const placeholders = oldRuns.map(() => "?").join(",");
     for (const table of ["parallel_inventory_projections", "parallel_material_allocations", "parallel_cost_projections", "parallel_impacts", "parallel_gaps"]) {
       database.prepare(`DELETE FROM ${table} WHERE run_id IN (${placeholders})`).run(...oldRuns.map((r) => r.id));
     }
   }
-  // parallel_suggestions 无 run_id 列，按 ledger_id 清理（随每次重算重新生成）
-  database.prepare("DELETE FROM parallel_suggestions WHERE ledger_id = ?").run(ledgerId);
   database.prepare("UPDATE parallel_calculation_runs SET stale = 1 WHERE ledger_id = ?").run(ledgerId);
 }
 
@@ -602,6 +792,12 @@ export function runParallelCalculation(
         adjustments,
         model,
         substitutionResults,
+      );
+      syncParallelSimulationDocuments(
+        database,
+        ledgerId,
+        runId,
+        buildSimulationDocumentSpecs(adjustments, substitutionResults, gapByMaterial, costResults, model),
       );
       database.prepare("UPDATE parallel_ledgers SET status = 'ready', engine_version = ?, updated_at = ? WHERE id = ?").run(PARALLEL_ENGINE_VERSION, finishedAt, ledgerId);
       database.prepare("INSERT INTO audit_logs (id, actor_id, action, entity_type, entity_id, message, created_at) VALUES (?, ?, 'parallelLedgerRecalculate', 'parallel_ledger', ?, ?, ?)").run(uid("A"), actorId, ledgerId, `重新测算平行账套 ${ledger.ledger_code}：${JSON.stringify(summary)}`, finishedAt);
