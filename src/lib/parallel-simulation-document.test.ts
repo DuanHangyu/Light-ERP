@@ -166,4 +166,44 @@ describe("平行账套原生历史业务单据链", () => {
     );
     expect(buildParallelSnapshotData(database, "U-SALES").simulationDocuments).toEqual([]);
   });
+
+  it("完成模拟到货和入库后补充平行采购数量，但不改变正式库存", () => {
+    let rows = documents();
+    const arrival = rows.find((row) => row.document_type === "purchase_arrival")!;
+    updateParallelSimulationDocument(database, adminId, ledgerId, arrival.id, {
+      arrival_date: "2026-06-15",
+      actual_qty: 1,
+    });
+    completeParallelSimulationDocument(database, adminId, ledgerId, arrival.id);
+
+    const receipt = rows.find((row) => row.document_type === "purchase_receipt")!;
+    updateParallelSimulationDocument(database, adminId, ledgerId, receipt.id, {
+      receipt_date: "2026-06-15",
+      actual_qty: 1,
+      batch_no: "B-SIM-20260615-001",
+      warehouse_id: "WH-SIM-01",
+      unit_cost: 13000,
+    });
+    const formalStockBefore = (database.prepare("SELECT stock_qty FROM materials WHERE id = 'M-PAL-B'").get() as { stock_qty: number }).stock_qty;
+    completeParallelSimulationDocument(database, adminId, ledgerId, receipt.id);
+    const formalStockAfter = (database.prepare("SELECT stock_qty FROM materials WHERE id = 'M-PAL-B'").get() as { stock_qty: number }).stock_qty;
+    expect(formalStockAfter).toBe(formalStockBefore);
+
+    const projectedPurchase = database.prepare(`
+      SELECT a.adjustment_type, l.target_material_id, l.quantity, l.unit_price
+      FROM parallel_adjustments a
+      JOIN parallel_adjustment_lines l ON l.adjustment_id = a.id
+      WHERE a.ledger_id = ? AND a.reference_type = 'parallel_simulation_document' AND a.reference_id = ?
+    `).get(ledgerId, receipt.id) as { adjustment_type: string; target_material_id: string; quantity: number; unit_price: number };
+    expect(projectedPurchase).toMatchObject({
+      adjustment_type: "purchase_qty",
+      target_material_id: "M-PAL-B",
+      quantity: 1,
+      unit_price: 13000,
+    });
+
+    runParallelCalculation(database, adminId, ledgerId);
+    rows = documents();
+    expect(rows.find((row) => row.document_type === "material_supplement")?.status).toBe("ready");
+  });
 });
