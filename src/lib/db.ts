@@ -395,6 +395,7 @@ function applySchema(database: Database.Database) {
       process_fee REAL NOT NULL,
       margin_rate REAL NOT NULL,
       total_amount REAL NOT NULL,
+      cost_breakdown_json TEXT NOT NULL DEFAULT '[]',
       status TEXT NOT NULL,
       created_at TEXT NOT NULL
     );
@@ -1677,6 +1678,7 @@ function applySchema(database: Database.Database) {
   ensureColumn(database, "production_orders", "row_version", "INTEGER NOT NULL DEFAULT 0");
   ensureColumn(database, "orders", "row_version", "INTEGER NOT NULL DEFAULT 0");
   ensureColumn(database, "quotes", "row_version", "INTEGER NOT NULL DEFAULT 0");
+  ensureColumn(database, "quotes", "cost_breakdown_json", "TEXT NOT NULL DEFAULT '[]'");
   ensureColumn(database, "requisitions", "row_version", "INTEGER NOT NULL DEFAULT 0");
   ensureColumn(database, "requisition_lines", "row_version", "INTEGER NOT NULL DEFAULT 0");
   ensureColumn(database, "finished_batches", "row_version", "INTEGER NOT NULL DEFAULT 0");

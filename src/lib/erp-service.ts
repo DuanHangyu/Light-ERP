@@ -156,6 +156,7 @@ type Task = {
 
 const roleActionMap: Record<string, Role[]> = {
   createQuote: ["sales", "admin"],
+  recalculateQuote: ["sales", "admin"],
   confirmQuote: ["sales", "admin"],
   createOrder: ["sales", "admin"],
   createProductionInstruction: ["assistant", "admin"],
@@ -268,6 +269,7 @@ const roleActionMap: Record<string, Role[]> = {
 
 const actionLabels: Record<string, string> = {
   createQuote: "新建报价",
+  recalculateQuote: "重新计算报价",
   confirmQuote: "确认报价",
   createOrder: "转正式订单",
   createProductionInstruction: "下发生产指令",
@@ -576,7 +578,7 @@ function recalculateMaterialInventory(database: Database.Database, materialId: s
   return next;
 }
 
-function activeBomLines(database: Database.Database, productId = "P-FINISHED") {
+function activeBomLines(database: Database.Database) {
   const rows = database.prepare(`
     SELECT bl.parent_product_id AS parentProductId,
            bl.component_type AS componentType,
@@ -585,9 +587,9 @@ function activeBomLines(database: Database.Database, productId = "P-FINISHED") {
            bl.is_primary AS isPrimary
     FROM bom_lines bl
     JOIN boms b ON b.id = bl.bom_id
-    WHERE b.product_id = ? AND b.status = 'active'
+    WHERE b.status = 'active'
     ORDER BY bl.id
-  `).all(productId) as Array<{
+  `).all() as Array<{
     parentProductId: string;
     componentType: "material" | "product";
     componentId: string;
@@ -6599,6 +6601,9 @@ export function performAction(input: ActionInput) {
       case "confirmQuote":
         confirmQuote(database, input.actorId, mustEntity(input.entityId));
         break;
+      case "recalculateQuote":
+        recalculateQuote(database, input.actorId, mustEntity(input.entityId));
+        break;
       case "createQuote":
         createQuote(database, input.actorId, input.payload);
         break;
@@ -7376,25 +7381,12 @@ function createQuote(database: Database.Database, actorId: string, rawPayload?: 
   `).get(productId) as { id: string; name: string; process_fee: number; default_margin: number } | undefined;
   if (!product) throw new Error("请选择启用状态的产品。");
 
-  const bomLines = activeBomLines(database, product.id);
-  const expansion = expandBom({
-    rootProductId: product.id,
-    quantity: qty,
-    lines: bomLines,
+  const calculation = calculateQuote(database, {
+    productId: product.id,
+    qty,
+    marginRate,
+    processFeePerUnit: Number(product.process_fee ?? 0),
   });
-  if (expansion.materials.length === 0) throw new Error("当前产品没有启用 BOM，无法自动报价。");
-
-  const materialCost = roundMoney(
-    expansion.materials.reduce((sum, line) => {
-      const material = database.prepare("SELECT average_cost FROM materials WHERE id = ?").get(line.materialId) as
-        | { average_cost: number }
-        | undefined;
-      if (!material) throw new Error(`BOM 物料 ${line.materialId} 不存在。`);
-      return sum + line.requiredQty * Number(material.average_cost ?? 0);
-    }, 0),
-  );
-  const processFee = roundMoney(Number(product.process_fee ?? 0) * qty);
-  const totalAmount = roundMoney((materialCost + processFee) * (1 + marginRate));
   const quoteId = uid("Q");
   const quoteNo = serial(database, "quotes", "BJ");
   const version = (
@@ -7406,9 +7398,9 @@ function createQuote(database: Database.Database, actorId: string, rawPayload?: 
   database.prepare(`
     INSERT INTO quotes (
       id, quote_no, customer_id, product_id, qty, version, material_cost,
-      process_fee, margin_rate, total_amount, status, created_at
+      process_fee, margin_rate, total_amount, cost_breakdown_json, status, created_at
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?)
   `).run(
     quoteId,
     quoteNo,
@@ -7416,13 +7408,102 @@ function createQuote(database: Database.Database, actorId: string, rawPayload?: 
     product.id,
     qty,
     version,
-    materialCost,
-    processFee,
+    calculation.materialCost,
+    calculation.processFee,
     marginRate,
-    totalAmount,
+    calculation.totalAmount,
+    JSON.stringify(calculation.costBreakdown),
     now(),
   );
   audit(database, actorId, "createQuote", "quote", quoteId, `新建报价单 ${quoteNo}：${customer.name} / ${product.name}`);
+}
+
+function calculateQuote(
+  database: Database.Database,
+  input: { productId: string; qty: number; marginRate: number; processFeePerUnit: number },
+) {
+  const expansion = expandBom({
+    rootProductId: input.productId,
+    quantity: input.qty,
+    lines: activeBomLines(database),
+  });
+  if (expansion.materials.length === 0) throw new Error("当前产品没有启用 BOM，无法自动报价。");
+
+  const materialStatement = database.prepare(`
+    SELECT material_code, name, unit, average_cost
+    FROM materials
+    WHERE id = ?
+  `);
+  const costBreakdown = expansion.materials.map((line) => {
+    const material = materialStatement.get(line.materialId) as
+      | { material_code: string; name: string; unit: string; average_cost: number }
+      | undefined;
+    if (!material) throw new Error(`BOM 物料 ${line.materialId} 不存在。`);
+    const unitCost = Number(material.average_cost ?? 0);
+    return {
+      materialId: line.materialId,
+      materialCode: material.material_code,
+      materialName: material.name,
+      requiredQty: line.requiredQty,
+      unit: material.unit,
+      unitCost,
+      lineAmount: roundMoney(line.requiredQty * unitCost),
+    };
+  });
+  const materialCost = roundMoney(costBreakdown.reduce((sum, line) => sum + line.lineAmount, 0));
+  const processFee = roundMoney(input.processFeePerUnit * input.qty);
+  const totalAmount = roundMoney((materialCost + processFee) * (1 + input.marginRate));
+  return { materialCost, processFee, totalAmount, costBreakdown };
+}
+
+function recalculateQuote(database: Database.Database, actorId: string, quoteId: string) {
+  const quote = database.prepare(`
+    SELECT q.id, q.quote_no, q.product_id, q.qty, q.margin_rate, q.status,
+           q.material_cost, q.process_fee, q.total_amount, p.process_fee AS process_fee_per_unit
+    FROM quotes q
+    JOIN products p ON p.id = q.product_id
+    WHERE q.id = ?
+  `).get(quoteId) as
+    | {
+        id: string;
+        quote_no: string;
+        product_id: string;
+        qty: number;
+        margin_rate: number;
+        status: string;
+        material_cost: number;
+        process_fee: number;
+        total_amount: number;
+        process_fee_per_unit: number;
+      }
+    | undefined;
+  if (!quote || quote.status !== "draft") throw new Error("只有草稿报价可以重新计算。");
+
+  const calculation = calculateQuote(database, {
+    productId: quote.product_id,
+    qty: Number(quote.qty),
+    marginRate: Number(quote.margin_rate),
+    processFeePerUnit: Number(quote.process_fee_per_unit ?? 0),
+  });
+  database.prepare(`
+    UPDATE quotes
+    SET material_cost = ?, process_fee = ?, total_amount = ?, cost_breakdown_json = ?, row_version = row_version + 1
+    WHERE id = ?
+  `).run(
+    calculation.materialCost,
+    calculation.processFee,
+    calculation.totalAmount,
+    JSON.stringify(calculation.costBreakdown),
+    quote.id,
+  );
+  audit(
+    database,
+    actorId,
+    "recalculateQuote",
+    "quote",
+    quote.id,
+    `重新计算报价单 ${quote.quote_no}：材料成本 ${quote.material_cost} → ${calculation.materialCost}，报价金额 ${quote.total_amount} → ${calculation.totalAmount}`,
+  );
 }
 
 function confirmQuote(database: Database.Database, actorId: string, quoteId: string) {
@@ -7564,7 +7645,7 @@ function scheduleAndGenerateRequisition(
     ORDER BY version DESC
     LIMIT 1
   `).get(production.product_id) as { id: string; version: string } | undefined;
-  const bomLines = activeBomLines(database, production.product_id);
+  const bomLines = activeBomLines(database);
   const expansion = expandBom({
     rootProductId: production.product_id,
     quantity: production.qty,
@@ -10674,7 +10755,7 @@ function generateMrpRequirementRun(
   const demands: Array<{ materialId: string; requiredQty: number; sourceSummary: string }> = [];
   const missingBomProducts: string[] = [];
   for (const production of productions) {
-    const bomLines = activeBomLines(database, production.product_id);
+    const bomLines = activeBomLines(database);
     if (bomLines.length === 0) {
       missingBomProducts.push(`${production.prod_no}/${production.product_name}`);
       continue;
