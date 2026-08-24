@@ -1001,12 +1001,12 @@ export function ErpApp() {
         <aside className="hidden w-64 shrink-0 border-r border-slate-200 bg-[#111827] text-white lg:flex lg:flex-col">
           <div className="border-b border-white/10 px-5 py-5">
             <div className="flex items-center gap-3">
-              <div className="grid h-10 w-10 place-items-center rounded-md bg-blue-600">
-                <Boxes className="h-5 w-5" />
+              <div className="flex h-10 w-[88px] shrink-0 items-center justify-center overflow-hidden rounded-md bg-white px-2 shadow-sm ring-1 ring-white/15">
+                <img src="/atc-logo.png" alt="ATC" className="h-auto w-full" />
               </div>
-              <div>
-                <div className="text-sm font-semibold">Local ERP</div>
-                <div className="text-xs text-slate-400">Production Flow Suite</div>
+              <div className="min-w-0">
+                <div className="text-sm font-semibold">ATC ERP</div>
+                <div className="truncate text-xs text-slate-400">企业资源管理系统</div>
               </div>
             </div>
           </div>
@@ -1027,11 +1027,11 @@ export function ErpApp() {
           <header className="sticky top-0 z-20 border-b border-slate-200 bg-white/95 backdrop-blur">
             <div className="flex min-h-16 flex-col gap-3 px-4 py-3 xl:flex-row xl:items-center xl:justify-between xl:px-6">
               <div className="flex min-w-0 items-center gap-4">
-                <div className="grid h-10 w-10 place-items-center rounded-md bg-blue-50 text-blue-700 lg:hidden">
-                  <Boxes className="h-5 w-5" />
+                <div className="flex h-10 w-[72px] shrink-0 items-center justify-center overflow-hidden rounded-md border border-slate-200 bg-white px-2 shadow-sm lg:hidden">
+                  <img src="/atc-logo.png" alt="ATC" className="h-auto w-full" />
                 </div>
                 <div className="min-w-0">
-                  <h1 className="truncate text-lg font-semibold text-slate-950">Local ERP · 正式账套</h1>
+                  <h1 className="truncate text-lg font-semibold text-slate-950">ATC ERP · 正式账套</h1>
                   <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-slate-500">
                     <CurrentIcon className="h-3.5 w-3.5 text-blue-600" />
                     <span>{currentUser?.name}</span>
@@ -1563,9 +1563,12 @@ function LoginScreen({
     <main className="min-h-screen bg-[#f4f7fb] px-6 py-10 text-slate-900">
       <div className="mx-auto grid min-h-[calc(100vh-5rem)] max-w-6xl items-center gap-8 lg:grid-cols-[1.1fr_420px]">
         <section className="space-y-8">
-          <div className="inline-flex items-center gap-3 rounded-md border border-blue-100 bg-white px-4 py-3 text-sm font-semibold text-blue-700 shadow-sm">
-            <ShieldCheck className="h-5 w-5" />
-            本地私有化生产流转 ERP
+          <div className="inline-flex items-center gap-4 rounded-lg border border-blue-100 bg-white px-5 py-4 shadow-sm">
+            <img src="/atc-logo.png" alt="ATC" className="h-auto w-32" />
+            <div className="border-l border-slate-200 pl-4">
+              <div className="text-sm font-semibold text-slate-950">ATC ERP</div>
+              <div className="mt-1 text-xs font-medium text-blue-700">本地私有化生产流转系统</div>
+            </div>
           </div>
           <div className="max-w-3xl">
             <h1 className="text-4xl font-semibold tracking-normal text-slate-950">企业级账号登录与权限控制</h1>
