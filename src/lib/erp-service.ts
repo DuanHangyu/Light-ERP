@@ -31,6 +31,7 @@ import { runParallelCalculation } from "./parallel-calculation-engine";
 import { confirmParallelSuggestion, previewParallelMerge } from "./parallel-impact-service";
 import { submitParallelMerge, approveParallelMerge, rejectParallelMerge, publishParallelMerge, resumeParallelMergeExecution } from "./parallel-merge-service";
 import { completeParallelSimulationDocument, updateParallelSimulationDocument } from "./parallel-simulation-document-service";
+import { resetParallelDemoData } from "./parallel-demo-reset-service";
 import { authorizeErpSnapshot } from "./erp-access-control";
 import { requireReportExportPermission } from "./erp-report-access";
 
@@ -245,6 +246,7 @@ const roleActionMap: Record<string, Role[]> = {
   updateUserStatus: ["admin"],
   upsertRolePermission: ["admin"],
   resetDemo: ["admin"],
+  resetParallelDemoData: ["admin"],
   reverseBusinessDocument: ["manager", "admin"],
   recordSalesReturn: ["assistant", "warehouse", "admin"],
   recordCustomerRefund: ["finance", "admin"],
@@ -359,6 +361,7 @@ const actionLabels: Record<string, string> = {
   updateUserStatus: "启停用户",
   upsertRolePermission: "配置角色权限",
   resetDemo: "重置演示数据",
+  resetParallelDemoData: "重置平行账套演示数据",
   reverseBusinessDocument: "冲销业务单据",
   recordSalesReturn: "登记销售退货",
   recordCustomerRefund: "登记客户退款",
@@ -6599,6 +6602,10 @@ export function performAction(input: ActionInput) {
   if (input.action === "resetDemo") {
     resetDemoDatabase();
     return { ok: true };
+  }
+
+  if (input.action === "resetParallelDemoData") {
+    return resetParallelDemoData(database, input.actorId, String(input.payload?.confirmation ?? ""));
   }
 
   database.transaction(() => {
