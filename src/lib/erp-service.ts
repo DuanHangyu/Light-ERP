@@ -4755,6 +4755,7 @@ function actionModuleLabel(action: string) {
       "updateUserStatus",
       "upsertRolePermission",
       "resetDemo",
+      "resetParallelDemoData",
       "upsertCustomer",
       "deactivateCustomer",
       "upsertProduct",
@@ -4772,6 +4773,7 @@ function actionRiskLevel(action: string) {
   if (
     [
       "resetDemo",
+      "resetParallelDemoData",
       "resetUserPassword",
       "updateUserStatus",
       "upsertUser",

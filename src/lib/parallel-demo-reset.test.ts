@@ -139,4 +139,37 @@ describe("平行账套客户演示一键重置", () => {
     expect((database.prepare("SELECT COUNT(*) AS count FROM parallel_ledgers").get() as { count: number }).count).toBe(1);
     expect(fs.readdirSync(path.join(dataDir, "backups"))).toEqual([]);
   });
+
+  it("平行来源采购申请已经转正式采购订单时拒绝演示重置", async () => {
+    const { service, database, dataDir, ledgerId } = await loadHarness();
+    const supplierId = (database.prepare("SELECT id FROM suppliers LIMIT 1").get() as { id: string }).id;
+    database.prepare(`
+      INSERT INTO purchase_orders (
+        id, purchase_no, supplier_id, status, total_amount, due_date, created_at
+      ) VALUES (
+        'PO-PARALLEL-CONVERTED', 'CG-PARALLEL-CONVERTED', ?, 'ordered',
+        1200, '2026-08-30', '2026-08-25T00:00:00.000Z'
+      )
+    `).run(supplierId);
+    database.prepare(`
+      INSERT INTO purchase_requisitions (
+        id, requisition_no, source_type, requested_by, source_document_type,
+        source_document_id, status, total_amount, required_date, reason, created_at,
+        approval_note, converted_order_id, converted_at
+      ) VALUES (
+        'PR-PARALLEL-CONVERTED', 'QS-PARALLEL-CONVERTED', 'parallel_merge', 'U-ADMIN',
+        'parallel_ledger', ?, 'ordered', 1200, '2026-08-25', '已经进入正式采购',
+        '2026-08-25T00:00:00.000Z', '', 'PO-PARALLEL-CONVERTED', '2026-08-25T01:00:00.000Z'
+      )
+    `).run(ledgerId);
+
+    expect(() => service.performAction({
+      actorId: "U-ADMIN",
+      action: "resetParallelDemoData",
+      payload: { confirmation: CONFIRMATION },
+    })).toThrow(/已经进入正式业务/);
+    expect((database.prepare("SELECT COUNT(*) AS count FROM parallel_ledgers").get() as { count: number }).count).toBe(1);
+    expect(database.prepare("SELECT id FROM purchase_orders WHERE id = 'PO-PARALLEL-CONVERTED'").get()).toBeTruthy();
+    expect(fs.readdirSync(path.join(dataDir, "backups"))).toEqual([]);
+  });
 });

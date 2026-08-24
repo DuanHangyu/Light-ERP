@@ -469,6 +469,7 @@ const taskIcon: Record<string, typeof ClipboardList> = {
   createStocktake: ClipboardList,
   approveStocktake: CheckCircle2,
   resetDemo: RotateCcw,
+  resetParallelDemoData: RotateCcw,
   downloadBackup: DatabaseBackup,
   downloadFinance: Download,
   downloadLedger: Download,
@@ -932,7 +933,9 @@ export function ErpApp() {
       setError("error" in data ? data.error : "操作失败");
     } else {
       setSnapshot(data);
-      setMessage("操作完成，库存与看板已刷新");
+      setMessage(task.action === "resetParallelDemoData"
+        ? "平行账套演示数据已清空，重置前备份已自动生成"
+        : "操作完成，库存与看板已刷新");
     }
     setBusy(null);
   };
@@ -14616,6 +14619,8 @@ function ParallelLedgerModule({
   const [compareTargetId, setCompareTargetId] = useState<string>("");
   const [editingDocumentId, setEditingDocumentId] = useState<string>("");
   const [documentForm, setDocumentForm] = useState<Record<string, string>>({});
+  const [showDemoReset, setShowDemoReset] = useState(false);
+  const [demoResetConfirmation, setDemoResetConfirmation] = useState("");
   const [memberForm, setMemberForm] = useState({ user_id: "", member_role: "calculator" });
   const [createForm, setCreateForm] = useState({ name: "", purpose: "经营数据测算", base_as_of: new Date().toISOString().slice(0, 10), scope_type: "company", scope_entity_id: "", merge_allowed: 1, seed_demo: false });
   const [adjustForm, setAdjustForm] = useState({
@@ -14707,6 +14712,13 @@ function ParallelLedgerModule({
 
   const loadingDemo = busy === "parallelLedgerCreate-parallel-primary";
 
+  useEffect(() => {
+    if (showDemoReset && parallel.ledgers.length === 0) {
+      setShowDemoReset(false);
+      setDemoResetConfirmation("");
+    }
+  }, [parallel.ledgers.length, showDemoReset]);
+
   if (showCreate) {
     return (
       <div className="space-y-4">
@@ -14735,6 +14747,28 @@ function ParallelLedgerModule({
       <div className="space-y-4">
         <ModuleHeader title="平行账套" subtitle="在不影响日常业务的前提下试算经营数据调整方案" action={{ label: "创建账套", onClick: () => setShowCreate(true) }} />
         {["manager", "admin", "finance"].includes(snapshot.currentUser.role) ? null : <EmptyText text="普通员工不可见平行账套，请联系管理员。" />}
+        {snapshot.currentUser.role === "admin" && parallel.ledgers.length > 0 ? (
+          <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 shadow-sm">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <h3 className="text-sm font-semibold text-amber-950">客户演示结束后恢复空白状态</h3>
+                <p className="mt-1 text-xs leading-5 text-amber-800">当前有 {parallel.ledgers.length} 套平行账、{parallel.simulationDocuments.length} 张模拟单据、{parallel.mergeRequests.length} 个合并申请。重置前会自动备份，只清理平行账来源数据。</p>
+              </div>
+              <button type="button" onClick={() => setShowDemoReset((value) => !value)} className="rounded-md border border-amber-300 bg-white px-3 py-1.5 text-xs font-semibold text-amber-900 hover:bg-amber-100">一键重置平行账演示</button>
+            </div>
+            {showDemoReset ? (
+              <div className="mt-4 rounded-md border border-rose-200 bg-white p-4">
+                <p className="text-sm font-semibold text-rose-800">此操作将删除全部平行账套、模拟单据、合并中间数据以及尚未进入真实业务的平行来源单据。</p>
+                <p className="mt-1 text-xs text-slate-600">正式客户、物料、库存、订单、生产和财务数据不会被清除。请输入“清空平行账”确认。</p>
+                <input value={demoResetConfirmation} onChange={(event) => setDemoResetConfirmation(event.target.value)} placeholder="清空平行账" autoComplete="off" className="mt-3 block h-9 w-full max-w-sm rounded-md border border-slate-300 px-3 text-sm" />
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <button type="button" disabled={demoResetConfirmation !== "清空平行账" || busy?.startsWith("resetParallelDemoData")} onClick={() => void runAction({ action: "resetParallelDemoData", payload: { confirmation: demoResetConfirmation } })} className="rounded-md bg-rose-600 px-3 py-1.5 text-xs font-semibold text-white disabled:cursor-not-allowed disabled:opacity-40">{busy?.startsWith("resetParallelDemoData") ? "正在备份并重置" : "确认备份并重置"}</button>
+                  <button type="button" disabled={busy?.startsWith("resetParallelDemoData")} onClick={() => { setShowDemoReset(false); setDemoResetConfirmation(""); }} className="rounded-md border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-600">取消</button>
+                </div>
+              </div>
+            ) : null}
+          </div>
+        ) : null}
         <DataTable
           title="我的平行账套"
           icon={Calculator}

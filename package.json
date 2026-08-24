@@ -11,6 +11,7 @@
     "test:coverage": "vitest run --coverage",
     "typecheck": "tsc --noEmit",
     "lint": "tsc --noEmit",
+    "demo:reset-parallel": "tsx scripts/reset-parallel-demo.ts",
     "restore": "tsx scripts/restore.ts"
   },
   "dependencies": {
